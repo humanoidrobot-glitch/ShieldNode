@@ -36,8 +36,8 @@ template Uint256ToBitsBE() {
 }
 
 // ── Helper: convert 256 keccak output bits to 4x64-bit limbs ─────────
-// circom-ecdsa expects msghash as 4 limbs: [bits 0-63, 64-127, 128-191, 192-255]
-// where limb[0] is the most significant 64 bits.
+// circom-ecdsa expects msghash as 4 limbs (MSB-first):
+//   out[0] = most significant 64 bits, out[3] = least significant 64 bits.
 template KeccakBitsToLimbs() {
     signal input in[256];   // big-endian bits from keccak
     signal output out[4];   // 4x64-bit limbs, MSB-first
@@ -145,17 +145,11 @@ template BandwidthReceipt(MERKLE_DEPTH) {
 
     component digestKeccak = Keccak(528, 256);
 
-    // First 16 bits: 0x19 = 0b00011001, 0x01 = 0b00000001
-    // 0x19 in big-endian bits:
-    digestKeccak.in[0] <== 0; digestKeccak.in[1] <== 0;
-    digestKeccak.in[2] <== 0; digestKeccak.in[3] <== 1;
-    digestKeccak.in[4] <== 1; digestKeccak.in[5] <== 0;
-    digestKeccak.in[6] <== 0; digestKeccak.in[7] <== 1;
-    // 0x01 in big-endian bits:
-    digestKeccak.in[8]  <== 0; digestKeccak.in[9]  <== 0;
-    digestKeccak.in[10] <== 0; digestKeccak.in[11] <== 0;
-    digestKeccak.in[12] <== 0; digestKeccak.in[13] <== 0;
-    digestKeccak.in[14] <== 0; digestKeccak.in[15] <== 1;
+    // EIP-712 prefix: 0x19 0x01 = 0b00011001 0b00000001 (16 bits, big-endian)
+    var EIP712_PREFIX[16] = [0,0,0,1,1,0,0,1, 0,0,0,0,0,0,0,1];
+    for (var i = 0; i < 16; i++) {
+        digestKeccak.in[i] <== EIP712_PREFIX[i];
+    }
 
     // Bits 16..271: domainSeparator (256 bits)
     for (var i = 0; i < 256; i++) {
