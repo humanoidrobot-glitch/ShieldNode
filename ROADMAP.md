@@ -52,8 +52,9 @@ Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 
 - [x] **Client node scoring** — Weighted algorithm (30% uptime, 25% stake via log scale, 25% price inverse, 20% slash penalty) implemented in both Rust backend and TypeScript frontend
 
+- [x] **Stake-weighted selection** — Weighted random sampling where selection probability is proportional to score. Stake is the dominant factor via sqrt scaling (1 ETH → score 10, 0.1 ETH → score 3.16), making staking a revenue accelerator. Frontend scoring updated to match
+
 ### Remaining
-- [ ] Stake-weighted selection: higher-staked nodes get more session routing (revenue accelerator)
 - [ ] Slashing evidence verification: cryptographic proofs for logging, selective denial, bandwidth fraud
 
 **Success metric:** A slashed node loses stake on Sepolia and is deprioritized by clients.
