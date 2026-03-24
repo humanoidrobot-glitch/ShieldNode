@@ -21,7 +21,6 @@ contract SlashingOracleTest is Test {
     // Actors
     address public deployer    = makeAddr("deployer");
     address public challenger  = makeAddr("challenger");
-    address public operator    = makeAddr("operator");
     address public rando       = makeAddr("rando");
 
     // Client keypair for signing receipts.
@@ -40,15 +39,10 @@ contract SlashingOracleTest is Test {
     bytes32 constant PUB_KEY    = keccak256("pubkey-1");
     string  constant ENDPOINT   = "192.168.1.1:51820";
 
-    // EIP-712 domain separator (computed to match SessionSettlement).
+    // EIP-712 constants — read from deployed contracts in setUp().
     bytes32 internal domainSep;
-
-    bytes32 constant RECEIPT_TYPEHASH = keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    );
-    bytes32 constant ATTESTATION_TYPEHASH = keccak256(
-        "SlashAttestation(bytes32 nodeId,uint256 timestamp,bytes32 descriptionHash)"
-    );
+    bytes32 internal RECEIPT_TYPEHASH;
+    bytes32 internal ATTESTATION_TYPEHASH;
 
     function setUp() public {
         clientAddr = vm.addr(clientPk);
@@ -87,18 +81,10 @@ contract SlashingOracleTest is Test {
         vm.prank(nodeAddr);
         registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
 
-        // Compute the domain separator to match SessionSettlement.
-        domainSep = keccak256(
-            abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
-                keccak256("ShieldNode"),
-                keccak256("1"),
-                block.chainid,
-                address(settlement)
-            )
-        );
+        // Read EIP-712 constants from the deployed contracts.
+        domainSep = oracle.DOMAIN_SEPARATOR();
+        RECEIPT_TYPEHASH = oracle.RECEIPT_TYPEHASH();
+        ATTESTATION_TYPEHASH = oracle.ATTESTATION_TYPEHASH();
     }
 
     // ────────────────────── Helpers ──────────────────────

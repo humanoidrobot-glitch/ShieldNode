@@ -142,25 +142,9 @@ contract SlashingOracle is ISlashingOracle {
         settlement = _settlement;
         owner      = msg.sender;
 
-        // Build the same EIP-712 domain as SessionSettlement so receipt
+        // Read the EIP-712 domain directly from SessionSettlement so receipt
         // signatures produced for settlement are also valid here.
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
-                keccak256("ShieldNode"),
-                keccak256("1"),
-                block.chainid,
-                _settlement
-            )
-        );
-
-        // Safety: verify our computed separator matches the live contract.
-        require(
-            DOMAIN_SEPARATOR == SessionSettlement(_settlement).DOMAIN_SEPARATOR(),
-            "SlashingOracle: domain separator mismatch"
-        );
+        DOMAIN_SEPARATOR = SessionSettlement(_settlement).DOMAIN_SEPARATOR();
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -276,7 +260,6 @@ contract SlashingOracle is ISlashingOracle {
         bytes32 nodeId,
         bytes calldata evidence
     ) internal view {
-        // Split decode into two halves to avoid stack-too-deep.
         (
             uint256 sessionId,
             uint256 cumBytes1, uint256 ts1, bytes memory cSig1, bytes memory nSig1,
