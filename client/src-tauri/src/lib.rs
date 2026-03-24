@@ -1,7 +1,10 @@
+mod aead;
 mod chain;
 mod circuit;
 mod config;
+mod hop_codec;
 mod receipts;
+mod sphinx;
 mod tunnel;
 mod wallet;
 
@@ -111,6 +114,9 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
             tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key)?;
         }
+
+        // Register session keys on each relay node via UDP control messages.
+        tunnel::register_sessions(&circuit_state).await?;
 
         let entry_id = selected[0].node_id.clone();
 
@@ -277,6 +283,39 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
     }
 }
 
+/// Send a raw IP packet through the 3-hop Sphinx circuit.
+///
+/// The packet is wrapped in three Sphinx onion layers and sent to the entry
+/// node's relay port over UDP.  This is a test command — full system-wide
+/// traffic capture (TUN integration) comes later.
+#[tauri::command]
+async fn send_packet(
+    state: State<'_, AppState>,
+    packet: Vec<u8>,
+) -> Result<String, String> {
+    let circuit_state = {
+        let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+        circ.clone().ok_or_else(|| "no active circuit".to_string())?
+    };
+
+    // Build the 3-hop Sphinx route.
+    let route = circuit_state.build_sphinx_route();
+
+    // Create the onion packet (3 layers of encryption).
+    let sphinx_pkt = sphinx::SphinxPacket::create(&route, &packet)?;
+    let sphinx_bytes = sphinx_pkt.to_bytes();
+
+    // Send to entry node's relay port with entry hop's session_id.
+    tunnel::send_sphinx_packet(
+        &circuit_state.entry.endpoint,
+        circuit_state.entry.session_id,
+        &sphinx_bytes,
+    )
+    .await?;
+
+    Ok(format!("sent {} bytes through circuit", sphinx_bytes.len()))
+}
+
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -393,6 +432,7 @@ pub fn run() {
             get_session,
             get_circuit,
             get_gas_price,
+            send_packet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ShieldNode client");

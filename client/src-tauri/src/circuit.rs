@@ -1,8 +1,11 @@
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::hop_codec;
 
 /// Metadata describing a single ShieldNode relay / exit node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +27,8 @@ pub struct CircuitHop {
     #[serde(skip_serializing)]
     pub session_key: [u8; 32],
     pub hop_index: u64,
+    /// Random session identifier for the relay protocol.
+    pub session_id: u64,
 }
 
 /// The full 3-hop circuit state with per-hop session keys.
@@ -51,6 +56,9 @@ pub struct CircuitInfo {
     pub exit: CircuitHopInfo,
 }
 
+/// Default relay port offset from the WireGuard port.
+const RELAY_PORT: u16 = 51821;
+
 impl CircuitState {
     /// Return a frontend-safe view that strips session keys.
     pub fn to_info(&self) -> CircuitInfo {
@@ -71,6 +79,32 @@ impl CircuitState {
                 hop_index: self.exit.hop_index,
             },
         }
+    }
+
+    /// Build the route for `SphinxPacket::create()`.
+    ///
+    /// Returns a list of `(next_hop_encoding, session_key)` pairs:
+    /// - Entry hop: next_hop encodes the relay node's IP + relay port
+    /// - Relay hop: next_hop encodes the exit node's IP + relay port
+    /// - Exit hop:  next_hop is `[0u8; 32]` (exit sentinel)
+    pub fn build_sphinx_route(&self) -> Vec<([u8; 32], [u8; 32])> {
+        let hops = [&self.entry, &self.relay, &self.exit];
+        let mut route = Vec::with_capacity(3);
+
+        for (i, hop) in hops.iter().enumerate() {
+            let next_hop = if i + 1 < hops.len() {
+                // Point to the next hop's relay port.
+                hop_codec::endpoint_to_next_hop(&hops[i + 1].endpoint, RELAY_PORT)
+                    .unwrap_or([0u8; 32])
+            } else {
+                // Exit sentinel — all zeros.
+                [0u8; 32]
+            };
+
+            route.push((next_hop, hop.session_key));
+        }
+
+        route
     }
 }
 
@@ -94,11 +128,14 @@ pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
         hk.expand(b"session-key", &mut session_key)
             .map_err(|e| format!("HKDF expand failed for hop {i}: {e}"))?;
 
+        let session_id: u64 = OsRng.gen();
+
         hops.push(CircuitHop {
             node_id: node.node_id.clone(),
             endpoint: node.endpoint.clone(),
             session_key,
             hop_index: i as u64,
+            session_id,
         });
     }
 

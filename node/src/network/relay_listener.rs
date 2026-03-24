@@ -10,17 +10,46 @@ use crate::crypto::sphinx::SphinxPacket;
 use crate::metrics::bandwidth::BandwidthTracker;
 use crate::tunnel::tun_device::TunDevice;
 
-use super::relay::RelayService;
+use super::hop_codec;
+use super::relay::{RelayService, SessionState};
 
-/// Minimum packet size: 8-byte session_id + at least 36 bytes for a serialized SphinxPacket.
-const MIN_PACKET_SIZE: usize = 8 + 36;
+/// Minimum packet size: 8-byte session_id + at least 1 byte of payload.
+const MIN_PACKET_SIZE: usize = 8 + 1;
+
+/// Minimum size for a relay data packet (session_id != 0):
+/// 8-byte session_id + at least 36 bytes for a serialized SphinxPacket.
+const MIN_DATA_PACKET_SIZE: usize = 8 + 36;
+
+/// Default relay port used when the next-hop encoding has port == 0.
+const DEFAULT_RELAY_PORT: u16 = 51821;
+
+// ── control message types ─────────────────────────────────────────────
+
+const MSG_SESSION_SETUP: u8 = 0x01;
+const MSG_SESSION_TEARDOWN: u8 = 0x02;
+
+/// Expected payload length for SESSION_SETUP after the message-type byte:
+/// 8 (session_id) + 32 (session_key) + 8 (hop_index) = 48
+const SESSION_SETUP_PAYLOAD_LEN: usize = 8 + 32 + 8;
+
+/// Expected payload length for SESSION_TEARDOWN after the message-type byte:
+/// 8 (session_id) = 8
+const SESSION_TEARDOWN_PAYLOAD_LEN: usize = 8;
+
+// ── ACK bytes ─────────────────────────────────────────────────────────
+
+const ACK_SUCCESS: u8 = 0x01;
+const ACK_FAILURE: u8 = 0x00;
 
 /// A dedicated UDP listener for multi-hop relay traffic.
 ///
 /// Relay packets use a simple framing: `[8-byte session_id][SphinxPacket bytes]`.
 /// Each node listens on a relay port (default 51821, one above the WireGuard port).
 ///
-/// When a packet arrives the listener:
+/// When `session_id == 0` the remaining bytes are interpreted as a **control
+/// message** (session setup / teardown) rather than a Sphinx packet.
+///
+/// When a data packet arrives the listener:
 /// 1. Parses the 8-byte session_id.
 /// 2. Deserializes the SphinxPacket from the remaining bytes.
 /// 3. Peels one onion layer via `RelayService::forward_packet()`.
@@ -79,9 +108,34 @@ impl RelayListener {
 
             let packet = &buf[..n];
 
-            // Parse framing: [8-byte session_id][sphinx_packet_bytes]
+            // Parse framing: [8-byte session_id][remaining bytes]
             let session_id =
                 u64::from_be_bytes(packet[..8].try_into().expect("slice is exactly 8 bytes"));
+
+            // ── control channel (session_id == 0) ─────────────────────
+            if session_id == 0 {
+                let ack = self.handle_control_message(&packet[8..], peer_addr).await;
+                if let Err(e) = self.socket.send_to(&[ack], peer_addr).await {
+                    warn!(
+                        peer = %peer_addr,
+                        error = %e,
+                        "failed to send control ACK"
+                    );
+                }
+                continue;
+            }
+
+            // ── data channel ──────────────────────────────────────────
+
+            if n < MIN_DATA_PACKET_SIZE {
+                debug!(
+                    peer = %peer_addr,
+                    bytes = n,
+                    "relay data packet too short, dropping"
+                );
+                continue;
+            }
+
             let sphinx_bytes = &packet[8..];
 
             let sphinx_packet = match SphinxPacket::from_bytes(sphinx_bytes) {
@@ -121,7 +175,7 @@ impl RelayListener {
             };
 
             // Check if this is the exit (next_hop == all zeros)
-            if next_hop == [0u8; 32] {
+            if hop_codec::is_exit_hop(&next_hop) {
                 // Exit node: write decrypted payload to TUN
                 if let Some(ref tun) = self.tun {
                     if let Err(e) = tun.write_packet(&inner_packet.payload).await {
@@ -159,29 +213,112 @@ impl RelayListener {
         }
     }
 
+    /// Parse and execute a control message received on session_id 0.
+    ///
+    /// Returns the 1-byte ACK value to send back to the peer:
+    /// `0x01` on success, `0x00` on failure.
+    async fn handle_control_message(&self, data: &[u8], peer_addr: SocketAddr) -> u8 {
+        if data.is_empty() {
+            warn!(peer = %peer_addr, "control message has no type byte");
+            return ACK_FAILURE;
+        }
+
+        let msg_type = data[0];
+        let payload = &data[1..];
+
+        match msg_type {
+            MSG_SESSION_SETUP => {
+                if payload.len() < SESSION_SETUP_PAYLOAD_LEN {
+                    warn!(
+                        peer = %peer_addr,
+                        expected = SESSION_SETUP_PAYLOAD_LEN,
+                        got = payload.len(),
+                        "SESSION_SETUP payload too short"
+                    );
+                    return ACK_FAILURE;
+                }
+
+                let real_session_id = u64::from_be_bytes(
+                    payload[..8].try_into().expect("slice is exactly 8 bytes"),
+                );
+                let mut session_key = [0u8; 32];
+                session_key.copy_from_slice(&payload[8..40]);
+                let hop_index = u64::from_le_bytes(
+                    payload[40..48].try_into().expect("slice is exactly 8 bytes"),
+                );
+
+                let state = SessionState {
+                    session_id: real_session_id,
+                    session_key,
+                    hop_index,
+                };
+
+                {
+                    let mut svc = self.relay_service.lock().await;
+                    svc.add_session(state);
+                }
+
+                info!(
+                    peer = %peer_addr,
+                    session_id = real_session_id,
+                    hop_index,
+                    "SESSION_SETUP accepted"
+                );
+                ACK_SUCCESS
+            }
+
+            MSG_SESSION_TEARDOWN => {
+                if payload.len() < SESSION_TEARDOWN_PAYLOAD_LEN {
+                    warn!(
+                        peer = %peer_addr,
+                        expected = SESSION_TEARDOWN_PAYLOAD_LEN,
+                        got = payload.len(),
+                        "SESSION_TEARDOWN payload too short"
+                    );
+                    return ACK_FAILURE;
+                }
+
+                let target_session_id = u64::from_be_bytes(
+                    payload[..8].try_into().expect("slice is exactly 8 bytes"),
+                );
+
+                {
+                    let mut svc = self.relay_service.lock().await;
+                    svc.remove_session(target_session_id);
+                }
+
+                info!(
+                    peer = %peer_addr,
+                    session_id = target_session_id,
+                    "SESSION_TEARDOWN accepted"
+                );
+                ACK_SUCCESS
+            }
+
+            other => {
+                warn!(
+                    peer = %peer_addr,
+                    msg_type = other,
+                    "unknown control message type"
+                );
+                ACK_FAILURE
+            }
+        }
+    }
+
     /// Serialize and send the inner packet to the next relay hop.
     ///
-    /// The next_hop is interpreted as a 32-byte identifier.  The first 4
-    /// bytes are treated as an IPv4 address and the next 2 bytes as the
-    /// relay port (big-endian).  If the port bytes are zero the default
-    /// relay port (51821) is used.
+    /// The next_hop is decoded via [`hop_codec::decode_next_hop`] — the
+    /// first 4 bytes are the IPv4 address, the next 2 bytes are the relay
+    /// port (big-endian, with 0 falling back to the default relay port).
     async fn forward_to_next_hop(
         &self,
         next_hop: &[u8; 32],
         session_id: u64,
         inner_packet: &SphinxPacket,
     ) -> Result<()> {
-        let ip = std::net::Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]);
-
-        // Reject reserved/unroutable addresses.
-        if ip.is_unspecified() || ip.is_loopback() || ip.is_broadcast() || ip.is_multicast() {
-            anyhow::bail!("next-hop IP {ip} is a reserved address");
-        }
-
-        let port = {
-            let p = u16::from_be_bytes([next_hop[4], next_hop[5]]);
-            if p == 0 { 51821 } else { p }
-        };
+        let (ip, port) = hop_codec::decode_next_hop(next_hop, DEFAULT_RELAY_PORT)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let dest = SocketAddr::from((ip, port));
 
