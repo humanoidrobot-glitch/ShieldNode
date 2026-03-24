@@ -1,6 +1,6 @@
 # ShieldNode
 
-A decentralized, cryptoeconomically-secured VPN built natively on Ethereum L1. No L2 compromises, no multisig exit risk, no trust assumptions beyond Ethereum consensus itself.
+ShieldNode is a decentralized VPN built natively on Ethereum L1, where independent node operators stake ETH to run encrypted relay infrastructure and earn revenue from bandwidth served — with misbehavior punished via on-chain slashing. Traffic routes through 3-hop onion-encrypted circuits using Sphinx packets so no single node ever sees both source and destination, and session settlements use zero-knowledge proofs to pay nodes without revealing session metadata, node identities, or usage patterns on-chain. The entire cryptographic stack is being hardened against quantum computing threats ahead of [Ethereum's own PQ timeline](https://pq.ethereum.org/), starting with a hybrid X25519 + ML-KEM-768 key exchange that protects circuit routes from harvest-now-decrypt-later attacks, and ML-DSA post-quantum signatures verified inside ZK circuits where their large size carries no gas penalty. No L2, no token, no trust assumptions beyond Ethereum consensus itself — privacy enforced by math, not policy.
 
 ## Why Ethereum L1?
 
