@@ -6,8 +6,21 @@ import {INodeRegistry}   from "./interfaces/INodeRegistry.sol";
 import {NodeRegistry}    from "./NodeRegistry.sol";
 
 /// @title SlashingOracle
-/// @notice Manages slash proposals, grace periods, progressive penalties, and
-///         distributes slashed stake between the challenger and the treasury.
+/// @notice Manages slash proposals with on-chain evidence verification,
+///         grace periods, progressive penalties, and distributes slashed
+///         stake between the challenger and the treasury.
+///
+///  Evidence verification by slash reason:
+///
+///  - **BandwidthFraud**: Two EIP-712 dual-signed receipts for the same
+///    session with different cumulative byte counts.  The contract verifies
+///    both sets of signatures (client + node) and confirms the byte counts
+///    diverge.
+///
+///  - **ProvableLogging / SelectiveDenial**: A challenger-signed attestation
+///    containing the target nodeId and a description hash.  The contract
+///    verifies the challenger's ECDSA signature.  This is a "trusted
+///    challenger" model — decentralised challenge bonds come in Phase 6.
 contract SlashingOracle is ISlashingOracle {
     // ──────────────────────────────────────────────────────────────
     //  Constants
@@ -25,6 +38,22 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Reward split: 50 % to challenger, 50 % to treasury.
     uint256 private constant CHALLENGER_SHARE = 50;
 
+    // ── EIP-712 (mirrors SessionSettlement) ──────────────────────
+
+    bytes32 public constant RECEIPT_TYPEHASH = keccak256(
+        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
+    );
+
+    /// @notice EIP-712 domain separator (computed in constructor to match
+    ///         the SessionSettlement contract on the same chain).
+    bytes32 public immutable DOMAIN_SEPARATOR;
+
+    // ── Attestation EIP-712 ──────────────────────────────────────
+
+    bytes32 public constant ATTESTATION_TYPEHASH = keccak256(
+        "SlashAttestation(bytes32 nodeId,uint256 timestamp,bytes32 descriptionHash)"
+    );
+
     // ──────────────────────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────────────────────
@@ -34,6 +63,10 @@ contract SlashingOracle is ISlashingOracle {
 
     /// @notice Treasury that receives its share of slashed funds.
     address public immutable treasury;
+
+    /// @notice SessionSettlement contract — used to look up session info
+    ///         for BandwidthFraud verification.
+    address public immutable settlement;
 
     // ──────────────────────────────────────────────────────────────
     //  State
@@ -65,16 +98,28 @@ contract SlashingOracle is ISlashingOracle {
     event ChallengerUpdated(address indexed challenger, bool authorised);
 
     // ──────────────────────────────────────────────────────────────
+    //  Errors
+    // ──────────────────────────────────────────────────────────────
+
+    error NotOwner();
+    error NotChallenger();
+    error BadReason();
+    error InvalidEvidence(string detail);
+    error UnknownProposal();
+    error AlreadyExecuted();
+    error GracePeriodActive();
+
+    // ──────────────────────────────────────────────────────────────
     //  Modifiers
     // ──────────────────────────────────────────────────────────────
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "SlashingOracle: not owner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
     modifier onlyChallenger() {
-        require(challengers[msg.sender], "SlashingOracle: not challenger");
+        if (!challengers[msg.sender]) revert NotChallenger();
         _;
     }
 
@@ -82,14 +127,32 @@ contract SlashingOracle is ISlashingOracle {
     //  Constructor
     // ──────────────────────────────────────────────────────────────
 
-    /// @param _registry Address of the NodeRegistry.
-    /// @param _treasury Address of the Treasury.
-    constructor(address _registry, address _treasury) {
+    /// @param _registry   Address of the NodeRegistry.
+    /// @param _treasury   Address of the Treasury.
+    /// @param _settlement Address of the SessionSettlement contract (for
+    ///                    BandwidthFraud EIP-712 domain matching).
+    constructor(address _registry, address _treasury, address _settlement) {
         require(_registry != address(0), "SlashingOracle: zero registry");
         require(_treasury != address(0), "SlashingOracle: zero treasury");
-        registry = NodeRegistry(_registry);
-        treasury = _treasury;
-        owner = msg.sender;
+        require(_settlement != address(0), "SlashingOracle: zero settlement");
+        registry   = NodeRegistry(_registry);
+        treasury   = _treasury;
+        settlement = _settlement;
+        owner      = msg.sender;
+
+        // Build the same EIP-712 domain as SessionSettlement so receipt
+        // signatures produced for settlement are also valid here.
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256("ShieldNode"),
+                keccak256("1"),
+                block.chainid,
+                _settlement
+            )
+        );
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -97,8 +160,6 @@ contract SlashingOracle is ISlashingOracle {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Add or remove an authorised challenger.
-    /// @param challenger The address to update.
-    /// @param authorised Whether the address is authorised.
     function setChallenger(address challenger, bool authorised) external onlyOwner {
         challengers[challenger] = authorised;
         emit ChallengerUpdated(challenger, authorised);
@@ -114,31 +175,38 @@ contract SlashingOracle is ISlashingOracle {
         uint8 reason,
         bytes calldata evidence
     ) external override onlyChallenger {
-        require(reason <= uint8(SlashReason.BandwidthFraud), "SlashingOracle: bad reason");
+        if (reason > uint8(SlashReason.BandwidthFraud)) revert BadReason();
+
+        SlashReason sr = SlashReason(reason);
+
+        // ── On-chain evidence verification ───────────────────────
+        if (sr == SlashReason.BandwidthFraud) {
+            _verifyBandwidthFraud(nodeId, evidence);
+        } else {
+            // ProvableLogging or SelectiveDenial — trusted challenger attestation.
+            _verifyChallengerAttestation(nodeId, evidence, msg.sender);
+        }
 
         uint256 proposalId = nextProposalId++;
 
         proposals[proposalId] = Proposal({
             nodeId:     nodeId,
-            reason:     SlashReason(reason),
+            reason:     sr,
             evidence:   evidence,
             challenger: msg.sender,
             createdAt:  block.timestamp,
             executed:   false
         });
 
-        emit SlashProposed(proposalId, nodeId, msg.sender, SlashReason(reason));
+        emit SlashProposed(proposalId, nodeId, msg.sender, sr);
     }
 
     /// @inheritdoc ISlashingOracle
     function executeSlash(uint256 proposalId) external override {
         Proposal storage p = proposals[proposalId];
-        require(p.createdAt != 0, "SlashingOracle: unknown proposal");
-        require(!p.executed, "SlashingOracle: already executed");
-        require(
-            block.timestamp >= p.createdAt + GRACE_PERIOD,
-            "SlashingOracle: grace period"
-        );
+        if (p.createdAt == 0) revert UnknownProposal();
+        if (p.executed) revert AlreadyExecuted();
+        if (block.timestamp < p.createdAt + GRACE_PERIOD) revert GracePeriodActive();
 
         p.executed = true;
 
@@ -181,4 +249,150 @@ contract SlashingOracle is ISlashingOracle {
 
     /// @notice Accept ETH from the registry during slashing.
     receive() external payable {}
+
+    // ──────────────────────────────────────────────────────────────
+    //  Evidence verification — internal
+    // ──────────────────────────────────────────────────────────────
+
+    /// @dev Verify BandwidthFraud evidence: two conflicting dual-signed
+    ///      receipts for the same session.
+    ///
+    ///  Evidence layout:
+    ///  ```
+    ///  abi.encode(
+    ///      uint256 sessionId,
+    ///      uint256 bytes1,  uint256 ts1,  bytes clientSig1, bytes nodeSig1,
+    ///      uint256 bytes2,  uint256 ts2,  bytes clientSig2, bytes nodeSig2
+    ///  )
+    ///  ```
+    function _verifyBandwidthFraud(
+        bytes32 nodeId,
+        bytes calldata evidence
+    ) internal view {
+        // Split decode into two halves to avoid stack-too-deep.
+        (
+            uint256 sessionId,
+            uint256 cumBytes1, uint256 ts1, bytes memory cSig1, bytes memory nSig1,
+            uint256 cumBytes2, uint256 ts2, bytes memory cSig2, bytes memory nSig2
+        ) = abi.decode(evidence, (uint256, uint256, uint256, bytes, bytes, uint256, uint256, bytes, bytes));
+
+        // The two receipts must report different byte counts.
+        if (cumBytes1 == cumBytes2) {
+            revert InvalidEvidence("byte counts match");
+        }
+
+        // Verify both receipts and check signers match + belong to accused node.
+        _verifyFraudSigners(
+            nodeId, sessionId,
+            cumBytes1, ts1, cSig1, nSig1,
+            cumBytes2, ts2, cSig2, nSig2
+        );
+    }
+
+    /// @dev Second half of fraud verification — separated to avoid stack-too-deep.
+    function _verifyFraudSigners(
+        bytes32 nodeId,
+        uint256 sessionId,
+        uint256 cumBytes1, uint256 ts1, bytes memory cSig1, bytes memory nSig1,
+        uint256 cumBytes2, uint256 ts2, bytes memory cSig2, bytes memory nSig2
+    ) internal view {
+        bytes32 digest1 = _receiptDigest(sessionId, cumBytes1, ts1);
+        address client1 = _recoverSigner(digest1, cSig1);
+        address node1   = _recoverSigner(digest1, nSig1);
+
+        bytes32 digest2 = _receiptDigest(sessionId, cumBytes2, ts2);
+        address client2 = _recoverSigner(digest2, cSig2);
+        address node2   = _recoverSigner(digest2, nSig2);
+
+        if (client1 != client2) revert InvalidEvidence("client signers differ");
+        if (node1 != node2)     revert InvalidEvidence("node signers differ");
+
+        INodeRegistry.NodeInfo memory info = registry.getNode(nodeId);
+        if (node1 != info.owner) revert InvalidEvidence("node signer is not accused node owner");
+    }
+
+    /// @dev Verify a challenger-signed attestation for ProvableLogging or
+    ///      SelectiveDenial.
+    ///
+    ///  Evidence layout:
+    ///  ```
+    ///  abi.encode(
+    ///      bytes32 nodeId,
+    ///      uint256 timestamp,
+    ///      bytes32 descriptionHash,
+    ///      bytes   challengerSig
+    ///  )
+    ///  ```
+    function _verifyChallengerAttestation(
+        bytes32 nodeId,
+        bytes calldata evidence,
+        address expectedChallenger
+    ) internal view {
+        (
+            bytes32 attestedNodeId,
+            uint256 timestamp,
+            bytes32 descriptionHash,
+            bytes memory challengerSig
+        ) = abi.decode(evidence, (bytes32, uint256, bytes32, bytes));
+
+        // The attestation must target the same node as the proposal.
+        if (attestedNodeId != nodeId) {
+            revert InvalidEvidence("attestation nodeId mismatch");
+        }
+
+        // Attestation must not be from the future.
+        if (timestamp > block.timestamp) {
+            revert InvalidEvidence("attestation timestamp in the future");
+        }
+
+        // Verify the challenger's signature over the attestation.
+        bytes32 structHash = keccak256(
+            abi.encode(ATTESTATION_TYPEHASH, attestedNodeId, timestamp, descriptionHash)
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
+        );
+
+        address signer = _recoverSigner(digest, challengerSig);
+        if (signer != expectedChallenger) {
+            revert InvalidEvidence("attestation signer mismatch");
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  EIP-712 helpers
+    // ──────────────────────────────────────────────────────────────
+
+    /// @dev Compute the EIP-712 digest for a BandwidthReceipt.
+    function _receiptDigest(
+        uint256 sessionId,
+        uint256 cumulativeBytes,
+        uint256 timestamp
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(RECEIPT_TYPEHASH, sessionId, cumulativeBytes, timestamp)
+        );
+        return keccak256(
+            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
+        );
+    }
+
+    /// @dev Recover the signer of a 65-byte ECDSA signature.
+    function _recoverSigner(
+        bytes32 digest,
+        bytes memory sig
+    ) internal pure returns (address) {
+        if (sig.length != 65) revert InvalidEvidence("bad sig length");
+        bytes32 r;
+        bytes32 s_;
+        uint8 v;
+        assembly {
+            r  := mload(add(sig, 32))
+            s_ := mload(add(sig, 64))
+            v  := byte(0, mload(add(sig, 96)))
+        }
+        address signer = ecrecover(digest, v, r, s_);
+        if (signer == address(0)) revert InvalidEvidence("invalid signature");
+        return signer;
+    }
 }
