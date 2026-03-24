@@ -36,7 +36,7 @@ function Collapsible({ title, children }: { title: string; children: ReactNode }
 }
 
 function App() {
-  const { status, error: connectError, connect, disconnect } = useCircuit();
+  const { status, error: connectError, circuit, connect, disconnect } = useCircuit();
   const { nodes, loading: nodesLoading, error: nodesError, refresh } = useNodes();
   const { session, loading: sessionLoading } = useSession(status);
   const { gasPrice, level: gasLevel } = useGas();
@@ -72,7 +72,7 @@ function App() {
             )}
           </section>
 
-          <CircuitMap status={status} nodes={[]} />
+          <CircuitMap status={status} circuit={circuit} />
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <SessionCost session={session} loading={sessionLoading} />

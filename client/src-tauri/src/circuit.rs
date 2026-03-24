@@ -1,4 +1,8 @@
+use hkdf::Hkdf;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 /// Metadata describing a single ShieldNode relay / exit node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +14,99 @@ pub struct NodeInfo {
     pub uptime: f64,
     pub price_per_byte: u64,
     pub slash_count: u32,
+}
+
+/// A single hop in a 3-hop circuit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitHop {
+    pub node_id: String,
+    pub endpoint: String,
+    #[serde(skip_serializing)]
+    pub session_key: [u8; 32],
+    pub hop_index: u64,
+}
+
+/// The full 3-hop circuit state with per-hop session keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitState {
+    pub entry: CircuitHop,
+    pub relay: CircuitHop,
+    pub exit: CircuitHop,
+}
+
+/// A sanitised view of a circuit hop for the frontend (no session key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CircuitHopInfo {
+    pub node_id: String,
+    pub endpoint: String,
+    pub hop_index: u64,
+}
+
+/// A sanitised view of the circuit for the frontend (no session keys).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitInfo {
+    pub entry: CircuitHopInfo,
+    pub relay: CircuitHopInfo,
+    pub exit: CircuitHopInfo,
+}
+
+impl CircuitState {
+    /// Return a frontend-safe view that strips session keys.
+    pub fn to_info(&self) -> CircuitInfo {
+        CircuitInfo {
+            entry: CircuitHopInfo {
+                node_id: self.entry.node_id.clone(),
+                endpoint: self.entry.endpoint.clone(),
+                hop_index: self.entry.hop_index,
+            },
+            relay: CircuitHopInfo {
+                node_id: self.relay.node_id.clone(),
+                endpoint: self.relay.endpoint.clone(),
+                hop_index: self.relay.hop_index,
+            },
+            exit: CircuitHopInfo {
+                node_id: self.exit.node_id.clone(),
+                endpoint: self.exit.endpoint.clone(),
+                hop_index: self.exit.hop_index,
+            },
+        }
+    }
+}
+
+/// Build a 3-hop circuit from the given nodes, deriving a placeholder
+/// session key for each hop via ephemeral X25519 + HKDF.
+///
+/// Real Noise NK handshakes will replace this in Phase 2+.
+pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
+    let mut hops: Vec<CircuitHop> = Vec::with_capacity(3);
+
+    for (i, node) in nodes.iter().enumerate() {
+        let eph_secret = StaticSecret::random_from_rng(OsRng);
+        let peer_public = PublicKey::from(node.public_key);
+
+        // Perform a single DH: eph_secret * peer_public
+        let shared = eph_secret.diffie_hellman(&peer_public);
+
+        // Derive a 32-byte session key via HKDF-SHA256
+        let hk = Hkdf::<Sha256>::new(Some(b"ShieldNode-circuit-v1"), shared.as_bytes());
+        let mut session_key = [0u8; 32];
+        hk.expand(b"session-key", &mut session_key)
+            .map_err(|e| format!("HKDF expand failed for hop {i}: {e}"))?;
+
+        hops.push(CircuitHop {
+            node_id: node.node_id.clone(),
+            endpoint: node.endpoint.clone(),
+            session_key,
+            hop_index: i as u64,
+        });
+    }
+
+    Ok(CircuitState {
+        entry: hops.remove(0),
+        relay: hops.remove(0),
+        exit: hops.remove(0),
+    })
 }
 
 /// Score a node for selection.
@@ -133,5 +230,38 @@ mod tests {
         assert_eq!(circuit.len(), 3);
         // Best node should be entry
         assert_eq!(circuit[0].node_id, "b");
+    }
+
+    #[test]
+    fn build_circuit_produces_unique_keys() {
+        let nodes = [
+            make_node("entry", 100_000, 0.99, 10, 0),
+            make_node("relay", 75_000, 0.98, 15, 0),
+            make_node("exit", 50_000, 0.96, 8, 0),
+        ];
+        let state = build_circuit(&nodes).unwrap();
+        assert_eq!(state.entry.hop_index, 0);
+        assert_eq!(state.relay.hop_index, 1);
+        assert_eq!(state.exit.hop_index, 2);
+        // Session keys must differ (overwhelmingly likely with random ephemerals)
+        assert_ne!(state.entry.session_key, state.relay.session_key);
+        assert_ne!(state.relay.session_key, state.exit.session_key);
+    }
+
+    #[test]
+    fn circuit_info_strips_keys() {
+        let nodes = [
+            make_node("entry", 100_000, 0.99, 10, 0),
+            make_node("relay", 75_000, 0.98, 15, 0),
+            make_node("exit", 50_000, 0.96, 8, 0),
+        ];
+        let state = build_circuit(&nodes).unwrap();
+        let info = state.to_info();
+        assert_eq!(info.entry.node_id, "entry");
+        assert_eq!(info.relay.node_id, "relay");
+        assert_eq!(info.exit.node_id, "exit");
+        // Serialised info should not contain session_key field
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("session_key"));
     }
 }

@@ -25,12 +25,7 @@ impl BandwidthTracker {
         Self::default()
     }
 
-    pub fn record_bytes(
-        &mut self,
-        session_id: u64,
-        bytes_in: u64,
-        bytes_out: u64,
-    ) {
+    pub fn record_bytes(&mut self, session_id: u64, bytes_in: u64, bytes_out: u64) {
         self.total_in += bytes_in;
         self.total_out += bytes_out;
 

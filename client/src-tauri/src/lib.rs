@@ -13,7 +13,7 @@ use tauri::State;
 use tracing::{info, warn};
 
 use chain::ChainReader;
-use circuit::NodeInfo;
+use circuit::{CircuitInfo, CircuitState, NodeInfo};
 use tunnel::TunnelManager;
 use wallet::WalletConfig;
 
@@ -26,6 +26,8 @@ pub enum ConnectionState {
         node_id: String,
         session_id: String,
         bytes_used: u64,
+        /// Number of hops in the active circuit (1 = single, 3 = multi-hop).
+        hop_count: u32,
     },
 }
 
@@ -41,6 +43,7 @@ const SETTLEMENT_ADDRESS: &str = "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959";
 
 pub struct AppState {
     pub connection: Mutex<ConnectionState>,
+    pub circuit: Mutex<Option<CircuitState>>,
     pub tunnel: Mutex<TunnelManager>,
     pub config: Mutex<config::ClientConfig>,
     pub chain_reader: ChainReader,
@@ -54,6 +57,7 @@ impl Default for AppState {
         Self {
             chain_reader: ChainReader::new(cfg.rpc_url.clone(), registry, settlement),
             connection: Mutex::new(ConnectionState::default()),
+            circuit: Mutex::new(None),
             tunnel: Mutex::new(TunnelManager::new()),
             config: Mutex::new(cfg),
         }
@@ -83,26 +87,65 @@ pub struct SessionInfo {
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     let nodes = fetch_nodes(&state).await;
-    let node = circuit::select_single_node(&nodes)?;
 
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connecting;
     }
 
-    info!(node_id = %node.node_id, endpoint = %node.endpoint, "connecting to node");
+    // Decide between 3-hop and single-hop based on available nodes.
+    let (entry_node_id, hop_count) = if nodes.len() >= 3 {
+        // ── 3-hop circuit ────────────────────────────────────────────
+        let selected = circuit::select_circuit(&nodes)?;
+        info!(
+            entry = %selected[0].node_id,
+            relay = %selected[1].node_id,
+            exit  = %selected[2].node_id,
+            "selected 3-hop circuit"
+        );
 
-    {
-        let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
-        tun.start_tunnel(&node.endpoint, &node.public_key)?;
-    }
+        let circuit_state = circuit::build_circuit(&selected)?;
+
+        // Start tunnel to the entry node.
+        {
+            let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+            tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key)?;
+        }
+
+        let entry_id = selected[0].node_id.clone();
+
+        // Store circuit state (with session keys) in backend-only state.
+        {
+            let mut circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+            *circ = Some(circuit_state);
+        }
+
+        (entry_id, 3u32)
+    } else {
+        // ── single-hop fallback ──────────────────────────────────────
+        let node = circuit::select_single_node(&nodes)?;
+        info!(node_id = %node.node_id, endpoint = %node.endpoint, "connecting single-hop (fewer than 3 nodes)");
+
+        {
+            let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+            tun.start_tunnel(&node.endpoint, &node.public_key)?;
+        }
+
+        // Clear any stale circuit state.
+        {
+            let mut circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+            *circ = None;
+        }
+
+        (node.node_id.clone(), 1u32)
+    };
 
     let wallet_cfg = state.wallet_config()?;
 
     // Open on-chain session (0.001 ETH deposit = minimum).
     let (tx_hash, session_id) = wallet::open_session(
         &wallet_cfg,
-        &node.node_id,
+        &entry_node_id,
         1_000_000_000_000_000, // 0.001 ETH
     ).await?;
 
@@ -111,13 +154,14 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
-            node_id: node.node_id.clone(),
+            node_id: entry_node_id.clone(),
             session_id: session_id_str.clone(),
             bytes_used: 0,
+            hop_count,
         };
     }
 
-    info!(session_id, tx = %tx_hash, "connected — session opened on-chain");
+    info!(session_id, tx = %tx_hash, hop_count, "connected — session opened on-chain");
     Ok(session_id_str)
 }
 
@@ -143,6 +187,12 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
 
     let wallet_cfg = state.wallet_config()?;
     let tx_hash = wallet::settle_session(&wallet_cfg, session_id, bytes_used).await?;
+
+    // Clear circuit state.
+    {
+        let mut circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+        *circ = None;
+    }
 
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -181,6 +231,7 @@ async fn get_session(state: State<'_, AppState>) -> Result<Option<SessionInfo>, 
             node_id,
             session_id,
             bytes_used,
+            ..
         } => Ok(Some(SessionInfo {
             session_id: session_id.clone(),
             node_id: node_id.clone(),
@@ -192,6 +243,16 @@ async fn get_session(state: State<'_, AppState>) -> Result<Option<SessionInfo>, 
         })),
         _ => Ok(None),
     }
+}
+
+/// Return sanitised circuit info (no session keys) for the frontend.
+#[tauri::command]
+async fn get_circuit(state: State<'_, AppState>) -> Result<Option<CircuitInfo>, String> {
+    let circ = state
+        .circuit
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+    Ok(circ.as_ref().map(|c| c.to_info()))
 }
 
 /// Return the current network gas price in Gwei.
@@ -330,6 +391,7 @@ pub fn run() {
             get_status,
             get_nodes,
             get_session,
+            get_circuit,
             get_gas_price,
         ])
         .run(tauri::generate_context!())

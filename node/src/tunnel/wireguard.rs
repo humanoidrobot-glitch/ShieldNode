@@ -56,9 +56,7 @@ impl WireguardTunnel {
         match self.tunnel.encapsulate(src, dst) {
             TunnResult::Done => Err(WireguardError::EncapsulateFailed),
             TunnResult::WriteToNetwork(data) => Ok(data),
-            TunnResult::Err(e) => {
-                Err(WireguardError::TunnelCreation(format!("{e:?}")))
-            }
+            TunnResult::Err(e) => Err(WireguardError::TunnelCreation(format!("{e:?}"))),
             _ => Err(WireguardError::EncapsulateFailed),
         }
     }
@@ -66,19 +64,14 @@ impl WireguardTunnel {
     /// Decapsulate an incoming WireGuard message.
     ///
     /// Returns the number of bytes written into `dst`.
-    pub fn handle_incoming(
-        &mut self,
-        src: &[u8],
-        dst: &mut [u8],
-    ) -> Result<usize, WireguardError> {
+    pub fn handle_incoming(&mut self, src: &[u8], dst: &mut [u8]) -> Result<usize, WireguardError> {
         match self.tunnel.decapsulate(None, src, dst) {
             TunnResult::Done => Ok(0),
-            TunnResult::WriteToTunnelV4(data, _)
-            | TunnResult::WriteToTunnelV6(data, _) => Ok(data.len()),
-            TunnResult::WriteToNetwork(data) => Ok(data.len()),
-            TunnResult::Err(e) => {
-                Err(WireguardError::TunnelCreation(format!("{e:?}")))
+            TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
+                Ok(data.len())
             }
+            TunnResult::WriteToNetwork(data) => Ok(data.len()),
+            TunnResult::Err(e) => Err(WireguardError::TunnelCreation(format!("{e:?}"))),
         }
     }
 

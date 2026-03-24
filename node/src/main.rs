@@ -18,7 +18,10 @@ use crypto::keys::NodeKeyPair;
 use metrics::bandwidth::BandwidthTracker;
 use network::chain::ChainService;
 use network::heartbeat::HeartbeatService;
+use network::relay::RelayService;
+use network::relay_listener::RelayListener;
 use tunnel::listener::TunnelListener;
+use tunnel::tun_device::{TunConfig, TunDevice};
 
 /// Default Sepolia NodeRegistry contract address.
 const DEFAULT_REGISTRY_ADDRESS: &str = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11";
@@ -62,10 +65,7 @@ fn parse_hex_private_key(hex_str: &str) -> Result<[u8; 32]> {
 }
 
 /// Build a `ChainService` from configuration values and the node's public key.
-fn build_chain_service(
-    cfg: &config::NodeConfig,
-    node_id: [u8; 32],
-) -> Result<ChainService> {
+fn build_chain_service(cfg: &config::NodeConfig, node_id: [u8; 32]) -> Result<ChainService> {
     let operator_key_hex = cfg
         .operator_private_key
         .as_deref()
@@ -99,11 +99,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut cfg = config::NodeConfig::load(&cli.config)
-        .unwrap_or_else(|e| {
-            info!("config load failed ({e}), using defaults");
-            config::NodeConfig::default()
-        });
+    let mut cfg = config::NodeConfig::load(&cli.config).unwrap_or_else(|e| {
+        info!("config load failed ({e}), using defaults");
+        config::NodeConfig::default()
+    });
 
     if let Some(port) = cli.listen_port {
         cfg.listen_port = port;
@@ -114,8 +113,8 @@ async fn main() -> Result<()> {
     let key_path = Path::new(&cfg.node_private_key_path);
 
     if cli.generate_key {
-        let (keypair, _) = NodeKeyPair::load_or_generate(key_path)
-            .context("generating node key")?;
+        let (keypair, _) =
+            NodeKeyPair::load_or_generate(key_path).context("generating node key")?;
         info!(
             path = %key_path.display(),
             public_key = %hex::encode(keypair.public_key().as_bytes()),
@@ -150,8 +149,8 @@ async fn main() -> Result<()> {
     // ── --register: on-chain registration then exit ───────────────────
 
     if cli.register {
-        let chain = build_chain_service(&cfg, node_id)
-            .context("building ChainService for registration")?;
+        let chain =
+            build_chain_service(&cfg, node_id).context("building ChainService for registration")?;
 
         let endpoint = format!("0.0.0.0:{}", cfg.listen_port);
 
@@ -175,6 +174,7 @@ async fn main() -> Result<()> {
 
     info!(
         listen_port = cfg.listen_port,
+        relay_port = cfg.relay_port,
         metrics_port = cfg.metrics_port,
         libp2p_port = cfg.libp2p_port,
         exit_mode = cfg.exit_mode,
@@ -197,12 +197,18 @@ async fn main() -> Result<()> {
     let metrics_handle = tokio::spawn(async move {
         let addr: std::net::SocketAddr = match format!("0.0.0.0:{metrics_port}").parse() {
             Ok(a) => a,
-            Err(e) => { error!(error = %e, "invalid metrics address"); return; }
+            Err(e) => {
+                error!(error = %e, "invalid metrics address");
+                return;
+            }
         };
         let app = metrics::api::router(metrics_bw);
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
-            Err(e) => { error!(error = %e, port = metrics_port, "failed to bind metrics port"); return; }
+            Err(e) => {
+                error!(error = %e, port = metrics_port, "failed to bind metrics port");
+                return;
+            }
         };
         info!(%addr, "metrics HTTP server listening");
         if let Err(e) = axum::serve(listener, app.into_make_service()).await {
@@ -230,26 +236,43 @@ async fn main() -> Result<()> {
 
     // ── heartbeat service ─────────────────────────────────────────────
 
-    let heartbeat = HeartbeatService::new(
-        chain_service,
-        cfg.heartbeat_interval_secs,
-    );
+    let heartbeat = HeartbeatService::new(chain_service, cfg.heartbeat_interval_secs);
     let heartbeat_handle = heartbeat.spawn(shutdown_rx.clone());
 
-    // ── WireGuard tunnel listener ─────────────────────────────────────
+    // ── TUN device (shared between tunnel and relay listeners) ─────────
 
-    let tun_config = tunnel::tun_device::TunConfig {
-        address: cfg.tun_address.clone(),
-        netmask: cfg.tun_netmask,
-        name: "shieldnode".to_string(),
+    let tun: Option<Arc<TunDevice>> = if cfg.exit_mode {
+        let tun_config = TunConfig {
+            address: cfg.tun_address.clone(),
+            netmask: cfg.tun_netmask,
+            name: "shieldnode".to_string(),
+        };
+        match TunDevice::create(&tun_config).await {
+            Ok(dev) => {
+                info!("TUN device ready for exit-mode forwarding");
+                Some(Arc::new(dev))
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to create TUN device — exit forwarding disabled. \
+                     Run as administrator/root to enable TUN."
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
+
+    // ── WireGuard tunnel listener ─────────────────────────────────────
 
     let mut tunnel_listener = TunnelListener::bind(
         cfg.listen_port,
         private_key_bytes,
         bandwidth.clone(),
         cfg.exit_mode,
-        tun_config,
+        tun.clone(),
     )
     .await
     .context("failed to bind WireGuard listener")?;
@@ -257,6 +280,20 @@ async fn main() -> Result<()> {
     let tunnel_handle = tokio::spawn(async move {
         if let Err(e) = tunnel_listener.run().await {
             error!(error = %e, "tunnel listener exited with error");
+        }
+    });
+
+    // ── relay listener (multi-hop forwarding) ─────────────────────────
+
+    let relay_service = Arc::new(Mutex::new(RelayService::new(bandwidth.clone())));
+
+    let relay_listener = RelayListener::bind(cfg.relay_port, relay_service, tun, bandwidth.clone())
+        .await
+        .context("failed to bind relay listener")?;
+
+    let relay_handle = tokio::spawn(async move {
+        if let Err(e) = relay_listener.run().await {
+            error!(error = %e, "relay listener exited with error");
         }
     });
 
@@ -294,6 +331,7 @@ async fn main() -> Result<()> {
         _ = metrics_handle => {}
         _ = heartbeat_handle => {}
         _ = tunnel_handle => {}
+        _ = relay_handle => {}
         _ = discovery_handle => {}
         _ = timeout => {
             warn!("graceful shutdown timed out, aborting remaining tasks");

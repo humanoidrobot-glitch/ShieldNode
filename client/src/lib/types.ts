@@ -18,3 +18,15 @@ export interface SessionInfo {
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
 export type GasLevel = "low" | "medium" | "high";
+
+export interface CircuitHop {
+  nodeId: string;
+  endpoint: string;
+  hopIndex: number;
+}
+
+export interface CircuitInfo {
+  entry: CircuitHop;
+  relay: CircuitHop;
+  exit: CircuitHop;
+}

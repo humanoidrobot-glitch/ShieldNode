@@ -54,10 +54,7 @@ impl NoiseHandshake {
     ///
     /// `peer_static` is the responder's known static public key.
     /// Returns the 32-byte ephemeral public key to send.
-    pub fn initiator_handshake_msg1(
-        &mut self,
-        peer_static: PublicKey,
-    ) -> [u8; 32] {
+    pub fn initiator_handshake_msg1(&mut self, peer_static: PublicKey) -> [u8; 32] {
         let eph = StaticSecret::random_from_rng(OsRng);
         let eph_pub = PublicKey::from(&eph);
         self.ephemeral_secret = Some(eph);
@@ -69,10 +66,7 @@ impl NoiseHandshake {
     /// and derive the session key.
     ///
     /// Must be called after `initiator_handshake_msg1`.
-    pub fn initiator_handshake_msg2(
-        &mut self,
-        msg: &[u8; 32],
-    ) -> Result<[u8; 32], NoiseError> {
+    pub fn initiator_handshake_msg2(&mut self, msg: &[u8; 32]) -> Result<[u8; 32], NoiseError> {
         let responder_eph = PublicKey::from(*msg);
 
         let eph_secret = self
@@ -81,10 +75,7 @@ impl NoiseHandshake {
             .ok_or_else(|| NoiseError::HandshakeFailed("no ephemeral key".into()))?;
 
         let ee = eph_secret.diffie_hellman(&responder_eph).to_bytes();
-        let se = self
-            .local_static
-            .diffie_hellman(&responder_eph)
-            .to_bytes();
+        let se = self.local_static.diffie_hellman(&responder_eph).to_bytes();
 
         let session_key = derive_session_key(&ee, &se);
         self.session_key = Some(session_key);
@@ -108,10 +99,7 @@ impl NoiseHandshake {
         let ee = eph.diffie_hellman(&initiator_eph).to_bytes();
         // se = DH(responder_static, initiator_eph) — mirrors the
         // initiator's DH(initiator_static, responder_eph) by commutativity.
-        let se = self
-            .local_static
-            .diffie_hellman(&initiator_eph)
-            .to_bytes();
+        let se = self.local_static.diffie_hellman(&initiator_eph).to_bytes();
 
         let session_key = derive_session_key(&ee, &se);
         self.ephemeral_secret = Some(eph);
@@ -141,21 +129,11 @@ fn derive_session_key(ee: &[u8; 32], se: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Encrypt `plaintext` with the given ChaCha20-Poly1305 key and nonce.
-pub fn encrypt(
-    key: &[u8; 32],
-    nonce_val: u64,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, NoiseError> {
-    aead::encrypt(key, nonce_val, plaintext)
-        .map_err(|e| NoiseError::Encryption(e.to_string()))
+pub fn encrypt(key: &[u8; 32], nonce_val: u64, plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+    aead::encrypt(key, nonce_val, plaintext).map_err(|e| NoiseError::Encryption(e.to_string()))
 }
 
 /// Decrypt `ciphertext` with the given ChaCha20-Poly1305 key and nonce.
-pub fn decrypt(
-    key: &[u8; 32],
-    nonce_val: u64,
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, NoiseError> {
-    aead::decrypt(key, nonce_val, ciphertext)
-        .map_err(|e| NoiseError::Decryption(e.to_string()))
+pub fn decrypt(key: &[u8; 32], nonce_val: u64, ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+    aead::decrypt(key, nonce_val, ciphertext).map_err(|e| NoiseError::Decryption(e.to_string()))
 }

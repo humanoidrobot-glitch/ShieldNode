@@ -40,10 +40,7 @@ impl SphinxPacket {
     /// `route` is an ordered list of (public_key, session_key) pairs from
     /// first hop to last.  Each `session_key` is a 32-byte symmetric key
     /// previously negotiated (e.g. via DH) with that hop.
-    pub fn create(
-        route: &[([u8; 32], [u8; 32])],
-        plaintext: &[u8],
-    ) -> Result<Self, SphinxError> {
+    pub fn create(route: &[([u8; 32], [u8; 32])], plaintext: &[u8]) -> Result<Self, SphinxError> {
         if route.is_empty() {
             return Err(SphinxError::EmptyRoute);
         }
@@ -104,6 +101,46 @@ impl SphinxPacket {
         };
 
         Ok((next_hop, inner_packet))
+    }
+
+    // ── serialisation ──────────────────────────────────────────────────
+
+    /// Serialize this packet to bytes: `[32-byte next_hop][4-byte payload_len (BE)][payload]`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let payload_len = self.payload.len() as u32;
+        let mut buf = Vec::with_capacity(32 + 4 + self.payload.len());
+        buf.extend_from_slice(&self.header.next_hop);
+        buf.extend_from_slice(&payload_len.to_be_bytes());
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
+
+    /// Deserialize a packet from bytes produced by [`to_bytes`].
+    pub fn from_bytes(data: &[u8]) -> Result<Self, SphinxError> {
+        if data.len() < 36 {
+            return Err(SphinxError::MalformedHeader);
+        }
+
+        let mut next_hop = [0u8; 32];
+        next_hop.copy_from_slice(&data[..32]);
+
+        let payload_len = u32::from_be_bytes(data[32..36].try_into().unwrap()) as usize;
+
+        if data.len() < 36 + payload_len {
+            return Err(SphinxError::MalformedHeader);
+        }
+
+        let payload = data[36..36 + payload_len].to_vec();
+        let mac = binding_tag(&payload);
+
+        Ok(Self {
+            header: SphinxHeader {
+                next_hop,
+                routing_info: Vec::new(),
+                mac,
+            },
+            payload,
+        })
     }
 }
 

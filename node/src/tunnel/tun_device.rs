@@ -40,7 +40,9 @@ pub struct TunDevice {
 
 impl TunDevice {
     pub async fn create(config: &TunConfig) -> Result<Self, TunError> {
-        let ip: std::net::Ipv4Addr = config.address.parse()
+        let ip: std::net::Ipv4Addr = config
+            .address
+            .parse()
             .map_err(|e| TunError::CreateFailed(format!("invalid TUN IP: {e}")))?;
 
         let device = tun_rs::DeviceBuilder::new()
@@ -66,9 +68,15 @@ impl TunDevice {
             return Ok(());
         }
 
-        debug!(len = packet.len(), ip_version = packet[0] >> 4, "writing to TUN");
+        debug!(
+            len = packet.len(),
+            ip_version = packet[0] >> 4,
+            "writing to TUN"
+        );
 
-        self.device.send(packet).await
+        self.device
+            .send(packet)
+            .await
             .map_err(|e| TunError::WriteFailed(e.to_string()))?;
 
         Ok(())
@@ -76,7 +84,10 @@ impl TunDevice {
 
     /// Read an IP packet from the TUN device (response from OS).
     pub async fn read_packet(&self, buf: &mut [u8]) -> Result<usize, TunError> {
-        let n = self.device.recv(buf).await
+        let n = self
+            .device
+            .recv(buf)
+            .await
             .map_err(|e| TunError::ReadFailed(e.to_string()))?;
         Ok(n)
     }

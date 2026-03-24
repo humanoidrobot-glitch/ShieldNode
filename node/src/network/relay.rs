@@ -90,8 +90,7 @@ impl RelayService {
         let incoming_size = packet.payload.len() as u64;
 
         // Pure, deterministic peel — candidate for ZK proving.
-        let (next_hop, inner) =
-            packet.peel_layer(&session.session_key, session.hop_index)?;
+        let (next_hop, inner) = packet.peel_layer(&session.session_key, session.hop_index)?;
 
         let outgoing_size = inner.payload.len() as u64;
 
@@ -102,12 +101,7 @@ impl RelayService {
             bw.record_bytes(session_id, incoming_size, outgoing_size);
         }
 
-        info!(
-            session_id,
-            incoming_size,
-            outgoing_size,
-            "packet forwarded"
-        );
+        info!(session_id, incoming_size, outgoing_size, "packet forwarded");
 
         Ok((next_hop, inner))
     }

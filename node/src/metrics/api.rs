@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 use tokio::sync::Mutex;
 

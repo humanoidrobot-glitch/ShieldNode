@@ -82,14 +82,9 @@ impl ChainService {
     /// Build a provider with the operator wallet attached for signing.
     fn build_provider(
         &self,
-    ) -> Result<
-        impl Provider<alloy::network::Ethereum> + Clone,
-        ChainError,
-    > {
-        let signer = PrivateKeySigner::from_bytes(
-            &FixedBytes::from(self.private_key),
-        )
-        .map_err(|e| ChainError::InvalidPrivateKey(e.to_string()))?;
+    ) -> Result<impl Provider<alloy::network::Ethereum> + Clone, ChainError> {
+        let signer = PrivateKeySigner::from_bytes(&FixedBytes::from(self.private_key))
+            .map_err(|e| ChainError::InvalidPrivateKey(e.to_string()))?;
 
         let wallet = alloy::network::EthereumWallet::from(signer);
 
@@ -98,9 +93,7 @@ impl ChainService {
             .parse()
             .map_err(|e| ChainError::InvalidUrl(format!("{e}")))?;
 
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_http(url);
+        let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
 
         Ok(provider)
     }
@@ -117,8 +110,7 @@ impl ChainService {
     ) -> Result<String, ChainError> {
         let provider = self.build_provider()?;
 
-        let contract =
-            NodeRegistry::new(self.registry_address, &provider);
+        let contract = NodeRegistry::new(self.registry_address, &provider);
 
         let node_id = FixedBytes::from(self.node_id);
         let pub_key = FixedBytes::from(public_key);
@@ -150,8 +142,7 @@ impl ChainService {
     pub async fn heartbeat(&self) -> Result<String, ChainError> {
         let provider = self.build_provider()?;
 
-        let contract =
-            NodeRegistry::new(self.registry_address, &provider);
+        let contract = NodeRegistry::new(self.registry_address, &provider);
 
         let node_id = FixedBytes::from(self.node_id);
 
@@ -171,14 +162,10 @@ impl ChainService {
 
     /// Update the node's advertised endpoint on-chain.
     /// Returns the transaction hash as a hex string.
-    pub async fn update_endpoint(
-        &self,
-        endpoint: &str,
-    ) -> Result<String, ChainError> {
+    pub async fn update_endpoint(&self, endpoint: &str) -> Result<String, ChainError> {
         let provider = self.build_provider()?;
 
-        let contract =
-            NodeRegistry::new(self.registry_address, &provider);
+        let contract = NodeRegistry::new(self.registry_address, &provider);
 
         let node_id = FixedBytes::from(self.node_id);
 

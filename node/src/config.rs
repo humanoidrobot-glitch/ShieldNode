@@ -50,6 +50,10 @@ pub struct NodeConfig {
     #[serde(default)]
     pub operator_private_key: Option<String>,
 
+    /// UDP port for the relay (multi-hop) listener.
+    #[serde(default = "default_relay_port")]
+    pub relay_port: u16,
+
     /// TUN device IP address for exit-mode forwarding.
     #[serde(default = "default_tun_address")]
     pub tun_address: String,
@@ -85,6 +89,9 @@ fn default_price_per_byte() -> u64 {
 fn default_data_dir() -> String {
     "./data".to_string()
 }
+fn default_relay_port() -> u16 {
+    51821
+}
 fn default_tun_address() -> String {
     "10.13.37.1".to_string()
 }
@@ -104,6 +111,7 @@ impl Default for NodeConfig {
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             node_private_key_path: default_node_private_key_path(),
             libp2p_port: default_libp2p_port(),
+            relay_port: default_relay_port(),
             exit_mode: false,
             price_per_byte: default_price_per_byte(),
             data_dir: default_data_dir(),
@@ -119,8 +127,7 @@ impl NodeConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("reading config file {:?}", path.as_ref()))?;
-        let cfg: NodeConfig =
-            toml::from_str(&text).context("parsing TOML config")?;
+        let cfg: NodeConfig = toml::from_str(&text).context("parsing TOML config")?;
         Ok(cfg)
     }
 }

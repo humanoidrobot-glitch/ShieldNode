@@ -20,3 +20,7 @@ thiserror = "2"
 tracing = "0.1"
 alloy = { version = "1", default-features = false, features = ["provider-http", "sol-types", "network", "contract", "signer-local", "reqwest-native-tls"] }
 url = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+hkdf = "0.12"
+sha2 = "0.10"

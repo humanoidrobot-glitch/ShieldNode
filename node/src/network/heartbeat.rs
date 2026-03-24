@@ -29,10 +29,7 @@ pub struct HeartbeatService {
 }
 
 impl HeartbeatService {
-    pub fn new(
-        chain: Option<Arc<ChainService>>,
-        interval_secs: u64,
-    ) -> Self {
+    pub fn new(chain: Option<Arc<ChainService>>, interval_secs: u64) -> Self {
         Self {
             chain,
             interval: Duration::from_secs(interval_secs),
@@ -43,10 +40,7 @@ impl HeartbeatService {
     /// Spawn a background task that sends heartbeats at the configured
     /// interval.  The task runs until the provided `cancel` token is
     /// dropped.
-    pub fn spawn(
-        self,
-        cancel: tokio::sync::watch::Receiver<bool>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(self, cancel: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             self.run(cancel).await;
         })

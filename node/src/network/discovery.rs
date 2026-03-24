@@ -3,9 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use libp2p::{
-    gossipsub, identify, kad, mdns,
-    swarm::NetworkBehaviour,
-    Multiaddr, PeerId, Swarm, SwarmBuilder,
+    gossipsub, identify, kad, mdns, swarm::NetworkBehaviour, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use thiserror::Error;
 use tracing::info;
@@ -78,19 +76,14 @@ impl DiscoveryService {
                 .map_err(|e| format!("gossipsub behaviour: {e}"))?;
 
                 // mDNS
-                let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    peer_id,
-                )
-                .map_err(|e| format!("mdns behaviour: {e}"))?;
+                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+                    .map_err(|e| format!("mdns behaviour: {e}"))?;
 
                 // Identify
-                let identify = identify::Behaviour::new(
-                    identify::Config::new(
-                        "/shieldnode/id/1.0.0".to_string(),
-                        key.public(),
-                    ),
-                );
+                let identify = identify::Behaviour::new(identify::Config::new(
+                    "/shieldnode/id/1.0.0".to_string(),
+                    key.public(),
+                ));
 
                 Ok(ShieldNodeBehaviour {
                     kademlia,
@@ -123,8 +116,7 @@ impl DiscoveryService {
 
     /// Publish this node's information to the Kademlia DHT.
     pub fn announce_node(&mut self, info_bytes: Vec<u8>) -> Result<(), DiscoveryError> {
-        let key =
-            kad::RecordKey::new(&format!("/shieldnode/node/{}", self.local_peer_id));
+        let key = kad::RecordKey::new(&format!("/shieldnode/node/{}", self.local_peer_id));
         let record = kad::Record {
             key,
             value: info_bytes,

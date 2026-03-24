@@ -1,8 +1,8 @@
-import type { ConnectionStatus, NodeInfo } from "../lib/types";
+import type { ConnectionStatus, CircuitInfo } from "../lib/types";
 
 interface CircuitMapProps {
   status: ConnectionStatus;
-  nodes: NodeInfo[];
+  circuit: CircuitInfo | null;
 }
 
 function truncateId(id: string): string {
@@ -64,10 +64,41 @@ function Arrow({ active }: { active: boolean }) {
   );
 }
 
-export function CircuitMap({ status, nodes }: CircuitMapProps) {
+export function CircuitMap({ status, circuit }: CircuitMapProps) {
   const active = status === "connected";
-  const exitNode = nodes.length > 0 ? nodes[0] : null;
 
+  // When connected with a 3-hop circuit, show all hops.
+  if (active && circuit) {
+    return (
+      <div
+        className="rounded-lg p-4"
+        style={{
+          background: "var(--card-bg)",
+          border: "1px solid var(--border-color)",
+        }}
+      >
+        <h3
+          className="text-xs font-semibold uppercase tracking-wider mb-3"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          Circuit Path
+        </h3>
+        <div className="flex items-center justify-center flex-wrap gap-y-2">
+          <Hop label="You" active />
+          <Arrow active />
+          <Hop label={truncateId(circuit.entry.nodeId)} sublabel="Entry" active />
+          <Arrow active />
+          <Hop label={truncateId(circuit.relay.nodeId)} sublabel="Relay" active />
+          <Arrow active />
+          <Hop label={truncateId(circuit.exit.nodeId)} sublabel="Exit" active />
+          <Arrow active />
+          <Hop label="Internet" active />
+        </div>
+      </div>
+    );
+  }
+
+  // Placeholder path (disconnected or single-hop).
   return (
     <div
       className="rounded-lg p-4"
@@ -85,11 +116,11 @@ export function CircuitMap({ status, nodes }: CircuitMapProps) {
       <div className="flex items-center justify-center">
         <Hop label="You" active={active} />
         <Arrow active={active} />
-        <Hop
-          label={exitNode ? truncateId(exitNode.nodeId) : "Node"}
-          sublabel={exitNode ? `${exitNode.uptime}% up` : undefined}
-          active={active}
-        />
+        <Hop label="Entry" active={active} />
+        <Arrow active={active} />
+        <Hop label="Relay" active={active} />
+        <Arrow active={active} />
+        <Hop label="Exit" active={active} />
         <Arrow active={active} />
         <Hop label="Internet" active={active} />
       </div>

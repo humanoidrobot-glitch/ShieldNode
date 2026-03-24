@@ -62,19 +62,13 @@ impl CircuitManager {
     }
 
     /// Remove a circuit, freeing its resources.
-    pub fn teardown_circuit(
-        &mut self,
-        circuit_id: u64,
-    ) -> Result<Circuit, CircuitError> {
+    pub fn teardown_circuit(&mut self, circuit_id: u64) -> Result<Circuit, CircuitError> {
         self.circuits
             .remove(&circuit_id)
             .ok_or(CircuitError::NotFound(circuit_id))
     }
 
-    pub fn get_circuit(
-        &self,
-        circuit_id: u64,
-    ) -> Result<&Circuit, CircuitError> {
+    pub fn get_circuit(&self, circuit_id: u64) -> Result<&Circuit, CircuitError> {
         self.circuits
             .get(&circuit_id)
             .ok_or(CircuitError::NotFound(circuit_id))

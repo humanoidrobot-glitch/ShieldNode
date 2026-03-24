@@ -7,9 +7,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::metrics::bandwidth::BandwidthTracker;
-use super::tun_device::{TunConfig, TunDevice};
+use super::tun_device::TunDevice;
 use super::wireguard::WireguardTunnel;
+use crate::metrics::bandwidth::BandwidthTracker;
 
 struct PeerState {
     tunnel: WireguardTunnel,
@@ -33,36 +33,25 @@ pub struct TunnelListener {
     next_session_id: u64,
     bandwidth: Arc<Mutex<BandwidthTracker>>,
     exit_mode: bool,
-    tun: Option<TunDevice>,
+    tun: Option<Arc<TunDevice>>,
 }
 
 impl TunnelListener {
+    /// Create a tunnel listener.
+    ///
+    /// If an `Arc<TunDevice>` is provided it will be used for exit-mode
+    /// forwarding. This allows the TUN device to be shared with other
+    /// subsystems such as the relay listener.
     pub async fn bind(
         listen_port: u16,
         private_key: [u8; 32],
         bandwidth: Arc<Mutex<BandwidthTracker>>,
         exit_mode: bool,
-        tun_config: TunConfig,
+        tun: Option<Arc<TunDevice>>,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("0.0.0.0:{listen_port}").parse()?;
         let socket = UdpSocket::bind(addr).await?;
         info!(%addr, "WireGuard UDP listener bound");
-
-        let tun = if exit_mode {
-            match TunDevice::create(&tun_config).await {
-                Ok(dev) => {
-                    info!("TUN device ready for exit-mode forwarding");
-                    Some(dev)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to create TUN device — exit forwarding disabled. \
-                          Run as administrator/root to enable TUN.");
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
         Ok(Self {
             socket,
@@ -80,7 +69,11 @@ impl TunnelListener {
         let mut send_buf = vec![0u8; 65536];
         let mut last_eviction = Instant::now();
 
-        info!(exit_mode = self.exit_mode, has_tun = self.tun.is_some(), "tunnel listener running");
+        info!(
+            exit_mode = self.exit_mode,
+            has_tun = self.tun.is_some(),
+            "tunnel listener running"
+        );
 
         loop {
             let (n, peer_addr) = self.socket.recv_from(&mut recv_buf).await?;
@@ -139,11 +132,7 @@ impl TunnelListener {
                 let session_id = self.next_session_id;
                 self.next_session_id += 1;
 
-                let tunnel = WireguardTunnel::new(
-                    self.private_key,
-                    [0u8; 32],
-                    Some(addr),
-                );
+                let tunnel = WireguardTunnel::new(self.private_key, [0u8; 32], Some(addr));
 
                 info!(peer = %addr, session_id, "new peer tunnel created");
 
