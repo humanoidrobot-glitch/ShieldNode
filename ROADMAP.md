@@ -10,14 +10,15 @@ The foundation: a working relay node, on-chain contracts, and a basic client.
 
 ### Completed
 - [x] **Relay node binary** — WireGuard tunnel (boringtun), UDP listener with peer management, Sphinx onion routing, HKDF-SHA256 key derivation, ChaCha20-Poly1305 encryption, libp2p discovery (Kademlia + Gossipsub + mDNS), heartbeat service, metrics HTTP API
+- [x] **Node wired end-to-end** — All services orchestrated via tokio (UDP listener, metrics API, heartbeat, libp2p discovery), persistent key management (load-or-generate), graceful Ctrl+C shutdown, stale peer eviction
 - [x] **NodeRegistry contract** — 0.1 ETH minimum stake, 6h heartbeat interval, 7-day unstake cooldown, paginated `getActiveNodes()`, oracle-only slashing, `commitment` field reserved for Phase 6 ZK eligibility
 - [x] **SessionSettlement contract** — EIP-712 bandwidth receipts, 25/25/50 payment split (entry/relay/exit), 0.001 ETH minimum deposit, 1-hour force-settle timeout for absent clients
 - [x] **SlashingOracle contract** — Authorized challengers, 24-hour grace period, progressive slashing (10% / 25% / 100% + permanent ban), 50/50 split between challenger and treasury
 - [x] **Treasury contract** — Receives slash proceeds, 48-hour timelock on withdrawals
 - [x] **Test suite** — 19 Foundry tests passing (12 NodeRegistry + 7 SessionSettlement)
+- [x] **Tauri client scaffold** — Rust backend with 6 Tauri commands (connect, disconnect, get_status, get_nodes, get_session, get_gas_price), tunnel/circuit/wallet/receipt modules. React frontend with dark-themed UI: ConnectToggle, CircuitMap, NodeBrowser (sortable/filterable), SessionCost, GasMonitor (color-coded), Settings (RPC, kill switch, auto-rotate, gas ceiling)
 
 ### Remaining
-- [ ] Tauri client (Rust + React) with basic connect/disconnect to a single node
 - [ ] Deploy contracts to Ethereum Sepolia testnet
 - [ ] Node registers on-chain, client reads registry to discover nodes
 - [ ] End-to-end session lifecycle: client opens session with deposit, bandwidth receipts flow, settlement on disconnect
@@ -58,7 +59,7 @@ Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 - [x] **Progressive slashing** — 10% first offense, 25% second, 100% + permanent ban on third
 
 ### Remaining
-- [ ] Client node scoring: factor slash history, stake size, uptime, latency, and price into circuit selection
+- [x] **Client node scoring** — Weighted algorithm (30% uptime, 25% stake via log scale, 25% price inverse, 20% slash penalty) implemented in both Rust backend and TypeScript frontend
 - [ ] Stake-weighted selection: higher-staked nodes get more session routing (revenue accelerator)
 - [ ] Slashing evidence verification: cryptographic proofs for logging, selective denial, bandwidth fraud
 
@@ -76,7 +77,7 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 
 ### Remaining
 - [ ] Client displays estimated session cost before connection
-- [ ] Gas price monitoring and spike warnings in client UI
+- [x] **Gas price monitoring** — GasMonitor component with color-coded Gwei display (green < 1, yellow 1-5, red > 5), polls every 30s, configurable gas ceiling in Settings
 - [ ] Stress test: simulate 100+ concurrent sessions, measure L1 settlement throughput
 - [ ] Design ZK bandwidth receipt circuit (circom or Noir): define the statement to prove, select proving system, build initial circuit
 - [ ] Implement `ZKSettlement.sol` verifier contract alongside `SessionSettlement.sol` — both paths work, ZK is opt-in
