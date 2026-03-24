@@ -396,6 +396,34 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
     }
 }
 
+/// Return the current settings (excludes private key).
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<config::SettingsPayload, String> {
+    let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+    Ok(config::SettingsPayload::from(&*cfg))
+}
+
+/// Update settings from the frontend. Changes take effect on next connect().
+#[tauri::command]
+async fn update_settings(
+    state: State<'_, AppState>,
+    settings: config::SettingsPayload,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+    cfg.apply_settings(&settings);
+
+    // Persist to disk (best-effort).
+    let config_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("shieldnode-client.json");
+    if let Err(e) = cfg.save(&config_path) {
+        warn!(error = %e, "failed to persist settings to disk");
+    }
+
+    info!("settings updated");
+    Ok(())
+}
+
 /// Send a raw IP packet through the 3-hop Sphinx circuit.
 ///
 /// The packet is wrapped in three Sphinx onion layers and sent to the entry
@@ -716,6 +744,8 @@ pub fn run() {
             get_session,
             get_circuit,
             get_gas_price,
+            get_settings,
+            update_settings,
             send_packet,
         ])
         .run(tauri::generate_context!())

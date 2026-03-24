@@ -46,7 +46,44 @@ impl Default for ClientConfig {
     }
 }
 
+/// Frontend-safe settings payload. Excludes sensitive fields like private keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsPayload {
+    pub rpc_url: String,
+    pub chain_id: u64,
+    pub auto_rotate: bool,
+    pub circuit_rotation_interval_secs: u64,
+    pub kill_switch: bool,
+    pub gas_price_ceiling_gwei: f64,
+    pub preferred_nodes: Vec<String>,
+}
+
+impl From<&ClientConfig> for SettingsPayload {
+    fn from(cfg: &ClientConfig) -> Self {
+        Self {
+            rpc_url: cfg.rpc_url.clone(),
+            chain_id: cfg.chain_id,
+            auto_rotate: cfg.auto_rotate,
+            circuit_rotation_interval_secs: cfg.circuit_rotation_interval_secs,
+            kill_switch: cfg.kill_switch,
+            gas_price_ceiling_gwei: cfg.gas_price_ceiling_gwei,
+            preferred_nodes: cfg.preferred_nodes.clone(),
+        }
+    }
+}
+
 impl ClientConfig {
+    /// Merge a SettingsPayload into this config, updating non-sensitive fields.
+    pub fn apply_settings(&mut self, s: &SettingsPayload) {
+        self.rpc_url = s.rpc_url.clone();
+        self.chain_id = s.chain_id;
+        self.auto_rotate = s.auto_rotate;
+        self.circuit_rotation_interval_secs = s.circuit_rotation_interval_secs;
+        self.kill_switch = s.kill_switch;
+        self.gas_price_ceiling_gwei = s.gas_price_ceiling_gwei;
+        self.preferred_nodes = s.preferred_nodes.clone();
+    }
+
     /// Load configuration from a JSON file on disk.
     /// Returns `Default` values if the file does not exist.
     pub fn load(path: &Path) -> Result<Self, String> {

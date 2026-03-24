@@ -1,11 +1,45 @@
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
+interface SettingsPayload {
+  rpc_url: string;
+  chain_id: number;
+  auto_rotate: boolean;
+  circuit_rotation_interval_secs: number;
+  kill_switch: boolean;
+  gas_price_ceiling_gwei: number;
+  preferred_nodes: string[];
+}
+
+// Local UI state with user-friendly field names.
 interface SettingsState {
   rpcEndpoint: string;
   autoRotate: boolean;
   rotationIntervalMin: number;
   killSwitch: boolean;
   gasCeiling: number;
+}
+
+function toLocal(p: SettingsPayload): SettingsState {
+  return {
+    rpcEndpoint: p.rpc_url,
+    autoRotate: p.auto_rotate,
+    rotationIntervalMin: Math.round(p.circuit_rotation_interval_secs / 60),
+    killSwitch: p.kill_switch,
+    gasCeiling: p.gas_price_ceiling_gwei,
+  };
+}
+
+function toPayload(s: SettingsState): SettingsPayload {
+  return {
+    rpc_url: s.rpcEndpoint,
+    chain_id: 11155111, // Sepolia — not user-editable for now
+    auto_rotate: s.autoRotate,
+    circuit_rotation_interval_secs: s.rotationIntervalMin * 60,
+    kill_switch: s.killSwitch,
+    gas_price_ceiling_gwei: s.gasCeiling,
+    preferred_nodes: [],
+  };
 }
 
 function Toggle({
@@ -45,16 +79,48 @@ function Toggle({
 
 export function Settings() {
   const [settings, setSettings] = useState<SettingsState>({
-    rpcEndpoint: "https://rpc.sepolia.org",
+    rpcEndpoint: "",
     autoRotate: false,
     rotationIntervalMin: 10,
     killSwitch: true,
     gasCeiling: 10,
   });
+  const [loaded, setLoaded] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load settings from backend on mount.
+  useEffect(() => {
+    invoke<SettingsPayload>("get_settings")
+      .then((payload) => {
+        setSettings(toLocal(payload));
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true)); // show defaults on error
+  }, []);
+
+  // Debounced save to backend.
+  const save = useCallback((updated: SettingsState) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      invoke("update_settings", { settings: toPayload(updated) }).catch(() => {});
+    }, 500);
+  }, []);
 
   const update = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    setSettings((prev) => {
+      const next = { ...prev, [key]: value };
+      save(next);
+      return next;
+    });
   };
+
+  if (!loaded) {
+    return (
+      <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
+        Loading settings...
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -117,6 +183,10 @@ export function Settings() {
           style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
         />
       </div>
+
+      <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+        Settings take effect on next connection.
+      </p>
     </div>
   );
 }
