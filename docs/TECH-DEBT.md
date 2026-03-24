@@ -54,12 +54,8 @@ Every RPC call (node reads, gas price, session open/settle) constructs a new all
 
 ## On-Chain Integration
 
-### Dummy settle signatures
-`client/src-tauri/src/wallet.rs` `settle_session()` sends 65-byte zero vectors as client and node signatures. This will cause the `settleSession` contract to revert on signature verification.
-
-**Why deferred:** Phase 1 focuses on the open/connect flow. Real settlement requires EIP-712 co-signing between client and node, which is a Phase 2 feature (bandwidth receipt co-signing).
-
-**When to fix:** Phase 2, alongside bandwidth receipt implementation.
+### ~~Dummy settle signatures~~ — RESOLVED
+Resolved in `b4afc92`. Client now produces real EIP-712 signatures, requests node co-signature via RECEIPT_SIGN control message, and ABI-encodes dual-signed receipt for `settleSession`.
 
 ### Session ID parsing fragility
 `wallet.rs` parses the session ID from the first log's second topic without verifying the event signature hash. If the contract emits other events before `SessionOpened`, this will extract the wrong value.
@@ -121,12 +117,8 @@ Three separate hex-to-bytes32 functions exist:
 
 **When to fix:** With the shared crate migration before Phase 3.
 
-### Next-hop address encoding lacks bidirectional codec
-`relay_listener.rs` parses next-hop as `[4-byte IPv4][2-byte port][26 unused]`. No corresponding encoder exists for building next-hop bytes from (IP, port). Client will need this when wiring live traffic.
-
-**Why deferred:** Will be built as part of the "live traffic wiring" Phase 2 remaining item.
-
-**When to fix:** Next Phase 2 sprint — wire client Sphinx packet construction with proper next-hop encoding.
+### ~~Next-hop address encoding lacks bidirectional codec~~ — RESOLVED
+Resolved — `hop_codec` module now exists in both node (`node/src/network/hop_codec.rs`) and client (`client/src-tauri/src/hop_codec.rs`) with `encode_next_hop`/`decode_next_hop`/`endpoint_to_next_hop` functions.
 
 ### Sphinx MAC is a placeholder
 The `mac` field in `SphinxHeader` uses a weak binding tag (first 32 bytes of payload) instead of HMAC-SHA256. Packet tampering is not detected.
@@ -145,6 +137,29 @@ The `mac` field in `SphinxHeader` uses a weak binding tag (first 32 bytes of pay
 **Why deferred:** Tauri event system integration is more complex. Polling is simple and works.
 
 **When to fix:** Phase 2, when circuit rotation and real-time bandwidth tracking make responsiveness more important. Use `tauri::Emitter` to push state changes to the frontend.
+
+### Settings UI is not wired to the Rust backend
+All fields in `Settings.tsx` (`rpcEndpoint`, `autoRotate`, `rotationIntervalMin`, `killSwitch`, `gasCeiling`) are local React state only. Changing them has no effect on the Rust `ClientConfig` — no Tauri commands exist to update config at runtime. The rotation loop reads `auto_rotate` and `circuit_rotation_interval_secs` from `AppState.config` at connect time, so UI changes are silently ignored.
+
+**Files affected:**
+- `client/src/components/Settings.tsx` — all settings are local state
+- `client/src-tauri/src/config.rs` — `ClientConfig` has no Tauri command to update it
+- `client/src-tauri/src/lib.rs` — no `update_config` handler registered
+
+**Why deferred:** Wiring all settings requires a new `update_config` Tauri command, validation, and deciding whether changes take effect immediately or on next connect. The current UI communicates intent even if it doesn't persist.
+
+**When to fix:** Phase 3–4, when users need to meaningfully control rotation intervals and gas ceilings. Add an `update_settings` Tauri command that writes to `AppState.config` and optionally persists to disk via `ClientConfig::save()`.
+
+### Duplicate EIP-712 receipt logic across node and client
+`client/src-tauri/src/receipts.rs` and `node/src/network/receipts.rs` have near-identical implementations of `compute_domain_separator` and `compute_receipt_digest`. The signing functions differ slightly (`sign_receipt` vs `sign_receipt_digest`) but produce the same output format.
+
+**Files affected:**
+- `client/src-tauri/src/receipts.rs`
+- `node/src/network/receipts.rs`
+
+**Why deferred:** These are in separate crates with no shared dependency. Sharing requires a workspace-level shared crate (see "Shared crate for node + client types" above).
+
+**When to fix:** With the shared crate migration.
 
 ### Gas price display units
 The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
