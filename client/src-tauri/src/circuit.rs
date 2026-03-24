@@ -190,29 +190,32 @@ pub fn select_circuit(
         ));
     }
 
+    // Filter out excluded nodes entirely, score the rest.
     let mut candidates: Vec<(f64, &NodeInfo)> = nodes
         .iter()
+        .filter(|n| !exclude_ids.contains(&n.node_id.as_str()))
         .map(|n| {
-            let base = score_node(n);
-            let penalty = if exclude_ids.contains(&n.node_id.as_str()) {
-                -100.0
-            } else {
-                0.0
-            };
-            // Clamp weight to >= 1.0 so every eligible node has some chance.
-            let weight = (base + penalty).max(1.0);
+            let weight = score_node(n).max(1.0);
             (weight, n)
         })
         .collect();
 
+    if candidates.len() < 3 {
+        // Not enough non-excluded nodes — fall back to scoring all nodes.
+        candidates = nodes
+            .iter()
+            .map(|n| (score_node(n).max(1.0), n))
+            .collect();
+    }
+
     let mut selected = Vec::with_capacity(3);
-    let mut rng = OsRng;
+    let mut rng = rand::thread_rng();
 
     for _ in 0..3 {
         let total: f64 = candidates.iter().map(|(w, _)| w).sum();
         let mut roll: f64 = rng.gen::<f64>() * total;
 
-        let mut pick_idx = candidates.len() - 1; // fallback to last
+        let mut pick_idx = candidates.len() - 1;
         for (i, (w, _)) in candidates.iter().enumerate() {
             roll -= w;
             if roll <= 0.0 {
@@ -222,7 +225,7 @@ pub fn select_circuit(
         }
 
         selected.push(candidates[pick_idx].1.clone());
-        candidates.remove(pick_idx);
+        candidates.swap_remove(pick_idx);
     }
 
     Ok([
