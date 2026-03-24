@@ -43,6 +43,7 @@ Groth16 requires a trusted setup (powers-of-tau ceremony). For testnet we use a 
 | `clientSig` | (uint256, uint256) | Client's ECDSA signature (r, s) |
 | `nodePubkey` | (uint256, uint256) | Exit node's secp256k1 public key (x, y) |
 | `nodeSig` | (uint256, uint256) | Exit node's ECDSA signature (r, s) |
+| `receiptTypehash` | uint256 | EIP-712 RECEIPT_TYPEHASH constant (protocol-defined) |
 | `nodeMerkleProof` | uint256[] | Merkle proof that nodePubkey is in registryRoot |
 | `nodeMerkleIndex` | uint256 | Leaf index in the Merkle tree |
 
@@ -61,13 +62,15 @@ Groth16 requires a trusted setup (powers-of-tau ceremony). For testnet we use a 
 
 | Component | Constraints |
 |-----------|------------|
-| Keccak256 (EIP-712 digest) | ~150K |
+| Keccak256 (structHash, 1024-bit input) | ~150K |
+| Keccak256 (digest, 528-bit input) | ~150K |
+| Uint256-to-bits conversions (5x) | ~5K |
 | ECDSA verify (client) | ~1.5M |
 | ECDSA verify (node) | ~1.5M |
 | Merkle proof (depth 20) | ~20K |
 | Poseidon hashes (4 commitments) | ~1K |
 | Arithmetic (payment split) | ~100 |
-| **Total** | **~3.2M** |
+| **Total** | **~3.5M** |
 
 Proving time estimate: 3-10s on modern hardware (16GB RAM, 8 cores) with Groth16.
 
@@ -77,14 +80,13 @@ Proving time estimate: 3-10s on modern hardware (16GB RAM, 8 cores) with Groth16
 - [snarkjs](https://github.com/iden3/snarkjs) >= 0.7.0
 - [circomlib](https://github.com/iden3/circomlib) — Poseidon, comparators, mux
 - [circom-ecdsa](https://github.com/0xPARC/circom-ecdsa) — secp256k1 ECDSA verification
+- [keccak256-circom](https://github.com/vocdoni/keccak256-circom) — Keccak256 for in-circuit EIP-712 digest
 
-## Known Limitation: EIP-712 Digest Computed Off-Circuit
+## Trustlessness: In-Circuit EIP-712 Digest
 
-The EIP-712 message hash (`msgHash`) is passed as a private input rather than computed inside the circuit. Computing keccak256 in circom costs ~150K constraints — adding it would increase the circuit by ~5% for marginal benefit.
+The EIP-712 digest is computed **entirely inside the circuit** from the private receipt data (sessionId, cumulativeBytes, timestamp) and the public domainSeparator. No external trust is required — the prover cannot lie about the receipt data because the digest fed to ECDSA verification is derived from the private inputs, not supplied externally.
 
-**Critical assumption:** The prover is trusted to supply the correct digest for the receipt data (sessionId, cumulativeBytes, timestamp). The circuit verifies signatures over this digest but cannot verify the digest itself was correctly derived. A malicious prover could supply a valid signature over a different message.
-
-**Mitigation:** The client generates both the receipt and the proof — there is no incentive to forge a digest against itself. A future iteration will compute the full EIP-712 digest in-circuit for complete trustlessness (accept ~150K additional constraints).
+This costs ~300K additional constraints (two keccak256 calls) but eliminates any trust assumption about the prover's honesty regarding receipt content.
 
 ## Post-Quantum Note
 

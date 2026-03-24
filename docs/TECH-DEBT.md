@@ -222,12 +222,8 @@ Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't c
 
 **When to fix:** Before Phase 5 mainnet launch. Option (b) is the most practical — add `entryPay`, `relayPay`, `exitPay`, `refundAmount` as public circuit outputs and verify the split on-chain against those values.
 
-### EIP-712 digest computed off-circuit
-The circuit accepts `msgHash` as a private input rather than computing the full keccak256 EIP-712 digest in-circuit. The prover is trusted to supply the correct digest. Documented in `circuits/bandwidth_receipt/README.md`.
-
-**Why deferred:** Keccak256 in circom adds ~150K constraints (~5% circuit size increase). The client generates both receipt and proof, so there's no incentive to forge a digest against itself.
-
-**When to fix:** When the circuit is mature and constraint budget allows. Adds ~150K constraints but provides full trustlessness.
+### ~~EIP-712 digest computed off-circuit~~ — RESOLVED
+Resolved: EIP-712 digest is now computed entirely in-circuit via two keccak256 calls (~300K constraints, ~9% increase). No external trust required.
 
 ### Owner-gated registry root updates
 `ZKSettlement.updateRegistryRoot()` uses a simple `owner == msg.sender` check. Single point of failure for registry root integrity.

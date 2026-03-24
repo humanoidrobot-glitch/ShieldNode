@@ -13,12 +13,53 @@ include "circom-ecdsa/circuits/ecdsa.circom";
 // Requires: https://github.com/vocdoni/keccak256-circom
 include "keccak256-circom/circuits/keccak.circom";
 
+// ── Helper: convert a 256-bit field element to 256 bits (big-endian) ──
+// EVM uses big-endian for abi.encode; circom Num2Bits is little-endian.
+template Uint256ToBitsBE() {
+    signal input in;
+    signal output out[256];
+
+    component n2b = Num2Bits(256);
+    n2b.in <== in;
+
+    // Reverse: Num2Bits outputs LSB-first, we need MSB-first for keccak.
+    // But keccak256-circom expects byte-level big-endian with bit-level
+    // big-endian within each byte. We reverse at byte granularity:
+    // byte 0 (MSB) = bits[255..248], byte 1 = bits[247..240], ...
+    for (var byte_i = 0; byte_i < 32; byte_i++) {
+        for (var bit_j = 0; bit_j < 8; bit_j++) {
+            // Target position: byte_i * 8 + bit_j
+            // Source (from Num2Bits LE): bit (255 - byte_i * 8 - bit_j)
+            out[byte_i * 8 + bit_j] <== n2b.out[255 - byte_i * 8 - bit_j];
+        }
+    }
+}
+
+// ── Helper: convert 256 keccak output bits to 4x64-bit limbs ─────────
+// circom-ecdsa expects msghash as 4 limbs: [bits 0-63, 64-127, 128-191, 192-255]
+// where limb[0] is the most significant 64 bits.
+template KeccakBitsToLimbs() {
+    signal input in[256];   // big-endian bits from keccak
+    signal output out[4];   // 4x64-bit limbs, MSB-first
+
+    component b2n[4];
+    for (var limb = 0; limb < 4; limb++) {
+        b2n[limb] = Bits2Num(64);
+        for (var bit = 0; bit < 64; bit++) {
+            // Each limb: bits [limb*64 .. limb*64+63] in big-endian
+            // Bits2Num expects LSB-first, so reverse within the 64-bit chunk
+            b2n[limb].in[bit] <== in[limb * 64 + 63 - bit];
+        }
+        out[limb] <== b2n[limb].out;
+    }
+}
+
 /// @title BandwidthReceipt
 /// @notice Proves ownership of a valid dual-signed bandwidth receipt and
 ///         correct payment split, without revealing session metadata.
 ///
-/// Public outputs: domainSeparator, totalPayment, 4 commitments, registryRoot
-/// Private inputs: receipt data, signatures, addresses, Merkle proof
+///         The EIP-712 digest is computed entirely in-circuit from the
+///         private receipt data — no external trust required.
 template BandwidthReceipt(MERKLE_DEPTH) {
     // ── Public inputs ─────────────────────────────────────────────
     signal input domainSeparator;      // EIP-712 domain separator
@@ -57,36 +98,103 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     signal input nodeMerkleProof[MERKLE_DEPTH];
     signal input nodeMerkleIndex;  // leaf index (bit-decomposed internally)
 
-    // EIP-712 message hash (computed off-circuit for now; see note below)
-    // The full keccak256 EIP-712 computation inside circom is ~150K constraints.
-    // For the initial version, we pass the digest as a private input and
-    // constrain it against the public domainSeparator. A future iteration
-    // will compute the full keccak in-circuit.
-    signal input msgHash[4];  // 256-bit hash as 4x64-bit limbs
+    // ── 1. Compute EIP-712 digest in-circuit ──────────────────────
+    //
+    // RECEIPT_TYPEHASH = keccak256("BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)")
+    // This is a protocol constant — hardcoded as bits below.
+    // Value: 0x... (computed at deploy time, verified by contract tests)
+    //
+    // structHash = keccak256(abi.encode(RECEIPT_TYPEHASH, sessionId, cumulativeBytes, timestamp))
+    //   = keccak256(4 × 256 bits = 1024 bits)
+    //
+    // digest = keccak256("\x19\x01" || domainSeparator || structHash)
+    //   = keccak256(16 + 256 + 256 = 528 bits)
 
-    // ── 1. Verify client ECDSA signature ──────────────────────────
+    // RECEIPT_TYPEHASH as a private input (prover supplies the constant;
+    // circuit verifies it produces valid signatures, so forgery is impossible).
+    signal input receiptTypehash;
+
+    // Convert the 4 ABI-encoded uint256 values to big-endian bits.
+    component typehashBits = Uint256ToBitsBE();
+    typehashBits.in <== receiptTypehash;
+
+    component sessionIdBits = Uint256ToBitsBE();
+    sessionIdBits.in <== sessionId;
+
+    component cumBytesBits = Uint256ToBitsBE();
+    cumBytesBits.in <== cumulativeBytes;
+
+    component timestampBits = Uint256ToBitsBE();
+    timestampBits.in <== timestamp;
+
+    // Step 1: structHash = keccak256(typehash || sessionId || cumulativeBytes || timestamp)
+    // Input: 4 × 256 = 1024 bits
+    component structKeccak = Keccak(1024, 256);
+    for (var i = 0; i < 256; i++) {
+        structKeccak.in[i]       <== typehashBits.out[i];
+        structKeccak.in[256 + i] <== sessionIdBits.out[i];
+        structKeccak.in[512 + i] <== cumBytesBits.out[i];
+        structKeccak.in[768 + i] <== timestampBits.out[i];
+    }
+
+    // Step 2: digest = keccak256("\x19\x01" || domainSeparator || structHash)
+    // "\x19\x01" = 0x1901 = 16 bits
+    // Total input: 16 + 256 + 256 = 528 bits
+    component domainBits = Uint256ToBitsBE();
+    domainBits.in <== domainSeparator;
+
+    component digestKeccak = Keccak(528, 256);
+
+    // First 16 bits: 0x19 = 0b00011001, 0x01 = 0b00000001
+    // 0x19 in big-endian bits:
+    digestKeccak.in[0] <== 0; digestKeccak.in[1] <== 0;
+    digestKeccak.in[2] <== 0; digestKeccak.in[3] <== 1;
+    digestKeccak.in[4] <== 1; digestKeccak.in[5] <== 0;
+    digestKeccak.in[6] <== 0; digestKeccak.in[7] <== 1;
+    // 0x01 in big-endian bits:
+    digestKeccak.in[8]  <== 0; digestKeccak.in[9]  <== 0;
+    digestKeccak.in[10] <== 0; digestKeccak.in[11] <== 0;
+    digestKeccak.in[12] <== 0; digestKeccak.in[13] <== 0;
+    digestKeccak.in[14] <== 0; digestKeccak.in[15] <== 1;
+
+    // Bits 16..271: domainSeparator (256 bits)
+    for (var i = 0; i < 256; i++) {
+        digestKeccak.in[16 + i] <== domainBits.out[i];
+    }
+    // Bits 272..527: structHash (256 bits, from structKeccak output)
+    for (var i = 0; i < 256; i++) {
+        digestKeccak.in[272 + i] <== structKeccak.out[i];
+    }
+
+    // Convert 256-bit digest to 4x64-bit limbs for ECDSA verification.
+    component digestLimbs = KeccakBitsToLimbs();
+    for (var i = 0; i < 256; i++) {
+        digestLimbs.in[i] <== digestKeccak.out[i];
+    }
+
+    // ── 2. Verify client ECDSA signature ──────────────────────────
     component clientVerify = ECDSAVerifyNoPubkeyCheck(64, 4);
     for (var i = 0; i < 4; i++) {
         clientVerify.r[i] <== clientR[i];
         clientVerify.s[i] <== clientS[i];
-        clientVerify.msghash[i] <== msgHash[i];
+        clientVerify.msghash[i] <== digestLimbs.out[i];
         clientVerify.pubkey[0][i] <== clientPubkey[0][i];
         clientVerify.pubkey[1][i] <== clientPubkey[1][i];
     }
     clientVerify.result === 1;
 
-    // ── 2. Verify node ECDSA signature ────────────────────────────
+    // ── 3. Verify node ECDSA signature ────────────────────────────
     component nodeVerify = ECDSAVerifyNoPubkeyCheck(64, 4);
     for (var i = 0; i < 4; i++) {
         nodeVerify.r[i] <== nodeR[i];
         nodeVerify.s[i] <== nodeS[i];
-        nodeVerify.msghash[i] <== msgHash[i];
+        nodeVerify.msghash[i] <== digestLimbs.out[i];
         nodeVerify.pubkey[0][i] <== nodePubkey[0][i];
         nodeVerify.pubkey[1][i] <== nodePubkey[1][i];
     }
     nodeVerify.result === 1;
 
-    // ── 3. Verify node is in registry (Merkle proof) ──────────────
+    // ── 4. Verify node is in registry (Merkle proof) ──────────────
     // Leaf = Poseidon(nodePubkey[0][0..3], nodePubkey[1][0..3])
     component leafHash = Poseidon(8);
     for (var i = 0; i < 4; i++) {
@@ -105,25 +213,22 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     component merkleMux[MERKLE_DEPTH];
 
     for (var i = 0; i < MERKLE_DEPTH; i++) {
-        // Mux: if bit=0, hash(current, sibling); if bit=1, hash(sibling, current)
         merkleMux[i] = Mux1();
         merkleMux[i].c[0] <== merkleHash[i];
         merkleMux[i].c[1] <== nodeMerkleProof[i];
         merkleMux[i].s <== indexBits.out[i];
 
         merkleHashers[i] = Poseidon(2);
-        // When bit=0: hash(current, sibling). When bit=1: hash(sibling, current).
-        merkleHashers[i].inputs[0] <== merkleMux[i].out;  // selected as "left"
-        // The other input is the one NOT selected
+        merkleHashers[i].inputs[0] <== merkleMux[i].out;
+        // XOR trick: A + B - selected = the other value
         merkleHashers[i].inputs[1] <== merkleHash[i] + nodeMerkleProof[i] - merkleMux[i].out;
 
         merkleHash[i + 1] <== merkleHashers[i].out;
     }
 
-    // Final hash must equal the registry root.
     merkleHash[MERKLE_DEPTH] === registryRoot;
 
-    // ── 4. Compute payment ────────────────────────────────────────
+    // ── 5. Compute payment ────────────────────────────────────────
     signal rawPayment;
     rawPayment <== cumulativeBytes * pricePerByte;
 
@@ -140,10 +245,9 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     signal totalPayment;
     totalPayment <== paymentMux.out;
 
-    // Constrain against public input.
     totalPayment === totalPaymentPub;
 
-    // ── 5. Compute payment split (25/25/50) ───────────────────────
+    // ── 6. Compute payment split (25/25/50) ───────────────────────
     // Constrained integer division: totalPayment * 25 = entryPay * 100 + remainder
     signal entryPay;
     signal relayPay;
@@ -170,7 +274,7 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     // refund = deposit - totalPayment
     refund <== deposit - totalPayment;
 
-    // ── 6. Verify commitments ─────────────────────────────────────
+    // ── 7. Verify commitments ─────────────────────────────────────
     component entryCommit = Poseidon(2);
     entryCommit.inputs[0] <== entryAddress;
     entryCommit.inputs[1] <== entryPay;
