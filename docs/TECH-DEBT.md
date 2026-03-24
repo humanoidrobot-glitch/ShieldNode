@@ -11,7 +11,7 @@ The node (`node/src/`) and client (`client/src-tauri/src/`) both define overlapp
 
 **Why deferred:** Adds build complexity (workspace setup, cross-crate dependencies). Acceptable while both crates are evolving rapidly.
 
-**When to fix:** Before Phase 2, when multi-hop circuits require the node and client to agree on packet formats and scoring.
+**When to fix:** Before Phase 5 mainnet launch. Node and client already share packet formats, scoring, and EIP-712 logic that should be unified.
 
 ### ~~Node scoring algorithm divergence~~ — RESOLVED
 Resolved in `fe83b5e`. Both Rust (`circuit.rs`) and TypeScript (`scoring.ts`) now use the same `10 * sqrt(stake_eth) + 30 * uptime - 0.001 * price - 20 * slashes^2` formula.
@@ -178,6 +178,13 @@ Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't c
 ---
 
 ## Frontend
+
+### Config persistence uses current_dir()
+`update_settings` in `lib.rs` saves to `std::env::current_dir().join("shieldnode-client.json")`. The working directory is unpredictable at runtime — it depends on how the binary is launched. Should use Tauri's `app_config_dir()` for the OS-appropriate user config directory.
+
+**Why deferred:** Requires threading `AppHandle` through to the `update_settings` command, which is a structural change to how the function accesses Tauri APIs.
+
+**When to fix:** Before Phase 5. Use `app.path().app_config_dir()` from Tauri v2 path API.
 
 ### Gas price display units
 The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
