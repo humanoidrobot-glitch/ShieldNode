@@ -5,8 +5,7 @@ export const EIP712_DOMAIN = {
   version: "1",
   // Sepolia chain ID
   chainId: 11155111,
-  // Placeholder — will be replaced with the deployed SessionSettlement address
-  verifyingContract: "0x0000000000000000000000000000000000000002" as `0x${string}`,
+  verifyingContract: "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959" as `0x${string}`,
 } as const;
 
 export const BANDWIDTH_RECEIPT_TYPES = {

@@ -1,8 +1,12 @@
-/** Sepolia testnet contract addresses (placeholders) */
+/** Sepolia testnet contract addresses */
 export const NODE_REGISTRY_ADDRESS =
-  "0x0000000000000000000000000000000000000001" as const;
+  "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11" as const;
 export const SESSION_SETTLEMENT_ADDRESS =
-  "0x0000000000000000000000000000000000000002" as const;
+  "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959" as const;
+export const SLASHING_ORACLE_ADDRESS =
+  "0x28E5059F61F458a86c5318C63b8b7688BA678FeD" as const;
+export const TREASURY_ADDRESS =
+  "0xaE76fF930d1137b4a10e76285d82A5e40FF0619f" as const;
 
 /** Minimal ABI for NodeRegistry — only functions the client calls */
 export const nodeRegistryAbi = [

@@ -19,7 +19,7 @@ The foundation: a working relay node, on-chain contracts, and a basic client.
 - [x] **Tauri client scaffold** — Rust backend with 6 Tauri commands (connect, disconnect, get_status, get_nodes, get_session, get_gas_price), tunnel/circuit/wallet/receipt modules. React frontend with dark-themed UI: ConnectToggle, CircuitMap, NodeBrowser (sortable/filterable), SessionCost, GasMonitor (color-coded), Settings (RPC, kill switch, auto-rotate, gas ceiling)
 
 ### Remaining
-- [ ] Deploy contracts to Ethereum Sepolia testnet
+- [x] **Contracts deployed to Sepolia** — NodeRegistry (`0xC6D9...df11`), SessionSettlement (`0xF32a...E959`), SlashingOracle (`0x28E5...8FeD`), Treasury (`0xaE76...619f`)
 - [ ] Node registers on-chain, client reads registry to discover nodes
 - [ ] End-to-end session lifecycle: client opens session with deposit, bandwidth receipts flow, settlement on disconnect
 - [ ] TUN device / raw socket integration for actual IP packet forwarding (exit mode)
