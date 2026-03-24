@@ -243,6 +243,13 @@ The EIP-712 `BandwidthReceipt` typehash is independently defined in `SessionSett
 
 ## Frontend (Phase 4 additions)
 
+### Zkey ProvingKey loaded from disk on every proof generation
+`client/src-tauri/src/zk_prove.rs` reads and parses the zkey file (~100MB for a 3.5M constraint circuit) on every `generate_proof()` call. The `ProvingKey<Bn254>` is immutable after loading.
+
+**Why deferred:** Proving happens once per session disconnect. Single load is acceptable for current usage.
+
+**When to fix:** If batch settlements or retry logic make multiple proofs common. Cache the `ProvingKey` in `AppState` via `Arc<OnceCell<ProvingKey<Bn254>>>`.
+
 ### Gas price display units
 The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
 

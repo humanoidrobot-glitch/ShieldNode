@@ -9,6 +9,7 @@ use std::path::Path;
 use ark_bn254::{Bn254, Fr};
 use ark_circom::{CircomBuilder, CircomConfig, CircomReduction};
 use ark_groth16::Groth16;
+use ark_serialize::CanonicalSerialize;
 use ark_std::rand::thread_rng;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
@@ -202,59 +203,29 @@ fn format_proof_for_solidity(
     proof: &ark_groth16::Proof<Bn254>,
     public_inputs: &[Fr],
 ) -> ZkProof {
-    use ark_serialize::CanonicalSerialize;
-
-    let a = g1_to_strings(&proof.a);
-    let b = g2_to_strings(&proof.b);
-    let c = g1_to_strings(&proof.c);
-
-    let signals: Vec<String> = public_inputs
-        .iter()
-        .map(|f| {
-            let mut bytes = Vec::new();
-            f.serialize_uncompressed(&mut bytes).unwrap();
-            BigInt::from_bytes_le(num_bigint::Sign::Plus, &bytes).to_string()
-        })
-        .collect();
-
     ZkProof {
-        pi_a: a,
-        pi_b: b,
-        pi_c: c,
-        public_signals: signals,
+        pi_a: g1_to_strings(&proof.a),
+        pi_b: g2_to_strings(&proof.b),
+        pi_c: g1_to_strings(&proof.c),
+        public_signals: public_inputs.iter().map(field_to_decimal).collect(),
     }
 }
 
+/// Serialize an arkworks field element to a decimal string.
+fn field_to_decimal<F: CanonicalSerialize>(f: &F) -> String {
+    let mut bytes = Vec::with_capacity(32);
+    f.serialize_uncompressed(&mut bytes)
+        .expect("serialization to Vec always succeeds");
+    BigInt::from_bytes_le(num_bigint::Sign::Plus, &bytes).to_string()
+}
+
 fn g1_to_strings(point: &ark_bn254::G1Affine) -> [String; 2] {
-    use ark_serialize::CanonicalSerialize;
-    let mut x_bytes = Vec::new();
-    let mut y_bytes = Vec::new();
-    point.x.serialize_uncompressed(&mut x_bytes).unwrap();
-    point.y.serialize_uncompressed(&mut y_bytes).unwrap();
-    [
-        BigInt::from_bytes_le(num_bigint::Sign::Plus, &x_bytes).to_string(),
-        BigInt::from_bytes_le(num_bigint::Sign::Plus, &y_bytes).to_string(),
-    ]
+    [field_to_decimal(&point.x), field_to_decimal(&point.y)]
 }
 
 fn g2_to_strings(point: &ark_bn254::G2Affine) -> [[String; 2]; 2] {
-    use ark_serialize::CanonicalSerialize;
-    let mut x0 = Vec::new();
-    let mut x1 = Vec::new();
-    let mut y0 = Vec::new();
-    let mut y1 = Vec::new();
-    point.x.c0.serialize_uncompressed(&mut x0).unwrap();
-    point.x.c1.serialize_uncompressed(&mut x1).unwrap();
-    point.y.c0.serialize_uncompressed(&mut y0).unwrap();
-    point.y.c1.serialize_uncompressed(&mut y1).unwrap();
     [
-        [
-            BigInt::from_bytes_le(num_bigint::Sign::Plus, &x0).to_string(),
-            BigInt::from_bytes_le(num_bigint::Sign::Plus, &x1).to_string(),
-        ],
-        [
-            BigInt::from_bytes_le(num_bigint::Sign::Plus, &y0).to_string(),
-            BigInt::from_bytes_le(num_bigint::Sign::Plus, &y1).to_string(),
-        ],
+        [field_to_decimal(&point.x.c0), field_to_decimal(&point.x.c1)],
+        [field_to_decimal(&point.y.c0), field_to_decimal(&point.y.c1)],
     ]
 }
