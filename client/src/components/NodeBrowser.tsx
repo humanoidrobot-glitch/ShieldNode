@@ -40,26 +40,31 @@ export function NodeBrowser({ nodes, loading, error, onRefresh }: NodeBrowserPro
     );
   }, [nodes, search]);
 
+  const scored = useMemo(
+    () => filtered.map((n) => ({ node: n, score: scoreNode(n) })),
+    [filtered],
+  );
+
   const sorted = useMemo(() => {
-    return [...filtered].sort((a, b) => {
+    return [...scored].sort((a, b) => {
       let aVal: number;
       let bVal: number;
 
       if (sortKey === "score") {
-        aVal = scoreNode(a);
-        bVal = scoreNode(b);
+        aVal = a.score;
+        bVal = b.score;
       } else if (sortKey === "nodeId") {
         return sortDir === "asc"
-          ? a.nodeId.localeCompare(b.nodeId)
-          : b.nodeId.localeCompare(a.nodeId);
+          ? a.node.nodeId.localeCompare(b.node.nodeId)
+          : b.node.nodeId.localeCompare(a.node.nodeId);
       } else {
-        aVal = a[sortKey];
-        bVal = b[sortKey];
+        aVal = a.node[sortKey];
+        bVal = b.node[sortKey];
       }
 
       return sortDir === "asc" ? aVal - bVal : bVal - aVal;
     });
-  }, [filtered, sortKey, sortDir]);
+  }, [scored, sortKey, sortDir]);
 
   const columns: { key: SortKey; label: string }[] = [
     { key: "nodeId", label: "Node ID" },
@@ -135,7 +140,7 @@ export function NodeBrowser({ nodes, loading, error, onRefresh }: NodeBrowserPro
                 </td>
               </tr>
             ) : (
-              sorted.map((node) => (
+              sorted.map(({ node, score }) => (
                 <tr
                   key={node.nodeId}
                   className="hover:opacity-80 transition-opacity"
@@ -154,7 +159,7 @@ export function NodeBrowser({ nodes, loading, error, onRefresh }: NodeBrowserPro
                     className="px-3 py-2 font-medium"
                     style={{ color: "var(--accent-green)" }}
                   >
-                    {scoreNode(node).toFixed(3)}
+                    {score.toFixed(3)}
                   </td>
                 </tr>
               ))

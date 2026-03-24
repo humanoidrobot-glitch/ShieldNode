@@ -14,11 +14,6 @@ use circuit::NodeInfo;
 use tunnel::TunnelManager;
 use wallet::WalletConfig;
 
-// ---------------------------------------------------------------------------
-// Application state
-// ---------------------------------------------------------------------------
-
-/// Top-level connection state exposed to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum ConnectionState {
@@ -37,7 +32,6 @@ impl Default for ConnectionState {
     }
 }
 
-/// Shared application state managed by Tauri.
 pub struct AppState {
     pub connection: Mutex<ConnectionState>,
     pub tunnel: Mutex<TunnelManager>,
@@ -54,9 +48,15 @@ impl Default for AppState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Serialisable types returned to the frontend
-// ---------------------------------------------------------------------------
+impl AppState {
+    fn wallet_config(&self) -> Result<WalletConfig, String> {
+        let cfg = self.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        Ok(WalletConfig {
+            rpc_url: cfg.rpc_url.clone(),
+            chain_id: cfg.chain_id,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -66,58 +66,29 @@ pub struct SessionInfo {
     pub connected_since: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
-
-/// Connect to the VPN through the best available node.
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
-    // Fetch the mock node list and pick the best one.
     let nodes = mock_nodes();
     let node = circuit::select_single_node(&nodes)?;
 
-    // Transition to Connecting.
     {
-        let mut conn = state
-            .connection
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connecting;
     }
 
     info!(node_id = %node.node_id, endpoint = %node.endpoint, "connecting to node");
 
-    // Start the (stub) tunnel.
     {
-        let mut tun = state
-            .tunnel
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
         tun.start_tunnel(&node.endpoint, &node.public_key)?;
     }
 
-    // Open an on-chain session (stub).
-    let wallet_cfg = {
-        let cfg = state
-            .config
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
-        WalletConfig {
-            rpc_url: cfg.rpc_url.clone(),
-            chain_id: cfg.chain_id,
-        }
-    };
-
+    let wallet_cfg = state.wallet_config()?;
     let session_id =
         wallet::open_session(&wallet_cfg, &[node.node_id.clone()], 1_000_000_000_000_000)?;
 
-    // Transition to Connected.
     {
-        let mut conn = state
-            .connection
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
             node_id: node.node_id.clone(),
             session_id: session_id.clone(),
@@ -129,54 +100,28 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     Ok(session_id)
 }
 
-/// Disconnect from the VPN and settle the session on-chain.
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
-    // Grab the current session info before we reset state.
     let (session_id, bytes_used) = {
-        let conn = state
-            .connection
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         match &*conn {
-            ConnectionState::Connected {
-                session_id,
-                bytes_used,
-                ..
-            } => (session_id.clone(), *bytes_used),
+            ConnectionState::Connected { session_id, bytes_used, .. } => {
+                (session_id.clone(), *bytes_used)
+            }
             _ => return Err("not connected".to_string()),
         }
     };
 
-    // Stop the tunnel.
     {
-        let mut tun = state
-            .tunnel
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
         tun.stop_tunnel()?;
     }
 
-    // Settle on-chain (stub).
-    let wallet_cfg = {
-        let cfg = state
-            .config
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
-        WalletConfig {
-            rpc_url: cfg.rpc_url.clone(),
-            chain_id: cfg.chain_id,
-        }
-    };
-
+    let wallet_cfg = state.wallet_config()?;
     let tx_hash = wallet::settle_session(&wallet_cfg, &session_id, bytes_used)?;
 
-    // Reset state.
     {
-        let mut conn = state
-            .connection
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
+        let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Disconnected;
     }
 
@@ -240,9 +185,8 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
     wallet::get_gas_price(&rpc_url)
 }
 
-// ---------------------------------------------------------------------------
-// Mock helpers
-// ---------------------------------------------------------------------------
+//Mock helpers
+// ──────────────────────────────────────────────────────────────────────────
 
 /// Generate a small set of mock nodes for development / testing.
 fn mock_nodes() -> Vec<NodeInfo> {
@@ -295,9 +239,8 @@ fn mock_nodes() -> Vec<NodeInfo> {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// Tauri entry point
-// ---------------------------------------------------------------------------
+//Tauri entry point
+// ──────────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

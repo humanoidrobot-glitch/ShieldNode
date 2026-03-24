@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ConnectToggle } from "./components/ConnectToggle";
 import { CircuitMap } from "./components/CircuitMap";
 import { NodeBrowser } from "./components/NodeBrowser";
@@ -10,23 +10,41 @@ import { useNodes } from "./hooks/useNodes";
 import { useSession } from "./hooks/useSession";
 import { useGas } from "./hooks/useGas";
 
+function Collapsible({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section
+      className="rounded-lg overflow-hidden"
+      style={{ background: "var(--card-bg)", border: "1px solid var(--border-color)" }}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 cursor-pointer"
+        style={{ background: "transparent", border: "none", color: "var(--text-primary)" }}
+      >
+        <span className="text-sm font-semibold">{title}</span>
+        <span
+          className="text-xs transition-transform duration-200"
+          style={{ color: "var(--text-secondary)", transform: open ? "rotate(180deg)" : "rotate(0deg)" }}
+        >
+          &#9662;
+        </span>
+      </button>
+      {open && <div className="px-4 pb-4">{children}</div>}
+    </section>
+  );
+}
+
 function App() {
-  const { status, nodes: circuitNodes, connect, disconnect } = useCircuit();
+  const { status, error: connectError, connect, disconnect } = useCircuit();
   const { nodes, loading: nodesLoading, error: nodesError, refresh } = useNodes();
   const { session, loading: sessionLoading } = useSession(status);
   const { gasPrice, level: gasLevel } = useGas();
 
-  const [showNodes, setShowNodes] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-
   const isConnected = status === "connected";
 
   return (
-    <div
-      className="min-h-screen flex flex-col"
-      style={{ background: "var(--bg-dark)" }}
-    >
-      {/* Top bar */}
+    <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-dark)" }}>
       <header
         className="flex items-center justify-between px-5 py-3 shrink-0"
         style={{ borderBottom: "1px solid var(--border-color)" }}
@@ -37,115 +55,37 @@ function App() {
         <div className="flex items-center gap-2">
           <span
             className={`w-2.5 h-2.5 rounded-full ${isConnected ? "pulse-green" : ""}`}
-            style={{
-              background: isConnected ? "var(--accent-green)" : "var(--accent-red)",
-            }}
+            style={{ background: isConnected ? "var(--accent-green)" : "var(--accent-red)" }}
           />
           <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            {status === "connecting"
-              ? "Connecting"
-              : isConnected
-                ? "Protected"
-                : "Unprotected"}
+            {status === "connecting" ? "Connecting" : isConnected ? "Protected" : "Unprotected"}
           </span>
         </div>
       </header>
 
-      {/* Main content */}
       <main className="flex-1 overflow-y-auto px-5 py-6">
         <div className="max-w-lg mx-auto flex flex-col gap-5">
-          {/* Hero: Connect Toggle */}
-          <section className="flex justify-center py-6">
-            <ConnectToggle
-              status={status}
-              onConnect={connect}
-              onDisconnect={disconnect}
-            />
+          <section className="flex flex-col items-center gap-2 py-6">
+            <ConnectToggle status={status} onConnect={connect} onDisconnect={disconnect} />
+            {connectError && (
+              <p className="text-xs" style={{ color: "var(--accent-red)" }}>{connectError}</p>
+            )}
           </section>
 
-          {/* Circuit Map */}
-          <CircuitMap status={status} nodes={circuitNodes} />
+          <CircuitMap status={status} nodes={[]} />
 
-          {/* Session + Gas row */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <SessionCost session={session} loading={sessionLoading} />
             <GasMonitor gasPrice={gasPrice} level={gasLevel} />
           </div>
 
-          {/* Collapsible: Node Browser */}
-          <section
-            className="rounded-lg overflow-hidden"
-            style={{
-              background: "var(--card-bg)",
-              border: "1px solid var(--border-color)",
-            }}
-          >
-            <button
-              onClick={() => setShowNodes((v) => !v)}
-              className="w-full flex items-center justify-between px-4 py-3 cursor-pointer"
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "var(--text-primary)",
-              }}
-            >
-              <span className="text-sm font-semibold">Node Browser</span>
-              <span
-                className="text-xs transition-transform duration-200"
-                style={{
-                  color: "var(--text-secondary)",
-                  transform: showNodes ? "rotate(180deg)" : "rotate(0deg)",
-                }}
-              >
-                &#9662;
-              </span>
-            </button>
-            {showNodes && (
-              <div className="px-4 pb-4">
-                <NodeBrowser
-                  nodes={nodes}
-                  loading={nodesLoading}
-                  error={nodesError}
-                  onRefresh={refresh}
-                />
-              </div>
-            )}
-          </section>
+          <Collapsible title="Node Browser">
+            <NodeBrowser nodes={nodes} loading={nodesLoading} error={nodesError} onRefresh={refresh} />
+          </Collapsible>
 
-          {/* Collapsible: Settings */}
-          <section
-            className="rounded-lg overflow-hidden"
-            style={{
-              background: "var(--card-bg)",
-              border: "1px solid var(--border-color)",
-            }}
-          >
-            <button
-              onClick={() => setShowSettings((v) => !v)}
-              className="w-full flex items-center justify-between px-4 py-3 cursor-pointer"
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "var(--text-primary)",
-              }}
-            >
-              <span className="text-sm font-semibold">Settings</span>
-              <span
-                className="text-xs transition-transform duration-200"
-                style={{
-                  color: "var(--text-secondary)",
-                  transform: showSettings ? "rotate(180deg)" : "rotate(0deg)",
-                }}
-              >
-                &#9662;
-              </span>
-            </button>
-            {showSettings && (
-              <div className="px-4 pb-4">
-                <Settings />
-              </div>
-            )}
-          </section>
+          <Collapsible title="Settings">
+            <Settings />
+          </Collapsible>
         </div>
       </main>
     </div>

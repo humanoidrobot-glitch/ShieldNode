@@ -9,12 +9,10 @@ export interface NodeInfo {
 }
 
 export interface SessionInfo {
-  sessionId: string;
-  nodeId: string;
-  deposit: number;
-  bytesUsed: number;
-  startTime: number;
-  status: "active" | "closed" | "disputed";
+  session_id: string;
+  node_id: string;
+  bytes_used: number;
+  connected_since: number;
 }
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";

@@ -26,10 +26,7 @@ export function SessionCost({ session, loading }: SessionCostProps) {
     return (
       <div
         className="rounded-lg p-4"
-        style={{
-          background: "var(--card-bg)",
-          border: "1px solid var(--border-color)",
-        }}
+        style={{ background: "var(--card-bg)", border: "1px solid var(--border-color)" }}
       >
         <h3
           className="text-xs font-semibold uppercase tracking-wider mb-2"
@@ -44,17 +41,13 @@ export function SessionCost({ session, loading }: SessionCostProps) {
     );
   }
 
-  const elapsed = Math.floor(Date.now() / 1000) - session.startTime;
-  // Rough cost estimate: assume a flat rate placeholder
-  const estimatedCost = session.bytesUsed * 1e-12; // simplified placeholder
+  const elapsed = Math.floor(Date.now() / 1000) - session.connected_since;
+  const estimatedCost = session.bytes_used * 1e-12;
 
   return (
     <div
       className="rounded-lg p-4"
-      style={{
-        background: "var(--card-bg)",
-        border: "1px solid var(--border-color)",
-      }}
+      style={{ background: "var(--card-bg)", border: "1px solid var(--border-color)" }}
     >
       <h3
         className="text-xs font-semibold uppercase tracking-wider mb-3"
@@ -65,28 +58,20 @@ export function SessionCost({ session, loading }: SessionCostProps) {
 
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Deposit
-          </p>
-          <p className="text-sm font-mono">{session.deposit.toFixed(6)} ETH</p>
+          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Data Used</p>
+          <p className="text-sm font-mono">{formatBytes(session.bytes_used)}</p>
         </div>
         <div>
-          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Data Used
-          </p>
-          <p className="text-sm font-mono">{formatBytes(session.bytesUsed)}</p>
+          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Duration</p>
+          <p className="text-sm font-mono">{formatDuration(elapsed)}</p>
         </div>
         <div>
-          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Est. Cost
-          </p>
+          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Est. Cost</p>
           <p className="text-sm font-mono">{estimatedCost.toFixed(8)} ETH</p>
         </div>
         <div>
-          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Duration
-          </p>
-          <p className="text-sm font-mono">{formatDuration(elapsed)}</p>
+          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Node</p>
+          <p className="text-sm font-mono">{session.node_id.slice(0, 12)}...</p>
         </div>
       </div>
     </div>

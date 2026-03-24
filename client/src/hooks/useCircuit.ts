@@ -1,41 +1,42 @@
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectionStatus, NodeInfo } from "../lib/types";
+import type { ConnectionStatus } from "../lib/types";
 
 interface UseCircuitReturn {
   status: ConnectionStatus;
-  nodes: NodeInfo[];
+  error: string | null;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
 }
 
 export function useCircuit(): UseCircuitReturn {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const connect = useCallback(async () => {
     try {
+      setError(null);
       setStatus("connecting");
-      const result = await invoke<NodeInfo[]>("connect");
-      setNodes(result ?? []);
+      await invoke<string>("connect");
       setStatus("connected");
     } catch (err) {
-      console.error("Failed to connect:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
       setStatus("disconnected");
-      setNodes([]);
     }
   }, []);
 
   const disconnect = useCallback(async () => {
     try {
-      await invoke("disconnect");
+      setError(null);
+      await invoke<string>("disconnect");
     } catch (err) {
-      console.error("Failed to disconnect:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
     } finally {
       setStatus("disconnected");
-      setNodes([]);
     }
   }, []);
 
-  return { status, nodes, connect, disconnect };
+  return { status, error, connect, disconnect };
 }

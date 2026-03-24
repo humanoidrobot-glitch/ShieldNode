@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { GasLevel } from "../lib/types";
 
@@ -15,15 +15,13 @@ function getGasLevel(gwei: number): GasLevel {
 
 export function useGas(): UseGasReturn {
   const [gasPrice, setGasPrice] = useState<number | null>(null);
-  const [level, setLevel] = useState<GasLevel>("low");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const fetchGas = async () => {
       try {
         const price = await invoke<number>("get_gas_price");
-        setGasPrice(price);
-        setLevel(getGasLevel(price));
+        setGasPrice((prev) => (prev === price ? prev : price));
       } catch (err) {
         console.error("Failed to fetch gas price:", err);
       }
@@ -39,6 +37,8 @@ export function useGas(): UseGasReturn {
       }
     };
   }, []);
+
+  const level = useMemo(() => getGasLevel(gasPrice ?? 0), [gasPrice]);
 
   return { gasPrice, level };
 }
