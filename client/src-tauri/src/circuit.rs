@@ -3,15 +3,16 @@ use rand::rngs::OsRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::hop_codec;
+use crate::kex::{self, KeyExchange, X25519Kem};
 
 /// Metadata describing a single ShieldNode relay / exit node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub node_id: String,
-    pub public_key: [u8; 32],
+    /// X25519 public key (32 bytes) or hybrid X25519+ML-KEM-768 key (1216 bytes).
+    pub public_key: Vec<u8>,
     pub endpoint: String,
     pub stake: u64,
     pub uptime: f64,
@@ -108,22 +109,20 @@ impl CircuitState {
     }
 }
 
-/// Build a 3-hop circuit from the given nodes, deriving a placeholder
-/// session key for each hop via ephemeral X25519 + HKDF.
+/// Build a 3-hop circuit from the given nodes, deriving a session key
+/// for each hop via KEM encapsulate + HKDF.
 ///
-/// Real Noise NK handshakes will replace this in Phase 2+.
+/// Automatically selects the KEM based on public key length:
+/// - 32 bytes: X25519 (classical)
+/// - 1216 bytes: Hybrid X25519 + ML-KEM-768 (post-quantum safe)
 pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
     let mut hops: Vec<CircuitHop> = Vec::with_capacity(3);
 
     for (i, node) in nodes.iter().enumerate() {
-        let eph_secret = StaticSecret::random_from_rng(OsRng);
-        let peer_public = PublicKey::from(node.public_key);
-
-        // Perform a single DH: eph_secret * peer_public
-        let shared = eph_secret.diffie_hellman(&peer_public);
+        let shared_secret_bytes = encapsulate_for_key(&node.public_key, i)?;
 
         // Derive a 32-byte session key via HKDF-SHA256
-        let hk = Hkdf::<Sha256>::new(Some(b"ShieldNode-circuit-v1"), shared.as_bytes());
+        let hk = Hkdf::<Sha256>::new(Some(b"ShieldNode-circuit-v1"), &shared_secret_bytes);
         let mut session_key = [0u8; 32];
         hk.expand(b"session-key", &mut session_key)
             .map_err(|e| format!("HKDF expand failed for hop {i}: {e}"))?;
@@ -144,6 +143,30 @@ pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
         relay: hops.remove(0),
         exit: hops.remove(0),
     })
+}
+
+/// Detect key type by length and encapsulate with the appropriate KEM.
+fn encapsulate_for_key(public_key: &[u8], hop_index: usize) -> Result<Vec<u8>, String> {
+    match public_key.len() {
+        32 => {
+            let pk = X25519Kem::public_key_from_bytes(public_key)
+                .map_err(|e| format!("invalid X25519 key for hop {hop_index}: {e}"))?;
+            let (ss, _ct) = X25519Kem::encapsulate(&pk)
+                .map_err(|e| format!("X25519 encapsulate failed for hop {hop_index}: {e}"))?;
+            Ok(ss.as_ref().to_vec())
+        }
+        kex::HYBRID_PK_LEN => {
+            let pk = kex::HybridKem::public_key_from_bytes(public_key)
+                .map_err(|e| format!("invalid hybrid key for hop {hop_index}: {e}"))?;
+            let (ss, _ct) = kex::HybridKem::encapsulate(&pk)
+                .map_err(|e| format!("hybrid encapsulate failed for hop {hop_index}: {e}"))?;
+            Ok(ss.as_ref().to_vec())
+        }
+        len => Err(format!(
+            "unsupported public key length for hop {hop_index}: {len} (expected 32 or {})",
+            kex::HYBRID_PK_LEN
+        )),
+    }
 }
 
 /// Score a node for selection.
@@ -259,7 +282,7 @@ mod tests {
     fn make_node(id: &str, stake: u64, uptime: f64, price: u64, slashes: u32) -> NodeInfo {
         NodeInfo {
             node_id: id.to_string(),
-            public_key: [0u8; 32],
+            public_key: vec![0u8; 32],
             endpoint: "127.0.0.1:51820".to_string(),
             stake,
             uptime,
@@ -358,9 +381,9 @@ mod tests {
             make_node("relay", 75_000, 0.98, 15, 0),
             make_node("exit", 50_000, 0.96, 8, 0),
         ];
-        nodes[0].public_key = [1u8; 32];
-        nodes[1].public_key = [2u8; 32];
-        nodes[2].public_key = [3u8; 32];
+        nodes[0].public_key = vec![1u8; 32];
+        nodes[1].public_key = vec![2u8; 32];
+        nodes[2].public_key = vec![3u8; 32];
         let state = build_circuit(&nodes).unwrap();
         assert_eq!(state.entry.hop_index, 0);
         assert_eq!(state.relay.hop_index, 1);

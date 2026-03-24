@@ -26,7 +26,7 @@ impl TunnelManager {
     pub fn start_tunnel(
         &mut self,
         node_endpoint: &str,
-        _node_pubkey: &[u8; 32],
+        _node_pubkey: &[u8],
     ) -> Result<(), String> {
         if self.connected {
             warn!("tunnel already active -- tearing down before reconnecting");

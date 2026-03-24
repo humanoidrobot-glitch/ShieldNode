@@ -1,10 +1,10 @@
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
 use sha2::Sha256;
 use thiserror::Error;
-use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::aead;
+use super::traits::KeyExchange;
+use super::x25519_kem::{X25519Kem, X25519PublicKey, X25519SecretKey};
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -30,19 +30,24 @@ pub enum NoiseError {
 ///
 /// After the handshake both sides share a symmetric session key derived
 /// from the DH outputs.
+///
+/// Uses `KeyExchange` trait types for key storage and generation. The DH
+/// operations use KEM encapsulate/decapsulate internally (for X25519, the
+/// "ciphertext" is the ephemeral public key). When hybrid PQ is added,
+/// it will layer ML-KEM alongside this X25519 Noise handshake.
 pub struct NoiseHandshake {
-    local_static: StaticSecret,
-    ephemeral_secret: Option<StaticSecret>,
-    peer_static_public: Option<PublicKey>,
+    local_static_sk: X25519SecretKey,
+    ephemeral_sk: Option<X25519SecretKey>,
+    peer_static_pk: Option<X25519PublicKey>,
     session_key: Option<[u8; 32]>,
 }
 
 impl NoiseHandshake {
-    pub fn new(local_static: StaticSecret) -> Self {
+    pub fn new(local_static: X25519SecretKey) -> Self {
         Self {
-            local_static,
-            ephemeral_secret: None,
-            peer_static_public: None,
+            local_static_sk: local_static,
+            ephemeral_sk: None,
+            peer_static_pk: None,
             session_key: None,
         }
     }
@@ -54,12 +59,11 @@ impl NoiseHandshake {
     ///
     /// `peer_static` is the responder's known static public key.
     /// Returns the 32-byte ephemeral public key to send.
-    pub fn initiator_handshake_msg1(&mut self, peer_static: PublicKey) -> [u8; 32] {
-        let eph = StaticSecret::random_from_rng(OsRng);
-        let eph_pub = PublicKey::from(&eph);
-        self.ephemeral_secret = Some(eph);
-        self.peer_static_public = Some(peer_static);
-        eph_pub.to_bytes()
+    pub fn initiator_handshake_msg1(&mut self, peer_static: X25519PublicKey) -> [u8; 32] {
+        let (eph_pk, eph_sk) = X25519Kem::generate_keypair();
+        self.ephemeral_sk = Some(eph_sk);
+        self.peer_static_pk = Some(peer_static);
+        eph_pk.to_bytes()
     }
 
     /// Initiator step 2: process the responder's message `<- e, ee, se`
@@ -67,17 +71,23 @@ impl NoiseHandshake {
     ///
     /// Must be called after `initiator_handshake_msg1`.
     pub fn initiator_handshake_msg2(&mut self, msg: &[u8; 32]) -> Result<[u8; 32], NoiseError> {
-        let responder_eph = PublicKey::from(*msg);
+        let responder_eph_ct = X25519Kem::ciphertext_from_bytes(msg)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
 
-        let eph_secret = self
-            .ephemeral_secret
+        let eph_sk = self
+            .ephemeral_sk
             .as_ref()
             .ok_or_else(|| NoiseError::HandshakeFailed("no ephemeral key".into()))?;
 
-        let ee = eph_secret.diffie_hellman(&responder_eph).to_bytes();
-        let se = self.local_static.diffie_hellman(&responder_eph).to_bytes();
+        // ee = DH(initiator_eph, responder_eph)
+        let ee = X25519Kem::decapsulate(&responder_eph_ct, eph_sk)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
 
-        let session_key = derive_session_key(&ee, &se);
+        // se = DH(initiator_static, responder_eph)
+        let se = X25519Kem::decapsulate(&responder_eph_ct, &self.local_static_sk)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
+
+        let session_key = derive_session_key(&ee.to_bytes(), &se.to_bytes());
         self.session_key = Some(session_key);
         Ok(session_key)
     }
@@ -91,21 +101,25 @@ impl NoiseHandshake {
         &mut self,
         initiator_eph_bytes: &[u8; 32],
     ) -> Result<([u8; 32], [u8; 32]), NoiseError> {
-        let initiator_eph = PublicKey::from(*initiator_eph_bytes);
+        let initiator_eph_ct = X25519Kem::ciphertext_from_bytes(initiator_eph_bytes)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
 
-        let eph = StaticSecret::random_from_rng(OsRng);
-        let eph_pub = PublicKey::from(&eph);
+        let (eph_pk, eph_sk) = X25519Kem::generate_keypair();
 
-        let ee = eph.diffie_hellman(&initiator_eph).to_bytes();
+        // ee = DH(responder_eph, initiator_eph)
+        let ee = X25519Kem::decapsulate(&initiator_eph_ct, &eph_sk)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
+
         // se = DH(responder_static, initiator_eph) — mirrors the
         // initiator's DH(initiator_static, responder_eph) by commutativity.
-        let se = self.local_static.diffie_hellman(&initiator_eph).to_bytes();
+        let se = X25519Kem::decapsulate(&initiator_eph_ct, &self.local_static_sk)
+            .map_err(|e| NoiseError::HandshakeFailed(e.to_string()))?;
 
-        let session_key = derive_session_key(&ee, &se);
-        self.ephemeral_secret = Some(eph);
+        let session_key = derive_session_key(&ee.to_bytes(), &se.to_bytes());
+        self.ephemeral_sk = Some(eph_sk);
         self.session_key = Some(session_key);
 
-        Ok((eph_pub.to_bytes(), session_key))
+        Ok((eph_pk.to_bytes(), session_key))
     }
 
     pub fn session_key(&self) -> Option<[u8; 32]> {

@@ -3,6 +3,7 @@ mod chain;
 mod circuit;
 mod config;
 mod hop_codec;
+mod kex;
 mod receipts;
 mod sphinx;
 mod tunnel;
@@ -635,7 +636,7 @@ async fn rotation_loop(
 fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
     NodeInfo {
         node_id: n.node_id,
-        public_key: decode_hex_32(&n.public_key),
+        public_key: decode_hex_bytes(&n.public_key),
         endpoint: n.endpoint,
         stake: (n.stake * 1e18) as u64,
         uptime: n.uptime,
@@ -662,15 +663,17 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
     }
 }
 
-/// Decode a 0x-prefixed hex string into [u8; 32]. Returns zeros on failure.
-fn decode_hex_32(hex_str: &str) -> [u8; 32] {
+/// Decode a 0x-prefixed hex string into bytes. Returns empty vec on failure.
+fn decode_hex_bytes(hex_str: &str) -> Vec<u8> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let mut out = [0u8; 32];
-    if stripped.len() != 64 { return out; }
-    for (i, chunk) in stripped.as_bytes().chunks(2).enumerate().take(32) {
+    if stripped.len() % 2 != 0 { return Vec::new(); }
+    let mut out = Vec::with_capacity(stripped.len() / 2);
+    for chunk in stripped.as_bytes().chunks(2) {
         if let Ok(s) = std::str::from_utf8(chunk) {
             if let Ok(byte) = u8::from_str_radix(s, 16) {
-                out[i] = byte;
+                out.push(byte);
+            } else {
+                return Vec::new();
             }
         }
     }
@@ -687,7 +690,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
     vec![
         NodeInfo {
             node_id: "node-alpha-001".to_string(),
-            public_key: [1u8; 32],
+            public_key: vec![1u8; 32],
             endpoint: "203.0.113.10:51820".to_string(),
             stake: ETH,              // 1 ETH
             uptime: 0.995,
@@ -696,7 +699,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
         },
         NodeInfo {
             node_id: "node-beta-002".to_string(),
-            public_key: [2u8; 32],
+            public_key: vec![2u8; 32],
             endpoint: "198.51.100.20:51820".to_string(),
             stake: ETH * 3 / 4,      // 0.75 ETH
             uptime: 0.980,
@@ -705,7 +708,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
         },
         NodeInfo {
             node_id: "node-gamma-003".to_string(),
-            public_key: [3u8; 32],
+            public_key: vec![3u8; 32],
             endpoint: "192.0.2.30:51820".to_string(),
             stake: ETH / 2,          // 0.5 ETH
             uptime: 0.960,
@@ -714,7 +717,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
         },
         NodeInfo {
             node_id: "node-delta-004".to_string(),
-            public_key: [4u8; 32],
+            public_key: vec![4u8; 32],
             endpoint: "198.51.100.40:51820".to_string(),
             stake: ETH * 2,          // 2 ETH
             uptime: 0.999,
@@ -723,7 +726,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
         },
         NodeInfo {
             node_id: "node-epsilon-005".to_string(),
-            public_key: [5u8; 32],
+            public_key: vec![5u8; 32],
             endpoint: "203.0.113.50:51820".to_string(),
             stake: ETH / 10,         // 0.1 ETH (minimum)
             uptime: 0.850,

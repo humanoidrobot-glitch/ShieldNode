@@ -1,8 +1,10 @@
 use std::path::Path;
 
-use rand::rngs::OsRng;
 use thiserror::Error;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::PublicKey;
+
+use super::traits::KeyExchange;
+use super::x25519_kem::{X25519Kem, X25519PublicKey, X25519SecretKey};
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -17,16 +19,18 @@ pub enum KeyError {
 // ── persistent node keypair ────────────────────────────────────────────
 
 /// A long-lived X25519 keypair stored on disk.
+///
+/// Uses `KeyExchange` trait types so the hybrid PQ handshake can
+/// access the same key material.
 pub struct NodeKeyPair {
-    secret: StaticSecret,
-    public: PublicKey,
+    secret: X25519SecretKey,
+    public: X25519PublicKey,
 }
 
 impl NodeKeyPair {
     /// Generate a brand-new random keypair.
     pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
+        let (public, secret) = X25519Kem::generate_keypair();
         Self { secret, public }
     }
 
@@ -37,18 +41,38 @@ impl NodeKeyPair {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
-        let secret = StaticSecret::from(arr);
+        let secret = x25519_dalek::StaticSecret::from(arr);
         let public = PublicKey::from(&secret);
-        Ok(Self { secret, public })
+        Ok(Self {
+            public: X25519PublicKey(public),
+            secret: X25519SecretKey(secret),
+        })
     }
 
-    /// The public half of this keypair.
+    /// The public half of this keypair (as the raw dalek type for
+    /// backward compatibility).
     pub fn public_key(&self) -> PublicKey {
-        self.public
+        *self.public.as_dalek()
     }
 
-    /// Borrow the static secret (needed for DH and handshake operations).
-    pub fn secret(&self) -> &StaticSecret {
+    /// The public half as the trait-based type.
+    pub fn public_key_kem(&self) -> &X25519PublicKey {
+        &self.public
+    }
+
+    /// The 32-byte public key bytes.
+    pub fn public_key_bytes(&self) -> [u8; 32] {
+        self.public.to_bytes()
+    }
+
+    /// Borrow the static secret (as the raw dalek type for backward
+    /// compatibility).
+    pub fn secret(&self) -> &x25519_dalek::StaticSecret {
+        self.secret.as_dalek()
+    }
+
+    /// Borrow the static secret as the trait-based type.
+    pub fn secret_kem(&self) -> &X25519SecretKey {
         &self.secret
     }
 
@@ -87,27 +111,37 @@ impl NodeKeyPair {
 // ── ephemeral per-circuit session ──────────────────────────────────────
 
 /// An ephemeral X25519 session used for a single circuit.
+///
+/// Uses `KeyExchange` trait for key generation and KEM-style
+/// encapsulate/decapsulate for DH.
 pub struct EphemeralSession {
-    secret: StaticSecret,
-    public: PublicKey,
+    secret: X25519SecretKey,
+    public: X25519PublicKey,
 }
 
 impl EphemeralSession {
     /// Generate a fresh ephemeral keypair.
     pub fn new() -> Self {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
+        let (public, secret) = X25519Kem::generate_keypair();
         Self { secret, public }
     }
 
     pub fn public_key(&self) -> PublicKey {
-        self.public
+        *self.public.as_dalek()
     }
 
-    /// Perform X25519 Diffie-Hellman with the peer's public key and
-    /// return the 32-byte shared secret.
+    pub fn public_key_bytes(&self) -> [u8; 32] {
+        self.public.to_bytes()
+    }
+
+    /// Perform key exchange with the peer's public key and return the
+    /// 32-byte shared secret. Uses KEM decapsulate (X25519 DH internally).
     pub fn diffie_hellman(&self, peer_public: &PublicKey) -> [u8; 32] {
-        self.secret.diffie_hellman(peer_public).to_bytes()
+        let ct = X25519Kem::ciphertext_from_bytes(peer_public.as_bytes())
+            .expect("PublicKey is always 32 bytes");
+        X25519Kem::decapsulate(&ct, &self.secret)
+            .expect("X25519 decapsulate cannot fail")
+            .to_bytes()
     }
 }
 

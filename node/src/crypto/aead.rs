@@ -34,6 +34,17 @@ pub fn decrypt(
     cipher.decrypt(&nonce, ciphertext)
 }
 
+/// Encrypt using a raw 12-byte nonce.
+pub fn encrypt_with_nonce(
+    key: &[u8; 32],
+    nonce_bytes: &[u8; 12],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.encrypt(nonce, plaintext)
+}
+
 /// Decrypt using a raw 12-byte nonce (for cases like `process_relay_packet`
 /// where the caller provides the full nonce).
 pub fn decrypt_with_nonce(

@@ -72,6 +72,8 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 - [ ] Client displays estimated session cost before connection
 - [x] **Gas price monitoring** — GasMonitor component with color-coded Gwei display (green < 1, yellow 1-5, red > 5), polls every 30s, configurable gas ceiling in Settings
 - [ ] Stress test: simulate 100+ concurrent sessions, measure L1 settlement throughput
+- [x] **Hybrid PQ key exchange** — Upgrade circuit handshake from X25519-only to X25519 + ML-KEM-768 (Kyber). Session keys derived from both key exchanges via HKDF, so security is the stronger of the two. X25519 alone is vulnerable to Shor's algorithm; a "harvest now, decrypt later" adversary recording handshakes today could retroactively reveal circuit routes once quantum hardware exists. ML-KEM adds ~1 KB to the handshake per hop (~3 KB total for a 3-hop circuit) — negligible for a once-per-session operation. Uses `ml-kem` crate (RustCrypto, FIPS 203). This is the single most important PQ item because it protects the confidentiality of circuit routing, which is ShieldNode's core privacy guarantee
+- [x] **Crypto trait abstractions** — Refactor `crypto/` module to use trait-based interfaces: `KeyExchange` trait (impl for X25519, ML-KEM, Hybrid), `Signer` trait (impl for ECDSA, ML-DSA), `SymmetricCipher` trait (impl for ChaCha20-Poly1305). This enables swapping primitives without touching tunnel or circuit logic. Prep for Ethereum's own PQ migration (L1 protocol upgrades targeted for 2029 per EF roadmap)
 - [ ] Design ZK bandwidth receipt circuit (circom or Noir): define the statement to prove, select proving system, build initial circuit
 - [ ] Implement `ZKSettlement.sol` verifier contract alongside `SessionSettlement.sol` — both paths work, ZK is opt-in
 - [ ] Client-side proof generation for private settlement (<5s on modern hardware)
@@ -81,7 +83,10 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 
 **After ZK:** A valid proof was submitted, 0.0024 ETH was distributed to three commitments, remainder refunded to a shielded address. No session ID, no node identities, no timing correlation.
 
-**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet.
+### Post-Quantum Note
+The ZK receipt circuit should be designed to verify ML-DSA (Dilithium) signatures alongside ECDSA from the start. ML-DSA signatures are ~2.4 KB (40x larger than ECDSA), which would be expensive to verify on-chain directly, but inside a ZK circuit the signature size doesn't affect on-chain gas — only proof verification cost matters. This means ZK settlement is the natural home for PQ signatures: prove you have a valid PQ-signed receipt without posting the large signature on-chain.
+
+**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet. Hybrid PQ handshake operational across all circuit hops.
 
 ---
 
@@ -92,14 +97,17 @@ Security audits, hardening, and public deployment.
 - [ ] Security audit of all contracts (prioritize SessionSettlement, ZKSettlement, and NodeRegistry — these hold funds)
 - [ ] Security audit of node software (prioritize crypto operations and memory handling)
 - [ ] Audit of ZK circuit correctness — proof must not allow over-claiming or underpaying
+- [ ] **PQ handshake audit** — Independent review of the hybrid X25519 + ML-KEM key exchange implementation, session key derivation, and that the hybrid combiner correctly ensures security under both classical and quantum assumptions
+- [ ] **PQ signature verification in ZK circuit** — Confirm ML-DSA signature verification inside the ZK receipt circuit is sound and matches the on-chain verifier's acceptance criteria
 - [ ] Kill switch, auto-rotate circuits, and circuit pinning fully functional in client
 - [ ] Challenge-response protocol v1 (trusted challenger set)
 - [ ] Deploy immutable contracts to Ethereum mainnet (no proxy)
 - [ ] ZK settlement as default for privacy-conscious users, plaintext settlement as fallback
 - [ ] Documentation site: how to run a node, use the client, verify the contracts
+- [ ] **Operator security guide** — Recommend smart contract wallets (Safe) with PQ-upgradeable signature verification for node staking keys, rather than raw EOAs. Document Ethereum's PQ migration path (account abstraction) so operators are prepared
 - [ ] At least 10 independently operated nodes live before public client release
 
-**Success metric:** Real users browsing through ShieldNode on Ethereum mainnet, with ZK-private settlement available.
+**Success metric:** Real users browsing through ShieldNode on Ethereum mainnet, with ZK-private settlement and post-quantum circuit handshakes.
 
 ---
 
@@ -114,6 +122,54 @@ Remove all remaining centralization points and scale the network.
 - [ ] **ZK node eligibility proofs** — Commitment-based registry where nodes prove they meet selection criteria (stake, uptime, no slashes) without revealing which node they are. Hardens against enumeration attacks by state actors
 - [ ] **ZK no-log compliance proofs** — Nodes periodically prove their operational state contains no connection metadata. Most useful against honest-but-curious operators
 - [ ] **ZK proof of honest relay (research)** — Evaluate whether ZK-VM systems (RISC Zero, SP1, Valida) are mature enough to prove correct packet forwarding. Depends on 100x proving cost reduction. Node relay logic is already structured as a pure function to enable this
+- [ ] **PQ Sphinx packet format** — Upgrade the Sphinx onion routing layer itself to use PQ primitives for the per-hop DH operations. The hybrid handshake (Phase 4) protects circuit *construction*, but Sphinx's internal layered encryption also uses X25519. Full PQ Sphinx replaces all elliptic curve operations in the packet format with PQ equivalents. Research dependency: efficient PQ group operations suitable for Sphinx's SURB (Single Use Reply Block) construction. Monitor Nym's PQ Sphinx research for prior art
+- [ ] **ML-DSA receipt signing as default** — Once Ethereum's execution layer supports PQ signature verification via precompiles (EF roadmap fork J*), switch bandwidth receipt signing from ECDSA to ML-DSA as the default, with ECDSA as fallback. The ZK circuit already supports both (added Phase 4). The plaintext settlement path will need a new `PQSessionSettlement.sol` that verifies ML-DSA on-chain via the precompile
+- [ ] **Track EF PQ key registry (fork I*)** — When Ethereum adds a PQ key registry at the consensus layer, evaluate whether ShieldNode's NodeRegistry should mirror this pattern — allowing node operators to register PQ public keys that are anchored in the same infrastructure validators use
+
+---
+
+## Post-Quantum Strategy
+
+ShieldNode's approach to quantum resistance follows the EF's principle of **cryptographic agility** — the ability to upgrade primitives without destabilizing the system.
+
+### Threat Model
+Quantum computing threatens public-key cryptography (ECDSA, X25519, BLS) via Shor's algorithm. Symmetric crypto (ChaCha20-Poly1305, SHA-256, HKDF) retains adequate security post-quantum (Grover's algorithm provides only quadratic speedup — 256-bit keys retain 128-bit security).
+
+For ShieldNode specifically, the threats in priority order are:
+
+1. **Circuit handshake confidentiality (highest priority)** — "Harvest now, decrypt later." An adversary recording X25519 handshakes today can retroactively reveal circuit routes once quantum hardware exists. This breaks ShieldNode's core privacy guarantee. **Mitigated in Phase 4** via hybrid X25519 + ML-KEM-768
+2. **Bandwidth receipt forgery** — An adversary who cracks ECDSA keys could forge receipts to steal session deposits or frame nodes. **Mitigated in Phase 4** via ML-DSA signatures inside ZK circuits
+3. **Node operator key theft** — Deriving private keys from on-chain public keys to drain stakes or impersonate nodes. **Mitigated in Phase 5** via operator security guide (smart contract wallets with PQ-upgradeable verification)
+4. **Sphinx packet decryption** — Retroactive decryption of onion layers to reconstruct traffic routes. Lower priority than handshake because packets are ephemeral, but still a concern for adversaries with long-term traffic captures. **Mitigated in Phase 6** via PQ Sphinx
+
+### What's Already Quantum-Safe
+- **ChaCha20-Poly1305** symmetric encryption (tunnel data, onion layer payloads)
+- **HKDF-SHA256** key derivation
+- **SHA-256 / Keccak-256** hashing (contract storage, Merkle trees)
+
+### What Needs Upgrading
+| Component | Current | PQ Upgrade | Phase |
+|-----------|---------|------------|-------|
+| Circuit handshake | X25519 | Hybrid X25519 + ML-KEM-768 | 4 |
+| Receipt signatures | ECDSA (secp256k1) | ML-DSA-65 (inside ZK circuit) | 4 |
+| Operator staking keys | EOA (secp256k1) | Smart contract wallet + PQ sig verification | 5 |
+| Sphinx DH operations | X25519 | PQ group operations (research) | 6 |
+| On-chain receipt verification (plaintext path) | ECDSA ecrecover | ML-DSA via EF precompile (fork J*) | 6 |
+
+### Dependencies on Ethereum's PQ Roadmap
+ShieldNode benefits from Ethereum's own PQ transition but does not block on it:
+- **Fork I* (PQ key registry)**: useful for node operator key management but not required — ShieldNode's registry is independent
+- **Fork J* (PQ sig precompiles)**: enables on-chain ML-DSA verification for the plaintext settlement path. Until then, PQ signatures are verified inside ZK circuits only (no on-chain gas penalty)
+- **Fork L* (PQ attestations + leanVM)**: no direct impact on ShieldNode, but strengthens the L1 consensus layer we depend on
+- **Full PQ consensus (longer term)**: secures the base layer ShieldNode settles on. Not something we build, but something we benefit from
+
+### Implementation Notes
+- Use `pqcrypto` or `ml-kem` crate for ML-KEM-768 in Rust. Both wrap the reference C implementation with Rust bindings. Verify the crate is NIST FIPS 203 compliant
+- Use `pqcrypto-dilithium` or `ml-dsa` crate for ML-DSA-65 signatures. NIST FIPS 204 compliant
+- Hybrid key exchange combiner: `session_key = HKDF-SHA256(X25519_shared || ML-KEM_shared, salt=session_id, info="shieldnode-hybrid-kex")`. Both shared secrets contribute; compromise of either alone does not break the session key
+- ML-KEM-768 key sizes: public key 1,184 bytes, ciphertext 1,088 bytes. Per-hop handshake adds ~2.3 KB. For a 3-hop circuit: ~6.9 KB total overhead during construction. Negligible given this happens once per session
+- ML-DSA-65 signature size: 3,293 bytes. Too large for direct on-chain verification at reasonable gas cost, but inside a ZK circuit the signature size does not affect on-chain gas — only the proof verification cost (~200K–300K gas) matters. This is why ZK settlement is the natural home for PQ signatures
+- The `Signer` trait abstraction (Phase 4) must support both deterministic (ECDSA) and randomized (ML-DSA) signing. ML-DSA requires access to a CSPRNG during signing — ensure the trait interface accommodates this
 
 ---
 
