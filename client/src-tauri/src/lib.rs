@@ -648,13 +648,15 @@ fn decode_hex_32(hex_str: &str) -> [u8; 32] {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Generate a small set of mock nodes for development / testing.
+/// Stakes are in wei (1 ETH = 1e18 wei).
 fn mock_nodes() -> Vec<NodeInfo> {
+    const ETH: u64 = 1_000_000_000_000_000_000; // 1e18
     vec![
         NodeInfo {
             node_id: "node-alpha-001".to_string(),
             public_key: [1u8; 32],
             endpoint: "203.0.113.10:51820".to_string(),
-            stake: 100_000,
+            stake: ETH,              // 1 ETH
             uptime: 0.995,
             price_per_byte: 10,
             slash_count: 0,
@@ -663,7 +665,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             node_id: "node-beta-002".to_string(),
             public_key: [2u8; 32],
             endpoint: "198.51.100.20:51820".to_string(),
-            stake: 75_000,
+            stake: ETH * 3 / 4,      // 0.75 ETH
             uptime: 0.980,
             price_per_byte: 15,
             slash_count: 0,
@@ -672,7 +674,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             node_id: "node-gamma-003".to_string(),
             public_key: [3u8; 32],
             endpoint: "192.0.2.30:51820".to_string(),
-            stake: 50_000,
+            stake: ETH / 2,          // 0.5 ETH
             uptime: 0.960,
             price_per_byte: 8,
             slash_count: 1,
@@ -681,7 +683,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             node_id: "node-delta-004".to_string(),
             public_key: [4u8; 32],
             endpoint: "198.51.100.40:51820".to_string(),
-            stake: 120_000,
+            stake: ETH * 2,          // 2 ETH
             uptime: 0.999,
             price_per_byte: 20,
             slash_count: 0,
@@ -690,7 +692,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             node_id: "node-epsilon-005".to_string(),
             public_key: [5u8; 32],
             endpoint: "203.0.113.50:51820".to_string(),
-            stake: 30_000,
+            stake: ETH / 10,         // 0.1 ETH (minimum)
             uptime: 0.850,
             price_per_byte: 5,
             slash_count: 2,

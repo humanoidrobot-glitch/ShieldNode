@@ -148,34 +148,37 @@ pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
 
 /// Score a node for selection.
 ///
-/// Higher is better.  The formula rewards high stake and uptime while
-/// penalising high price and previous slashes.
+/// Higher is better.  Stake is the dominant factor (square-root scaling)
+/// so that higher-staked nodes get meaningfully more sessions routed to
+/// them, making staking a revenue accelerator.
 ///
 /// ```text
-/// score = (stake_weight * ln(1 + stake))
-///       + (uptime_weight * uptime)
-///       - (price_weight  * price_per_byte)
-///       - (slash_penalty  * slash_count^2)
+/// score = 10 * sqrt(stake / 1e18)     ← dominant: 0.1 ETH → 3.16, 1 ETH → 10, 4 ETH → 20
+///       + 30 * uptime                  ← 0..30 range
+///       - 0.001 * price_per_byte       ← small penalty for expensive nodes
+///       - 20 * slash_count^2           ← harsh penalty for slashed nodes
 /// ```
 pub fn score_node(node: &NodeInfo) -> f64 {
-    let stake_weight: f64 = 1.0;
-    let uptime_weight: f64 = 50.0;
-    let price_weight: f64 = 0.001;
-    let slash_penalty: f64 = 20.0;
+    // Stake is stored in wei-like units (1e18 per ETH).
+    let stake_eth = node.stake as f64 / 1e18;
+    let stake_score = 10.0 * stake_eth.sqrt();
 
-    let stake_score = stake_weight * ((1.0 + node.stake as f64).ln());
-    let uptime_score = uptime_weight * node.uptime;
-    let price_score = price_weight * node.price_per_byte as f64;
-    let slash_score = slash_penalty * (node.slash_count as f64).powi(2);
+    let uptime_score = 30.0 * node.uptime;
+    let price_score = 0.001 * node.price_per_byte as f64;
+    let slash_score = 20.0 * (node.slash_count as f64).powi(2);
 
     stake_score + uptime_score - price_score - slash_score
 }
 
-/// Select a three-hop circuit (entry, relay, exit) from the candidate list.
+/// Select a three-hop circuit (entry, relay, exit) via weighted random sampling.
 ///
-/// Nodes are ranked by [`score_node`] and the top three *distinct* nodes are
-/// returned.  When `exclude_ids` is non-empty, those nodes receive a heavy
-/// score penalty to encourage diversity on circuit rotation.
+/// Each node's selection probability is proportional to its score (clamped to
+/// a minimum of 1.0 so even low-scored nodes have *some* chance).  This means
+/// higher-staked nodes are picked more often — staking is a revenue accelerator
+/// — but the network still distributes load across all viable nodes.
+///
+/// When `exclude_ids` is non-empty, those nodes receive a heavy score penalty
+/// to encourage diversity on circuit rotation.
 pub fn select_circuit(
     nodes: &[NodeInfo],
     exclude_ids: &[&str],
@@ -187,7 +190,7 @@ pub fn select_circuit(
         ));
     }
 
-    let mut scored: Vec<(f64, &NodeInfo)> = nodes
+    let mut candidates: Vec<(f64, &NodeInfo)> = nodes
         .iter()
         .map(|n| {
             let base = score_node(n);
@@ -196,17 +199,36 @@ pub fn select_circuit(
             } else {
                 0.0
             };
-            (base + penalty, n)
+            // Clamp weight to >= 1.0 so every eligible node has some chance.
+            let weight = (base + penalty).max(1.0);
+            (weight, n)
         })
         .collect();
 
-    // Sort descending by score.
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut selected = Vec::with_capacity(3);
+    let mut rng = OsRng;
+
+    for _ in 0..3 {
+        let total: f64 = candidates.iter().map(|(w, _)| w).sum();
+        let mut roll: f64 = rng.gen::<f64>() * total;
+
+        let mut pick_idx = candidates.len() - 1; // fallback to last
+        for (i, (w, _)) in candidates.iter().enumerate() {
+            roll -= w;
+            if roll <= 0.0 {
+                pick_idx = i;
+                break;
+            }
+        }
+
+        selected.push(candidates[pick_idx].1.clone());
+        candidates.remove(pick_idx);
+    }
 
     Ok([
-        scored[0].1.clone(), // entry
-        scored[1].1.clone(), // relay
-        scored[2].1.clone(), // exit
+        selected.remove(0),
+        selected.remove(0),
+        selected.remove(0),
     ])
 }
 
@@ -244,18 +266,30 @@ mod tests {
     }
 
     #[test]
-    fn higher_stake_and_uptime_wins() {
-        let good = make_node("good", 100_000, 0.99, 10, 0);
-        let bad = make_node("bad", 1_000, 0.50, 100, 2);
+    fn higher_stake_and_uptime_scores_higher() {
+        // 1 ETH staker with good uptime vs 0.001 ETH staker with bad uptime
+        let good = make_node("good", 1_000_000_000_000_000_000, 0.99, 10, 0);
+        let bad = make_node("bad", 1_000_000_000_000_000, 0.50, 100, 2);
         assert!(score_node(&good) > score_node(&bad));
+    }
+
+    #[test]
+    fn stake_dominates_scoring() {
+        // 2 ETH staker vs 0.1 ETH staker, same uptime/price/slashes.
+        // sqrt(2) ≈ 1.41, sqrt(0.1) ≈ 0.316 → 10x difference in stake_score.
+        let high = make_node("high", 2_000_000_000_000_000_000, 0.95, 10, 0);
+        let low = make_node("low", 100_000_000_000_000_000, 0.95, 10, 0);
+        let diff = score_node(&high) - score_node(&low);
+        // The stake component alone should contribute >5 points of difference.
+        assert!(diff > 5.0, "stake diff was only {diff:.2}");
     }
 
     #[test]
     fn select_single_picks_best() {
         let nodes = vec![
-            make_node("a", 500, 0.80, 50, 1),
-            make_node("b", 100_000, 0.99, 10, 0),
-            make_node("c", 2_000, 0.70, 30, 0),
+            make_node("a", 100_000_000_000_000_000, 0.80, 50, 1),
+            make_node("b", 1_000_000_000_000_000_000, 0.99, 10, 0),
+            make_node("c", 200_000_000_000_000_000, 0.70, 30, 0),
         ];
         let best = select_single_node(&nodes).unwrap();
         assert_eq!(best.node_id, "b");
@@ -264,24 +298,53 @@ mod tests {
     #[test]
     fn circuit_needs_three() {
         let nodes = vec![
-            make_node("a", 500, 0.80, 50, 0),
-            make_node("b", 600, 0.90, 40, 0),
+            make_node("a", 100_000_000_000_000_000, 0.80, 50, 0),
+            make_node("b", 200_000_000_000_000_000, 0.90, 40, 0),
         ];
         assert!(select_circuit(&nodes, &[]).is_err());
     }
 
     #[test]
-    fn circuit_returns_three() {
+    fn circuit_returns_three_distinct_nodes() {
         let nodes = vec![
-            make_node("a", 500, 0.80, 50, 0),
-            make_node("b", 100_000, 0.99, 10, 0),
-            make_node("c", 2_000, 0.70, 30, 0),
-            make_node("d", 80_000, 0.95, 15, 0),
+            make_node("a", 100_000_000_000_000_000, 0.80, 50, 0),
+            make_node("b", 1_000_000_000_000_000_000, 0.99, 10, 0),
+            make_node("c", 200_000_000_000_000_000, 0.70, 30, 0),
+            make_node("d", 800_000_000_000_000_000, 0.95, 15, 0),
         ];
         let circuit = select_circuit(&nodes, &[]).unwrap();
         assert_eq!(circuit.len(), 3);
-        // Best node should be entry
-        assert_eq!(circuit[0].node_id, "b");
+        // All three must be distinct.
+        assert_ne!(circuit[0].node_id, circuit[1].node_id);
+        assert_ne!(circuit[1].node_id, circuit[2].node_id);
+        assert_ne!(circuit[0].node_id, circuit[2].node_id);
+    }
+
+    #[test]
+    fn weighted_selection_favors_high_stake() {
+        // One very high-staked node among several low-staked ones.
+        // Over many trials, the high-stake node should appear far more often.
+        let nodes = vec![
+            make_node("whale", 10_000_000_000_000_000_000, 0.99, 10, 0), // 10 ETH
+            make_node("b", 100_000_000_000_000_000, 0.95, 10, 0),         // 0.1 ETH
+            make_node("c", 100_000_000_000_000_000, 0.95, 10, 0),
+            make_node("d", 100_000_000_000_000_000, 0.95, 10, 0),
+            make_node("e", 100_000_000_000_000_000, 0.95, 10, 0),
+        ];
+        let mut whale_count = 0;
+        let trials = 200;
+        for _ in 0..trials {
+            let circuit = select_circuit(&nodes, &[]).unwrap();
+            if circuit.iter().any(|n| n.node_id == "whale") {
+                whale_count += 1;
+            }
+        }
+        // With 10 ETH vs 0.1 ETH nodes, whale should appear in >60% of circuits.
+        // (Expected ~79% — using 60% threshold for test stability.)
+        assert!(
+            whale_count > trials * 60 / 100,
+            "whale appeared in {whale_count}/{trials} circuits, expected >60%"
+        );
     }
 
     #[test]
