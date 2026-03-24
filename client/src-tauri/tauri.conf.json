@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "ShieldNode",
+  "version": "0.1.0",
+  "identifier": "xyz.shieldnode.client",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "ShieldNode",
+        "width": 420,
+        "height": 720,
+        "resizable": true,
+        "decorations": true
+      }
+    ],
+    "security": {}
+  },
+  "plugins": {}
+}

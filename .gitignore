@@ -1,5 +1,6 @@
 # Rust
 node/target/
+client/src-tauri/target/
 **/*.rs.bk
 
 # Foundry
@@ -7,9 +8,10 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 
-# Node
+# Node / Frontend
 node_modules/
 dist/
+client/src-tauri/gen/
 
 # Environment
 .env
