@@ -4,32 +4,23 @@ This document tracks the development milestones for ShieldNode. Each phase build
 
 ---
 
-## Phase 1: Single-Hop Tunnel (MVP) `← current`
+## Phase 1: Single-Hop Tunnel (MVP) -- COMPLETE
 
 The foundation: a working relay node, on-chain contracts, and a basic client.
 
-### Completed
 - [x] **Relay node binary** — WireGuard tunnel (boringtun), UDP listener with peer management, Sphinx onion routing, HKDF-SHA256 key derivation, ChaCha20-Poly1305 encryption, libp2p discovery (Kademlia + Gossipsub + mDNS), heartbeat service, metrics HTTP API
 - [x] **Node wired end-to-end** — All services orchestrated via tokio (UDP listener, metrics API, heartbeat, libp2p discovery), persistent key management (load-or-generate), graceful Ctrl+C shutdown, stale peer eviction
-- [x] **NodeRegistry contract** — 0.1 ETH minimum stake, 6h heartbeat interval, 7-day unstake cooldown, paginated `getActiveNodes()`, oracle-only slashing, `commitment` field reserved for Phase 6 ZK eligibility
-- [x] **SessionSettlement contract** — EIP-712 bandwidth receipts, 25/25/50 payment split (entry/relay/exit), 0.001 ETH minimum deposit, 1-hour force-settle timeout for absent clients
-- [x] **SlashingOracle contract** — Authorized challengers, 24-hour grace period, progressive slashing (10% / 25% / 100% + permanent ban), 50/50 split between challenger and treasury
-- [x] **Treasury contract** — Receives slash proceeds, 48-hour timelock on withdrawals
-- [x] **Test suite** — 19 Foundry tests passing (12 NodeRegistry + 7 SessionSettlement)
-- [x] **Tauri client scaffold** — Rust backend with 6 Tauri commands (connect, disconnect, get_status, get_nodes, get_session, get_gas_price), tunnel/circuit/wallet/receipt modules. React frontend with dark-themed UI: ConnectToggle, CircuitMap, NodeBrowser (sortable/filterable), SessionCost, GasMonitor (color-coded), Settings (RPC, kill switch, auto-rotate, gas ceiling)
-
-### Remaining
+- [x] **Smart contracts** — NodeRegistry (staking, heartbeats, paginated queries, slashing), SessionSettlement (EIP-712 receipts, 25/25/50 split, force-settle), SlashingOracle (progressive slashing), Treasury (timelock withdrawals). 19 Foundry tests passing
 - [x] **Contracts deployed to Sepolia** — NodeRegistry (`0xC6D9...df11`), SessionSettlement (`0xF32a...E959`), SlashingOracle (`0x28E5...8FeD`), Treasury (`0xaE76...619f`)
-- [x] **Node on-chain registration** — `--register` CLI flag sends real `register()` tx with 0.1 ETH stake and X25519 public key. Heartbeat service sends real on-chain heartbeats via alloy. First node registered and active on Sepolia
-- [x] **Client reads on-chain registry** — `get_nodes` reads live node data from NodeRegistry, falls back to mock data during development. `get_gas_price` fetches real gas price from RPC
-- [x] **Session lifecycle on-chain** — `connect` sends real `openSession` tx to SessionSettlement with 0.001 ETH deposit, parses session ID from event logs. `disconnect` sends `settleSession` tx. Phase 1 uses same node for all 3 circuit positions
-- [ ] TUN device / raw socket integration for actual IP packet forwarding (exit mode)
+- [x] **Tauri client** — Rust backend (6 commands, circuit scoring, wallet, receipts) + React frontend (dark-themed: ConnectToggle, CircuitMap, NodeBrowser, SessionCost, GasMonitor, Settings)
+- [x] **On-chain integration** — Node registers via `--register` with 0.1 ETH stake, real heartbeats via alloy. Client reads live nodes from registry, opens/settles sessions on SessionSettlement
+- [x] **TUN device** — Cross-platform TUN via tun-rs for exit-mode IP forwarding. Decapsulated packets injected into OS network stack. Graceful degradation without admin privileges
 
 **Success metric:** Browse the internet through a single ShieldNode relay and pay for it on L1 testnet.
 
 ---
 
-## Phase 2: Multi-Hop + Onion Routing
+## Phase 2: Multi-Hop + Onion Routing `← next`
 
 Privacy through layered encryption — no single node sees both source and destination.
 
