@@ -102,6 +102,7 @@ contract SlashingOracle is ISlashingOracle {
     //  Errors
     // ──────────────────────────────────────────────────────────────
 
+    error ZeroAddress();
     error NotOwner();
     error NotChallenger();
     error BadReason();
@@ -134,9 +135,9 @@ contract SlashingOracle is ISlashingOracle {
     /// @param _settlement Address of the SessionSettlement contract (for
     ///                    BandwidthFraud EIP-712 domain matching).
     constructor(address _registry, address _treasury, address _settlement) {
-        require(_registry != address(0), "SlashingOracle: zero registry");
-        require(_treasury != address(0), "SlashingOracle: zero treasury");
-        require(_settlement != address(0), "SlashingOracle: zero settlement");
+        if (_registry == address(0)) revert ZeroAddress();
+        if (_treasury == address(0)) revert ZeroAddress();
+        if (_settlement == address(0)) revert ZeroAddress();
         registry   = NodeRegistry(_registry);
         treasury   = _treasury;
         settlement = _settlement;
