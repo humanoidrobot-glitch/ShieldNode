@@ -53,12 +53,8 @@ Every RPC call (node reads, gas price, session open/settle) constructs a new all
 ### ~~Dummy settle signatures~~ — RESOLVED
 Resolved in `b4afc92`. Client now produces real EIP-712 signatures, requests node co-signature via RECEIPT_SIGN control message, and ABI-encodes dual-signed receipt for `settleSession`.
 
-### Session ID parsing fragility
-`wallet.rs` parses the session ID from the first log's second topic without verifying the event signature hash. If the contract emits other events before `SessionOpened`, this will extract the wrong value.
-
-**Why deferred:** Current contract only emits `SessionOpened` in `openSession()`. No ambiguity today.
-
-**When to fix:** Before mainnet (Phase 5). Add event signature hash check: `topic[0] == keccak256("SessionOpened(uint256,address,bytes32[3],uint256)")`.
+### ~~Session ID parsing fragility~~ — RESOLVED
+Resolved in `fc7c978`. Now scans all logs for matching `SessionOpened` event signature instead of blindly taking the first log.
 
 ---
 
@@ -134,17 +130,8 @@ The `mac` field in `SphinxHeader` uses a weak binding tag (first 32 bytes of pay
 
 **When to fix:** Phase 2, when circuit rotation and real-time bandwidth tracking make responsiveness more important. Use `tauri::Emitter` to push state changes to the frontend.
 
-### Settings UI is not wired to the Rust backend
-All fields in `Settings.tsx` (`rpcEndpoint`, `autoRotate`, `rotationIntervalMin`, `killSwitch`, `gasCeiling`) are local React state only. Changing them has no effect on the Rust `ClientConfig` — no Tauri commands exist to update config at runtime. The rotation loop reads `auto_rotate` and `circuit_rotation_interval_secs` from `AppState.config` at connect time, so UI changes are silently ignored.
-
-**Files affected:**
-- `client/src/components/Settings.tsx` — all settings are local state
-- `client/src-tauri/src/config.rs` — `ClientConfig` has no Tauri command to update it
-- `client/src-tauri/src/lib.rs` — no `update_config` handler registered
-
-**Why deferred:** Wiring all settings requires a new `update_config` Tauri command, validation, and deciding whether changes take effect immediately or on next connect. The current UI communicates intent even if it doesn't persist.
-
-**When to fix:** Phase 3–4, when users need to meaningfully control rotation intervals and gas ceilings. Add an `update_settings` Tauri command that writes to `AppState.config` and optionally persists to disk via `ClientConfig::save()`.
+### ~~Settings UI is not wired to the Rust backend~~ — RESOLVED
+Resolved in `9f792c9`. Added `get_settings` and `update_settings` Tauri commands. Settings.tsx loads from backend on mount and debounce-saves on change. `SettingsPayload` struct excludes private key. Settings take effect on next `connect()`.
 
 ### Duplicate EIP-712 receipt logic across node and client
 `client/src-tauri/src/receipts.rs` and `node/src/network/receipts.rs` have near-identical implementations of `compute_domain_separator` and `compute_receipt_digest`. The signing functions differ slightly (`sign_receipt` vs `sign_receipt_digest`) but produce the same output format.
@@ -161,12 +148,8 @@ All fields in `Settings.tsx` (`rpcEndpoint`, `autoRotate`, `rotationIntervalMin`
 
 ## Slashing Oracle (Phase 3)
 
-### Constructor uses require strings instead of custom errors
-`SlashingOracle.sol` constructor (lines 137–139) uses `require(_registry != address(0), "string")` for zero-address checks while the rest of the contract uses custom errors. Inconsistent but constructor-only — not on any hot path.
-
-**Why deferred:** Constructor runs once at deployment. Gas savings from custom errors are negligible here.
-
-**When to fix:** Next contract refactor pass or before mainnet deployment audit.
+### ~~Constructor uses require strings instead of custom errors~~ — RESOLVED
+Resolved in `9b0ee46`. Constructor now uses `ZeroAddress()` custom error.
 
 ### `_verifyFraudSigners` takes 10 parameters
 The function accepts 10 individual parameters due to stack-too-deep constraints. A `FraudReceipt` struct would reduce this to 3 params (nodeId, sessionId, two receipt structs) and improve readability.
@@ -182,12 +165,8 @@ Both contracts implement identical ECDSA signature recovery (assembly-based `r`/
 
 **When to fix:** Before mainnet deployment. Extract into a `library EIP712Utils`.
 
-### Missing test: slash proposal for non-existent node
-`proposeSlash` with an unregistered `nodeId` passes attestation verification (which doesn't check registry) but `executeSlash` would call `registry.slash` on a zero-stake entry. The behaviour is undefined/untested.
-
-**Why deferred:** Edge case unlikely in practice — challengers must be authorized and would not target non-existent nodes.
-
-**When to fix:** Before Phase 5. Add a test and either add a registry existence check in `proposeSlash` or document the expected behaviour.
+### ~~Missing test: slash proposal for non-existent node~~ — RESOLVED
+Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't check registry), execution reverts at `registry.slash` with "node not found". Documented as expected behavior.
 
 ### Attestation domain uses settlement address as verifyingContract
 `DOMAIN_SEPARATOR` uses the SessionSettlement address as `verifyingContract` for both receipt signatures (correct) and attestation signatures (semantically wrong — attestations are oracle-native). Wallets will show the settlement address when signing attestations, which is confusing. Low real-world impact since `SlashAttestation` has a distinct typehash.
