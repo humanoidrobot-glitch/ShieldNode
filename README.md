@@ -223,59 +223,16 @@ Nodes earn ETH directly from session settlements. Revenue depends on bandwidth s
 
 ## Roadmap
 
-### Phase 1: Single-Hop Tunnel (MVP) `← current`
-- [x] Rust node binary with WireGuard tunnel, Sphinx routing, and metrics API
-- [x] Solidity contracts: NodeRegistry, SessionSettlement, SlashingOracle, Treasury
-- [x] Foundry test suite (19 tests passing)
-- [ ] End-to-end single-relay tunnel (client connects through one node)
-- [ ] Tauri client with basic connect/disconnect
-- [ ] Deploy contracts to Ethereum Sepolia testnet
-- [ ] **Goal:** browse the internet through a single ShieldNode relay, paid on L1 testnet
+Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the full breakdown with completed/remaining checklists.
 
-### Phase 2: Multi-Hop + Onion Routing
-- [ ] Sphinx packet format integrated into live traffic
-- [ ] 3-hop circuit construction in client (entry -> relay -> exit)
-- [ ] Each node correctly peels its encryption layer and forwards
-- [ ] Circuit visualization in client UI
-- [ ] Bandwidth receipt co-signing between client and all 3 nodes
-- [ ] **Goal:** traffic routes through 3 nodes; no single node sees both source and destination
-
-### Phase 3: Staking + Slashing
-- [ ] Minimum stake requirement enforced in NodeRegistry
-- [ ] SlashingOracle accepts evidence and executes slashes on-chain
-- [ ] Client factors slash history and stake size into node scoring
-- [ ] Unstaking cooldown period enforced (7 days)
-- [ ] Progressive slashing live (10% -> 25% -> 100%)
-- [ ] **Goal:** slashed nodes lose stake and get deprioritized by clients
-
-### Phase 4: Economic Hardening + ZK Settlement Privacy
-- [ ] Market-driven pricing: nodes set price-per-byte in registry
-- [ ] Gas price monitoring and spike warnings in client UI
-- [ ] Stress test: 100+ concurrent sessions, measure L1 throughput
-- [ ] ZK bandwidth receipt circuit (circom/Noir): prove valid receipt without revealing session ID, node identities, or timing
-- [ ] `ZKSettlement.sol` verifier contract (opt-in alongside plaintext settlement)
-- [ ] Client-side proof generation (<5s on modern hardware)
-- [ ] **Goal:** the economic loop works end-to-end, with optional ZK-private settlement on testnet
-
-### Phase 5: Mainnet Launch
-- [ ] Security audit: all contracts (especially SessionSettlement, ZKSettlement, NodeRegistry)
-- [ ] Security audit: node crypto operations and memory handling
-- [ ] Audit: ZK circuit correctness
-- [ ] Kill switch, auto-rotate circuits, circuit pinning fully functional
-- [ ] Challenge-response protocol v1 (trusted challenger set)
-- [ ] Deploy immutable contracts to Ethereum mainnet
-- [ ] Documentation site: run a node, use the client, verify the contracts
-- [ ] At least 10 independently operated nodes before public client release
-- [ ] **Goal:** real users on Ethereum mainnet with ZK-private settlement available
-
-### Phase 6: Decentralization + Growth
-- [ ] Decentralize challenge-response via challenge bonds (anyone can challenge)
-- [ ] Mobile client (iOS/Android)
-- [ ] One-click node setup (`docker run shieldnode/relay`)
-- [ ] Explore preconfirmations (EIP-7917) for sub-slot session opening (<1s)
-- [ ] ZK node eligibility proofs: commitment-based registry, nodes prove they meet criteria without revealing identity
-- [ ] ZK no-log compliance proofs: nodes prove their state contains no connection metadata
-- [ ] Research: ZK proof of honest relay via ZK-VMs (RISC Zero, SP1) — depends on 100x proving cost reduction
+| Phase | Focus | Status |
+|-------|-------|--------|
+| **1. Single-Hop Tunnel (MVP)** | Working relay, contracts, basic client | In progress |
+| **2. Multi-Hop + Onion Routing** | 3-node circuits, layered encryption | Crypto primitives done |
+| **3. Staking + Slashing** | Cryptoeconomic security | Contracts done |
+| **4. Economic Hardening + ZK** | Market pricing, ZK-private settlement | Pricing done |
+| **5. Mainnet Launch** | Audits, hardening, public deploy | Planned |
+| **6. Decentralization** | Challenge bonds, mobile, ZK eligibility | Research |
 
 ## What ShieldNode Does Not Do
 
@@ -299,7 +256,7 @@ Nodes earn ETH directly from session settlements. Revenue depends on bandwidth s
 
 ## Contributing
 
-This project is in early development. See `CLAUDE.md` for the full technical specification and design decisions.
+This project is in early development. See [ROADMAP.md](ROADMAP.md) for milestones and progress.
 
 ## License
 
