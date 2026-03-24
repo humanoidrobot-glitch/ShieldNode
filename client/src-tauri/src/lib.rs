@@ -2,10 +2,12 @@ mod aead;
 mod chain;
 mod circuit;
 mod config;
+mod health_monitor;
 mod hop_codec;
 mod kex;
 mod kill_switch;
 mod receipts;
+mod reputation;
 mod sphinx;
 mod tunnel;
 mod wallet;
@@ -58,6 +60,10 @@ pub struct AppState {
     pub chain_reader: ChainReader,
     /// Cancel token for the background circuit rotation task.
     pub rotation_cancel: Mutex<Option<CancellationToken>>,
+    /// Cancel token for the circuit health monitor task.
+    pub health_cancel: Mutex<Option<CancellationToken>>,
+    /// Local node reputation cache (low-bandwidth flags).
+    pub reputation: Arc<Mutex<reputation::ReputationCache>>,
 }
 
 impl Default for AppState {
@@ -72,6 +78,8 @@ impl Default for AppState {
             tunnel: Arc::new(Mutex::new(TunnelManager::new())),
             config: Arc::new(Mutex::new(cfg)),
             rotation_cancel: Mutex::new(None),
+            health_cancel: Mutex::new(None),
+            reputation: Arc::new(Mutex::new(reputation::ReputationCache::new())),
         }
     }
 }
@@ -203,6 +211,23 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         }
     }
 
+    // Spawn circuit health monitor.
+    {
+        let cancel = CancellationToken::new();
+        {
+            let mut hc = state.health_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+            *hc = Some(cancel.clone());
+        }
+        tokio::spawn(health_monitor::health_monitor_loop(
+            cancel,
+            Arc::clone(&state.connection),
+            Arc::clone(&state.circuit),
+            Arc::clone(&state.tunnel),
+            state.chain_reader.clone(),
+        ));
+        info!("circuit health monitor started");
+    }
+
     // Spawn circuit auto-rotation background task if enabled and multi-hop.
     if hop_count == 3 {
         let (auto_rotate, interval_secs) = {
@@ -241,8 +266,9 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
-    // 0. Cancel any running rotation task.
+    // 0. Cancel background tasks (rotation + health monitor).
     stop_rotation(&state)?;
+    stop_health_monitor(&state)?;
 
     // 1. Get session state (session_id, bytes_used) and exit endpoint.
     let (session_id_str, bytes_used, exit_endpoint) = {
@@ -336,6 +362,14 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     // 7. Call settle_session with the real receipt.
     let tx_hash = wallet::settle_session(&wallet_cfg, session_id, receipt_data).await?;
 
+    // Capture circuit node IDs for reputation tracking before clearing.
+    let circuit_node_ids: Vec<String> = {
+        let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+        circ.as_ref()
+            .map(|c| vec![c.entry.node_id.clone(), c.relay.node_id.clone(), c.exit.node_id.clone()])
+            .unwrap_or_default()
+    };
+
     // Clear circuit state.
     {
         let mut circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -345,6 +379,20 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Disconnected;
+    }
+
+    // Record session outcome for local reputation tracking.
+    if !circuit_node_ids.is_empty() {
+        let session_duration = std::time::Duration::from_secs(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_sub(timestamp)
+        );
+        if let Ok(mut rep) = state.reputation.lock() {
+            rep.record_session(&circuit_node_ids, bytes_used, session_duration);
+        }
     }
 
     // Deactivate kill switch — restore normal traffic.
@@ -526,6 +574,19 @@ fn stop_rotation(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Cancel the background health monitor task, if any.
+fn stop_health_monitor(state: &AppState) -> Result<(), String> {
+    let mut hc = state
+        .health_cancel
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+    if let Some(token) = hc.take() {
+        token.cancel();
+        info!("health monitor task cancelled");
+    }
+    Ok(())
+}
+
 /// Background loop that rotates the circuit on a fixed interval.
 async fn rotation_loop(
     cancel: CancellationToken,
@@ -666,7 +727,7 @@ async fn rotation_loop(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Convert an on-chain node record to the client's internal `NodeInfo`.
-fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
+pub(crate) fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
     NodeInfo {
         node_id: n.node_id,
         public_key: decode_hex_bytes(&n.public_key),
@@ -675,15 +736,44 @@ fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
         uptime: n.uptime,
         price_per_byte: n.price_per_byte as u64,
         slash_count: n.slash_count,
+        completion_rate: 1.0, // default; enriched by fetch_nodes
     }
 }
 
 /// Fetch nodes from on-chain registry, falling back to mock data.
+/// Enriches nodes with completion rates and local reputation penalties.
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
+    let completion_rates = state
+        .chain_reader
+        .get_completion_rates()
+        .await
+        .unwrap_or_default();
+
+    // Evict stale reputation flags.
+    if let Ok(mut rep) = state.reputation.lock() {
+        rep.evict_stale();
+    }
+
     match state.chain_reader.get_active_nodes().await {
         Ok(on_chain) if !on_chain.is_empty() => {
             info!(count = on_chain.len(), "fetched on-chain nodes");
-            on_chain.into_iter().map(map_on_chain_node).collect()
+            on_chain
+                .into_iter()
+                .map(|n| {
+                    let mut node = map_on_chain_node(n);
+                    if let Some(&rate) = completion_rates.get(&node.node_id) {
+                        node.completion_rate = rate;
+                    }
+                    // Apply local reputation penalty.
+                    if let Ok(rep) = state.reputation.lock() {
+                        let penalty = rep.score_penalty(&node.node_id);
+                        if penalty > 0.0 {
+                            node.completion_rate = (node.completion_rate - penalty / 15.0).max(0.0);
+                        }
+                    }
+                    node
+                })
+                .collect()
         }
         Ok(_) => {
             warn!("on-chain registry empty, using mock data");
@@ -729,6 +819,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             uptime: 0.995,
             price_per_byte: 10,
             slash_count: 0,
+            completion_rate: 1.0,
         },
         NodeInfo {
             node_id: "node-beta-002".to_string(),
@@ -738,6 +829,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             uptime: 0.980,
             price_per_byte: 15,
             slash_count: 0,
+            completion_rate: 1.0,
         },
         NodeInfo {
             node_id: "node-gamma-003".to_string(),
@@ -747,6 +839,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             uptime: 0.960,
             price_per_byte: 8,
             slash_count: 1,
+            completion_rate: 0.7,
         },
         NodeInfo {
             node_id: "node-delta-004".to_string(),
@@ -756,6 +849,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             uptime: 0.999,
             price_per_byte: 20,
             slash_count: 0,
+            completion_rate: 1.0,
         },
         NodeInfo {
             node_id: "node-epsilon-005".to_string(),
@@ -765,6 +859,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             uptime: 0.850,
             price_per_byte: 5,
             slash_count: 2,
+            completion_rate: 0.4,
         },
     ]
 }

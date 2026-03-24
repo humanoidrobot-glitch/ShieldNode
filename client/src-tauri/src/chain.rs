@@ -46,12 +46,15 @@ sol! {
         }
 
         event SessionOpened(uint256 indexed sessionId, address indexed client, bytes32[3] nodeIds, uint256 deposit);
+        event SessionSettled(uint256 indexed sessionId, address indexed client, uint256 cumulativeBytes, uint256 totalPaid);
 
         function openSession(bytes32[3] calldata nodeIds) external payable;
         function settleSession(uint256 sessionId, bytes calldata signedReceipt) external;
 
         function getSession(uint256 sessionId)
             external view returns (SessionInfo memory);
+
+        function nextSessionId() external view returns (uint256);
     }
 }
 
@@ -205,6 +208,83 @@ impl ChainReader {
 
         info!(gas_price_gwei, gas_price_wei, "fetched gas price from RPC");
         Ok(gas_price_gwei as u64)
+    }
+
+    /// Fetch per-node session completion rates from on-chain settlement events.
+    ///
+    /// Reads settled sessions and computes, for each node that participated,
+    /// the fraction of sessions where >1MB was transferred (a "completed"
+    /// session vs one abandoned with near-zero bytes).
+    ///
+    /// Returns a map of node_id hex string → completion rate (0.0–1.0).
+    pub async fn get_completion_rates(&self) -> Result<std::collections::HashMap<String, f64>, String> {
+        let url: url::Url = self
+            .rpc_url
+            .parse()
+            .map_err(|e| format!("invalid RPC URL: {e}"))?;
+
+        let provider = ProviderBuilder::new().connect_http(url);
+        let settlement = ISessionSettlement::new(self.settlement_address, &provider);
+
+        // Get total session count.
+        let next_id: u64 = settlement
+            .nextSessionId()
+            .call()
+            .await
+            .map_err(|e| format!("nextSessionId failed: {e}"))?
+            .try_into()
+            .unwrap_or(0);
+
+        if next_id == 0 {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        // Scan recent sessions (last 200 max to limit RPC calls).
+        let start = next_id.saturating_sub(200);
+        let mut node_stats: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+
+        for session_id in start..next_id {
+            let session = match settlement
+                .getSession(alloy::primitives::U256::from(session_id))
+                .call()
+                .await
+            {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            if !session.settled {
+                continue;
+            }
+
+            let cum_bytes: u64 = session.cumulativeBytes.try_into().unwrap_or(0);
+            let completed = cum_bytes > 1_000_000; // >1MB = completed
+
+            // Credit all 3 nodes in the session.
+            for node_id in &session.nodeIds {
+                let key = format!("0x{}", hex::encode(node_id.as_slice()));
+                let entry = node_stats.entry(key).or_insert((0, 0));
+                entry.0 += 1; // total sessions
+                if completed {
+                    entry.1 += 1; // completed sessions
+                }
+            }
+        }
+
+        let rates: std::collections::HashMap<String, f64> = node_stats
+            .into_iter()
+            .map(|(id, (total, completed))| {
+                let rate = if total > 0 {
+                    completed as f64 / total as f64
+                } else {
+                    1.0
+                };
+                (id, rate)
+            })
+            .collect();
+
+        info!(nodes = rates.len(), "computed completion rates from on-chain data");
+        Ok(rates)
     }
 
     /// Expose the settlement address for other modules if needed.

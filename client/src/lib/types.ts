@@ -6,6 +6,7 @@ export interface NodeInfo {
   uptime: number;
   pricePerByte: number;
   slashCount: number;
+  completionRate?: number;
 }
 
 export interface SessionInfo {

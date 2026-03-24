@@ -18,6 +18,14 @@ pub struct NodeInfo {
     pub uptime: f64,
     pub price_per_byte: u64,
     pub slash_count: u32,
+    /// Session completion rate (0.0–1.0). Derived from on-chain settlement events.
+    /// Default 1.0 for nodes with no history.
+    #[serde(default = "default_completion_rate")]
+    pub completion_rate: f64,
+}
+
+fn default_completion_rate() -> f64 {
+    1.0
 }
 
 /// A single hop in a 3-hop circuit.
@@ -171,26 +179,25 @@ fn encapsulate_for_key(public_key: &[u8], hop_index: usize) -> Result<Vec<u8>, S
 
 /// Score a node for selection.
 ///
-/// Higher is better.  Stake is the dominant factor (square-root scaling)
-/// so that higher-staked nodes get meaningfully more sessions routed to
-/// them, making staking a revenue accelerator.
+/// Higher is better. Weights (rebalanced for completion scoring):
 ///
 /// ```text
-/// score = 10 * sqrt(stake / 1e18)     ← dominant: 0.1 ETH → 3.16, 1 ETH → 10, 4 ETH → 20
-///       + 30 * uptime                  ← 0..30 range
-///       - 0.001 * price_per_byte       ← small penalty for expensive nodes
-///       - 20 * slash_count^2           ← harsh penalty for slashed nodes
+/// score = 10 * sqrt(stake / 1e18)     ← 25% weight: 0.1 ETH → 3.16, 1 ETH → 10
+///       + 25 * uptime                  ← 25% weight: 0..25 range
+///       - 0.001 * price_per_byte       ← 20% weight: penalty for expensive nodes
+///       - 15 * slash_count^2           ← 15% weight: penalty for slashed nodes
+///       + 15 * completion_rate         ← 15% weight: reward for reliable sessions
 /// ```
 pub fn score_node(node: &NodeInfo) -> f64 {
-    // Stake is stored in wei-like units (1e18 per ETH).
     let stake_eth = node.stake as f64 / 1e18;
     let stake_score = 10.0 * stake_eth.sqrt();
 
-    let uptime_score = 30.0 * node.uptime;
+    let uptime_score = 25.0 * node.uptime;
     let price_score = 0.001 * node.price_per_byte as f64;
-    let slash_score = 20.0 * (node.slash_count as f64).powi(2);
+    let slash_score = 15.0 * (node.slash_count as f64).powi(2);
+    let completion_score = 15.0 * node.completion_rate;
 
-    stake_score + uptime_score - price_score - slash_score
+    stake_score + uptime_score - price_score - slash_score + completion_score
 }
 
 /// Select a three-hop circuit (entry, relay, exit) via weighted random sampling.
@@ -319,6 +326,7 @@ mod tests {
             uptime,
             price_per_byte: price,
             slash_count: slashes,
+            completion_rate: 1.0,
         }
     }
 
