@@ -13,12 +13,8 @@ The node (`node/src/`) and client (`client/src-tauri/src/`) both define overlapp
 
 **When to fix:** Before Phase 2, when multi-hop circuits require the node and client to agree on packet formats and scoring.
 
-### Node scoring algorithm divergence
-The Rust backend (`client/src-tauri/src/circuit.rs`) and TypeScript frontend (`client/src/lib/scoring.ts`) implement the same scoring algorithm with different weights and normalization. They will select different nodes.
-
-**Why deferred:** Phase 1 uses single-hop with mock/minimal nodes. Divergence doesn't matter yet.
-
-**When to fix:** Phase 2, when circuit selection is live. Canonicalize in the Rust backend and have the frontend display the backend's score.
+### ~~Node scoring algorithm divergence~~ — RESOLVED
+Resolved in `fe83b5e`. Both Rust (`circuit.rs`) and TypeScript (`scoring.ts`) now use the same `10 * sqrt(stake_eth) + 30 * uptime - 0.001 * price - 20 * slashes^2` formula.
 
 ---
 
@@ -115,7 +111,7 @@ Three separate hex-to-bytes32 functions exist:
 
 **Why deferred:** Part of the broader "shared crate" migration (see Architecture section above).
 
-**When to fix:** With the shared crate migration before Phase 3.
+**When to fix:** With the shared crate migration.
 
 ### ~~Next-hop address encoding lacks bidirectional codec~~ — RESOLVED
 Resolved — `hop_codec` module now exists in both node (`node/src/network/hop_codec.rs`) and client (`client/src-tauri/src/hop_codec.rs`) with `encode_next_hop`/`decode_next_hop`/`endpoint_to_next_hop` functions.
