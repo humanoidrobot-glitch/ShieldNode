@@ -238,11 +238,18 @@ async fn main() -> Result<()> {
 
     // ── WireGuard tunnel listener ─────────────────────────────────────
 
+    let tun_config = tunnel::tun_device::TunConfig {
+        address: cfg.tun_address.clone(),
+        netmask: cfg.tun_netmask,
+        name: "shieldnode".to_string(),
+    };
+
     let mut tunnel_listener = TunnelListener::bind(
         cfg.listen_port,
         private_key_bytes,
         bandwidth.clone(),
         cfg.exit_mode,
+        tun_config,
     )
     .await
     .context("failed to bind WireGuard listener")?;

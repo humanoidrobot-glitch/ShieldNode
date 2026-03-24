@@ -23,18 +23,17 @@ const EVICTION_INTERVAL_SECS: u64 = 60;
 /// UDP listener that accepts WireGuard handshakes and tunnels traffic.
 ///
 /// In exit mode, decapsulated packets are written to a TUN device which
-/// injects them into the OS network stack. Responses are read back from
-/// the TUN and encapsulated for return to the client.
+/// injects them into the OS network stack. The return path (TUN ->
+/// WireGuard encapsulation) is deferred to Phase 2 when multi-peer
+/// routing and tunnel state sharing are implemented.
 pub struct TunnelListener {
-    socket: Arc<UdpSocket>,
+    socket: UdpSocket,
     private_key: [u8; 32],
     peers: HashMap<SocketAddr, PeerState>,
     next_session_id: u64,
     bandwidth: Arc<Mutex<BandwidthTracker>>,
     exit_mode: bool,
-    tun: Option<Arc<TunDevice>>,
-    /// Track the last peer that sent a packet (for return path routing).
-    last_peer_addr: Option<SocketAddr>,
+    tun: Option<TunDevice>,
 }
 
 impl TunnelListener {
@@ -43,17 +42,17 @@ impl TunnelListener {
         private_key: [u8; 32],
         bandwidth: Arc<Mutex<BandwidthTracker>>,
         exit_mode: bool,
+        tun_config: TunConfig,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("0.0.0.0:{listen_port}").parse()?;
         let socket = UdpSocket::bind(addr).await?;
         info!(%addr, "WireGuard UDP listener bound");
 
-        // Create TUN device in exit mode.
         let tun = if exit_mode {
-            match TunDevice::create(&TunConfig::default(), bandwidth.clone()).await {
+            match TunDevice::create(&tun_config).await {
                 Ok(dev) => {
                     info!("TUN device ready for exit-mode forwarding");
-                    Some(Arc::new(dev))
+                    Some(dev)
                 }
                 Err(e) => {
                     warn!(error = %e, "failed to create TUN device — exit forwarding disabled. \
@@ -66,55 +65,17 @@ impl TunnelListener {
         };
 
         Ok(Self {
-            socket: Arc::new(socket),
+            socket,
             private_key,
             peers: HashMap::new(),
             next_session_id: 1,
             bandwidth,
             exit_mode,
             tun,
-            last_peer_addr: None,
         })
     }
 
-    /// Run the tunnel listener. In exit mode with a TUN device, this
-    /// spawns a return-path task that reads responses from the TUN and
-    /// sends them back through WireGuard.
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        // Spawn TUN return-path task if we have a TUN device.
-        if let Some(tun) = &self.tun {
-            let tun = Arc::clone(tun);
-            let socket = Arc::clone(&self.socket);
-            // For Phase 1 single-peer, we route TUN responses back to the
-            // last known peer. Multi-peer routing (Phase 2+) needs a proper
-            // routing table mapping destination IPs to peer addresses.
-            let last_peer = Arc::new(Mutex::new(self.last_peer_addr));
-            let last_peer_for_task = Arc::clone(&last_peer);
-
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536];
-                let mut encap_buf = vec![0u8; 65536];
-                loop {
-                    match tun.read_packet(&mut buf).await {
-                        Ok(0) => continue,
-                        Ok(n) => {
-                            let _peer = last_peer_for_task.lock().await;
-                            // TODO: encapsulate through WireGuard and send back.
-                            // This requires access to the peer's tunnel, which
-                            // needs refactoring to share tunnel state between
-                            // the inbound and return paths. For now, log.
-                            debug!(len = n, "TUN response packet (return path stub)");
-                            let _ = &encap_buf; // suppress unused warning
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "TUN read error");
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-            });
-        }
-
         let mut recv_buf = vec![0u8; 65536];
         let mut send_buf = vec![0u8; 65536];
         let mut last_eviction = Instant::now();
@@ -136,7 +97,6 @@ impl TunnelListener {
 
             let peer = self.peers.get_mut(&peer_addr).unwrap();
             peer.last_active = Instant::now();
-            self.last_peer_addr = Some(peer_addr);
 
             match peer.tunnel.handle_incoming(packet, &mut send_buf) {
                 Ok(0) => {
