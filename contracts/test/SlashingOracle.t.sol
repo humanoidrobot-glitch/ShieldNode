@@ -417,4 +417,36 @@ contract SlashingOracleTest is Test {
         oracle.setChallenger(rando, true);
         assertTrue(oracle.challengers(rando));
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  Edge case: unregistered node
+    // ════════════════════════════════════════════════════════════
+
+    function test_proposeSlash_unregisteredNode_succeeds() public {
+        // Attestation verification doesn't check the registry, so proposing
+        // a slash on a non-existent node succeeds.
+        bytes32 unknownNode = keccak256("non-existent-node");
+        bytes memory evidence = _buildAttestation(unknownNode, block.timestamp, keccak256("desc"));
+
+        vm.prank(challAddr);
+        oracle.proposeSlash(unknownNode, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);
+
+        (bytes32 nid,,,, bool executed) = oracle.proposals(0);
+        assertEq(nid, unknownNode);
+        assertFalse(executed);
+    }
+
+    function test_executeSlash_unregisteredNode_reverts() public {
+        // Proposal succeeds, but execution reverts at registry.slash because
+        // the node has owner == address(0).
+        bytes32 unknownNode = keccak256("non-existent-node");
+        bytes memory evidence = _buildAttestation(unknownNode, block.timestamp, keccak256("desc"));
+
+        vm.prank(challAddr);
+        oracle.proposeSlash(unknownNode, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);
+
+        vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
+        vm.expectRevert("NodeRegistry: node not found");
+        oracle.executeSlash(0);
+    }
 }
