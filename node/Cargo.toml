@@ -36,4 +36,6 @@ alloy = { version = "1", features = [
 thiserror = "2"
 anyhow = "1"
 rand = "0.8"
-base64 = "0.22"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }

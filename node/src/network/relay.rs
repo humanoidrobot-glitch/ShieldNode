@@ -4,6 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::info;
+use zeroize::Zeroize;
 
 use crate::crypto::sphinx::{SphinxError, SphinxPacket};
 use crate::metrics::bandwidth::BandwidthTracker;
@@ -23,13 +24,19 @@ pub enum RelayError {
 // ── session state ──────────────────────────────────────────────────────
 
 /// Per-session relay state kept by this node.
+///
+/// `session_key` is zeroed from memory when the session is dropped.
 #[derive(Debug, Clone)]
 pub struct SessionState {
     pub session_id: u64,
-    /// Symmetric key for peeling this hop's onion layer.
     pub session_key: [u8; 32],
-    /// The hop index within the circuit (used as the nonce input).
     pub hop_index: u64,
+}
+
+impl Drop for SessionState {
+    fn drop(&mut self) {
+        self.session_key.zeroize();
+    }
 }
 
 // ── relay service ──────────────────────────────────────────────────────

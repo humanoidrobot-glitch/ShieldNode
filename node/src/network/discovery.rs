@@ -70,19 +70,19 @@ impl DiscoveryService {
                     .validation_mode(gossipsub::ValidationMode::Strict)
                     .message_id_fn(message_id_fn)
                     .build()
-                    .expect("valid gossipsub config");
+                    .map_err(|e| format!("gossipsub config: {e}"))?;
                 let gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossipsub_config,
                 )
-                .expect("valid gossipsub behaviour");
+                .map_err(|e| format!("gossipsub behaviour: {e}"))?;
 
                 // mDNS
                 let mdns = mdns::tokio::Behaviour::new(
                     mdns::Config::default(),
                     peer_id,
                 )
-                .expect("valid mdns behaviour");
+                .map_err(|e| format!("mdns behaviour: {e}"))?;
 
                 // Identify
                 let identify = identify::Behaviour::new(
@@ -109,8 +109,9 @@ impl DiscoveryService {
             local_peer_id,
         };
 
-        let listen_addr: Multiaddr =
-            format!("/ip4/0.0.0.0/tcp/{port}").parse().unwrap();
+        let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}")
+            .parse()
+            .map_err(|e| DiscoveryError::Listen(format!("invalid multiaddr: {e}")))?;
         svc.swarm
             .listen_on(listen_addr)
             .map_err(|e| DiscoveryError::Listen(e.to_string()))?;
@@ -141,7 +142,7 @@ impl DiscoveryService {
 
     /// Query the DHT for available ShieldNode peers.
     pub fn discover_nodes(&mut self) {
-        let key = kad::RecordKey::new(&"/shieldnode/nodes".to_string());
+        let key = kad::RecordKey::new(&"/shieldnode/nodes");
         self.swarm.behaviour_mut().kademlia.get_record(key);
         info!("initiated DHT discovery query");
     }

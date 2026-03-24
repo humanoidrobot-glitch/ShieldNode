@@ -35,7 +35,14 @@ struct MetricsResponse {
 
 #[derive(Serialize)]
 struct SessionsResponse {
-    sessions: std::collections::HashMap<u64, super::bandwidth::ByteCount>,
+    sessions: Vec<SessionEntry>,
+}
+
+#[derive(Serialize)]
+struct SessionEntry {
+    session_id: u64,
+    bytes_in: u64,
+    bytes_out: u64,
 }
 
 // ── handlers ───────────────────────────────────────────────────────────
@@ -59,9 +66,16 @@ async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
 
 async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
     let bw = state.bandwidth.lock().await;
-    Json(SessionsResponse {
-        sessions: bw.all_sessions(),
-    })
+    let sessions = bw
+        .sessions()
+        .iter()
+        .map(|(&id, c)| SessionEntry {
+            session_id: id,
+            bytes_in: c.bytes_in,
+            bytes_out: c.bytes_out,
+        })
+        .collect();
+    Json(SessionsResponse { sessions })
 }
 
 // ── router constructor ─────────────────────────────────────────────────
