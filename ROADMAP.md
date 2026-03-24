@@ -20,7 +20,7 @@ The foundation: a working relay node, on-chain contracts, and a basic client.
 
 ---
 
-## Phase 2: Multi-Hop + Onion Routing `← next`
+## Phase 2: Multi-Hop + Onion Routing
 
 Privacy through layered encryption — no single node sees both source and destination.
 
@@ -28,14 +28,13 @@ Privacy through layered encryption — no single node sees both source and desti
 - [x] **Sphinx packet format** — `create()` and `peel_layer()` for building and processing onion-encrypted packets
 - [x] **Circuit management** — `CircuitManager` with create/teardown lifecycle, pure `process_relay_packet()` function designed for future ZK provability
 - [x] **Noise NK handshake** — Session key establishment between any two nodes using X25519 DH
-
 - [x] **3-hop circuit construction** — Client selects entry/relay/exit via scoring, generates ephemeral X25519 keypairs per hop, derives session keys via HKDF-SHA256. CircuitState stored backend-only (keys never exposed to frontend)
 - [x] **Relay forwarding protocol** — Dedicated UDP relay listener (port 51821) on each node. Framing: `[8-byte session_id][SphinxPacket]`. Peels one Sphinx layer, forwards to next hop or writes to TUN (exit). SphinxPacket wire serialization (to_bytes/from_bytes)
 - [x] **Circuit visualization** — CircuitMap component shows actual entry/relay/exit node IDs when connected, placeholder path when disconnected. `get_circuit` Tauri command returns sanitized CircuitInfo
+- [x] **Live multi-hop traffic** — Client sends Sphinx-wrapped packets through 3-node relay chain end-to-end
+- [x] **EIP-712 bandwidth receipt co-signing** — Client signs receipt digest, sends RECEIPT_SIGN (0x03) control message to exit node, node co-signs and returns 65-byte signature. Dual-signed receipt ABI-encoded for on-chain settlement
 
 ### Remaining
-- [ ] Wire client to send Sphinx-wrapped packets through the 3-hop relay chain (end-to-end live traffic)
-- [ ] Bandwidth receipt co-signing between client and all 3 circuit nodes
 - [ ] Auto-rotate circuits periodically for forward secrecy
 
 **Success metric:** Traffic routes through 3 independent nodes; no single node can see both source and destination.
@@ -52,8 +51,9 @@ Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 - [x] **Unstaking cooldown** — 7-day waiting period prevents stake-and-run attacks
 - [x] **Progressive slashing** — 10% first offense, 25% second, 100% + permanent ban on third
 
-### Remaining
 - [x] **Client node scoring** — Weighted algorithm (30% uptime, 25% stake via log scale, 25% price inverse, 20% slash penalty) implemented in both Rust backend and TypeScript frontend
+
+### Remaining
 - [ ] Stake-weighted selection: higher-staked nodes get more session routing (revenue accelerator)
 - [ ] Slashing evidence verification: cryptographic proofs for logging, selective denial, bandwidth fraud
 
