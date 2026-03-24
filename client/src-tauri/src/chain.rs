@@ -45,6 +45,8 @@ sol! {
             uint256    cumulativeBytes;
         }
 
+        event SessionOpened(uint256 indexed sessionId, address indexed client, bytes32[3] nodeIds, uint256 deposit);
+
         function openSession(bytes32[3] calldata nodeIds) external payable;
         function settleSession(uint256 sessionId, bytes calldata signedReceipt) external;
 

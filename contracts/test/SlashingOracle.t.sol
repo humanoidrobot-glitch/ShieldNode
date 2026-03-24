@@ -35,9 +35,10 @@ contract SlashingOracleTest is Test {
     uint256 internal challPk   = 0xC0DE;
     address internal challAddr;
 
-    bytes32 constant NODE_ID    = keccak256("node-1");
-    bytes32 constant PUB_KEY    = keccak256("pubkey-1");
-    string  constant ENDPOINT   = "192.168.1.1:51820";
+    bytes32 constant NODE_ID       = keccak256("node-1");
+    bytes32 constant PUB_KEY       = keccak256("pubkey-1");
+    string  constant ENDPOINT      = "192.168.1.1:51820";
+    bytes32 constant UNKNOWN_NODE  = keccak256("non-existent-node");
 
     // EIP-712 constants — read from deployed contracts in setUp().
     bytes32 internal domainSep;
@@ -425,7 +426,7 @@ contract SlashingOracleTest is Test {
     function test_proposeSlash_unregisteredNode_succeeds() public {
         // Attestation verification doesn't check the registry, so proposing
         // a slash on a non-existent node succeeds.
-        bytes32 unknownNode = keccak256("non-existent-node");
+        bytes32 unknownNode = UNKNOWN_NODE;
         bytes memory evidence = _buildAttestation(unknownNode, block.timestamp, keccak256("desc"));
 
         vm.prank(challAddr);
@@ -439,7 +440,7 @@ contract SlashingOracleTest is Test {
     function test_executeSlash_unregisteredNode_reverts() public {
         // Proposal succeeds, but execution reverts at registry.slash because
         // the node has owner == address(0).
-        bytes32 unknownNode = keccak256("non-existent-node");
+        bytes32 unknownNode = UNKNOWN_NODE;
         bytes memory evidence = _buildAttestation(unknownNode, block.timestamp, keccak256("desc"));
 
         vm.prank(challAddr);

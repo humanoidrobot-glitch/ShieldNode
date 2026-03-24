@@ -1,4 +1,5 @@
-use alloy::primitives::{keccak256, Address, FixedBytes, U256};
+use alloy::primitives::{Address, FixedBytes, U256};
+use alloy::sol_types::SolEvent;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::network::EthereumWallet;
@@ -65,7 +66,7 @@ pub async fn open_session(
 
     // Parse session ID from SessionOpened event.
     // Scan all logs for the matching event signature rather than assuming it's the first.
-    let session_opened_sig = keccak256("SessionOpened(uint256,address,bytes32[3],uint256)");
+    let session_opened_sig = ISessionSettlement::SessionOpened::SIGNATURE_HASH;
     let session_id: u64 = receipt.inner.logs().iter()
         .find(|log| log.topics().first() == Some(&session_opened_sig))
         .and_then(|log| log.topics().get(1))

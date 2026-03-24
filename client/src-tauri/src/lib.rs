@@ -409,14 +409,19 @@ async fn update_settings(
     state: State<'_, AppState>,
     settings: config::SettingsPayload,
 ) -> Result<(), String> {
-    let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-    cfg.apply_settings(&settings);
+    // Apply settings and clone for disk persistence, then drop the lock
+    // before doing blocking I/O.
+    let snapshot = {
+        let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        cfg.apply_settings(&settings);
+        cfg.clone()
+    };
 
-    // Persist to disk (best-effort).
+    // Persist to disk (best-effort, outside the lock).
     let config_path = std::env::current_dir()
         .unwrap_or_default()
         .join("shieldnode-client.json");
-    if let Err(e) = cfg.save(&config_path) {
+    if let Err(e) = snapshot.save(&config_path) {
         warn!(error = %e, "failed to persist settings to disk");
     }
 

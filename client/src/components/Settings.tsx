@@ -18,6 +18,9 @@ interface SettingsState {
   rotationIntervalMin: number;
   killSwitch: boolean;
   gasCeiling: number;
+  // Fields not editable in the UI but preserved on round-trip.
+  _chainId: number;
+  _preferredNodes: string[];
 }
 
 function toLocal(p: SettingsPayload): SettingsState {
@@ -27,18 +30,20 @@ function toLocal(p: SettingsPayload): SettingsState {
     rotationIntervalMin: Math.round(p.circuit_rotation_interval_secs / 60),
     killSwitch: p.kill_switch,
     gasCeiling: p.gas_price_ceiling_gwei,
+    _chainId: p.chain_id,
+    _preferredNodes: p.preferred_nodes,
   };
 }
 
 function toPayload(s: SettingsState): SettingsPayload {
   return {
     rpc_url: s.rpcEndpoint,
-    chain_id: 11155111, // Sepolia — not user-editable for now
+    chain_id: s._chainId,
     auto_rotate: s.autoRotate,
     circuit_rotation_interval_secs: s.rotationIntervalMin * 60,
     kill_switch: s.killSwitch,
     gas_price_ceiling_gwei: s.gasCeiling,
-    preferred_nodes: [],
+    preferred_nodes: s._preferredNodes,
   };
 }
 
@@ -84,11 +89,13 @@ export function Settings() {
     rotationIntervalMin: 10,
     killSwitch: true,
     gasCeiling: 10,
+    _chainId: 11155111,
+    _preferredNodes: [],
   });
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load settings from backend on mount.
+  // Load settings from backend on mount; clean up debounce on unmount.
   useEffect(() => {
     invoke<SettingsPayload>("get_settings")
       .then((payload) => {
@@ -96,6 +103,9 @@ export function Settings() {
         setLoaded(true);
       })
       .catch(() => setLoaded(true)); // show defaults on error
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, []);
 
   // Debounced save to backend.
