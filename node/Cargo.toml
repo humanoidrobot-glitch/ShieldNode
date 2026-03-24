@@ -39,3 +39,5 @@ rand = "0.8"
 hkdf = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+futures = "0.3"
