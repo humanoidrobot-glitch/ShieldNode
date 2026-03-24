@@ -82,24 +82,7 @@ pub struct SessionInfo {
 
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
-    // Try on-chain nodes first, fall back to mock.
-    let nodes = match state.chain_reader.get_active_nodes().await {
-        Ok(on_chain) if !on_chain.is_empty() => {
-            on_chain.into_iter().map(|n| {
-                let pk_bytes = decode_hex_32(&n.public_key);
-                NodeInfo {
-                    node_id: n.node_id,
-                    public_key: pk_bytes,
-                    endpoint: n.endpoint,
-                    stake: (n.stake * 1e18) as u64,
-                    uptime: n.uptime,
-                    price_per_byte: n.price_per_byte as u64,
-                    slash_count: n.slash_count,
-                }
-            }).collect()
-        }
-        _ => mock_nodes(),
-    };
+    let nodes = fetch_nodes(&state).await;
     let node = circuit::select_single_node(&nodes)?;
 
     {
@@ -180,45 +163,9 @@ async fn get_status(state: State<'_, AppState>) -> Result<ConnectionState, Strin
     Ok(conn.clone())
 }
 
-/// Return the list of available nodes.
-///
-/// Attempts to read from the on-chain NodeRegistry first; falls back to mock
-/// data when the registry is empty or the RPC call fails (useful during
-/// local development).
 #[tauri::command]
 async fn get_nodes(state: State<'_, AppState>) -> Result<Vec<NodeInfo>, String> {
-    match state.chain_reader.get_active_nodes().await {
-        Ok(on_chain) if !on_chain.is_empty() => {
-            info!(count = on_chain.len(), "serving on-chain nodes");
-            // Convert OnChainNodeInfo -> circuit::NodeInfo so existing scoring
-            // and circuit-selection logic keeps working.
-            let nodes = on_chain
-                .into_iter()
-                .map(|n| {
-                    // Decode public_key hex back to [u8; 32].
-                    let pk_bytes = decode_hex_32(&n.public_key);
-                    NodeInfo {
-                        node_id: n.node_id,
-                        public_key: pk_bytes,
-                        endpoint: n.endpoint,
-                        stake: (n.stake * 1e18) as u64, // back to wei for scoring
-                        uptime: n.uptime,
-                        price_per_byte: n.price_per_byte as u64,
-                        slash_count: n.slash_count,
-                    }
-                })
-                .collect();
-            Ok(nodes)
-        }
-        Ok(_empty) => {
-            warn!("on-chain registry returned 0 nodes, falling back to mock data");
-            Ok(mock_nodes())
-        }
-        Err(e) => {
-            warn!(error = %e, "on-chain read failed, falling back to mock data");
-            Ok(mock_nodes())
-        }
-    }
+    Ok(fetch_nodes(&state).await)
 }
 
 /// Return information about the active session, if any.
@@ -272,23 +219,44 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Decode a 0x-prefixed hex string into a fixed-size 32-byte array.
-/// Returns `[0u8; 32]` on any parse failure (non-critical path).
+/// Fetch nodes from on-chain registry, falling back to mock data.
+async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
+    match state.chain_reader.get_active_nodes().await {
+        Ok(on_chain) if !on_chain.is_empty() => {
+            info!(count = on_chain.len(), "fetched on-chain nodes");
+            on_chain.into_iter().map(|n| {
+                NodeInfo {
+                    node_id: n.node_id,
+                    public_key: decode_hex_32(&n.public_key),
+                    endpoint: n.endpoint,
+                    stake: (n.stake * 1e18) as u64,
+                    uptime: n.uptime,
+                    price_per_byte: n.price_per_byte as u64,
+                    slash_count: n.slash_count,
+                }
+            }).collect()
+        }
+        Ok(_) => {
+            warn!("on-chain registry empty, using mock data");
+            mock_nodes()
+        }
+        Err(e) => {
+            warn!(error = %e, "on-chain read failed, using mock data");
+            mock_nodes()
+        }
+    }
+}
+
+/// Decode a 0x-prefixed hex string into [u8; 32]. Returns zeros on failure.
 fn decode_hex_32(hex_str: &str) -> [u8; 32] {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let mut out = [0u8; 32];
-    if stripped.len() != 64 {
-        return out;
-    }
-    for (i, chunk) in stripped.as_bytes().chunks(2).enumerate() {
-        if i >= 32 {
-            break;
-        }
-        if let Ok(byte) = u8::from_str_radix(
-            std::str::from_utf8(chunk).unwrap_or("00"),
-            16,
-        ) {
-            out[i] = byte;
+    if stripped.len() != 64 { return out; }
+    for (i, chunk) in stripped.as_bytes().chunks(2).enumerate().take(32) {
+        if let Ok(s) = std::str::from_utf8(chunk) {
+            if let Ok(byte) = u8::from_str_radix(s, 16) {
+                out[i] = byte;
+            }
         }
     }
     out

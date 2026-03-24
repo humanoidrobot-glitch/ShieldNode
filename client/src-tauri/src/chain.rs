@@ -46,6 +46,7 @@ sol! {
         }
 
         function openSession(bytes32[3] calldata nodeIds) external payable;
+        function settleSession(uint256 sessionId, bytes calldata signedReceipt) external;
 
         function getSession(uint256 sessionId)
             external view returns (SessionInfo memory);
