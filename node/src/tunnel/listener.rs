@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -12,27 +13,26 @@ use super::wireguard::WireguardTunnel;
 /// Per-peer state tracked by the listener.
 struct PeerState {
     tunnel: WireguardTunnel,
-    /// Monotonically increasing session id for bandwidth tracking.
     session_id: u64,
+    last_active: Instant,
 }
+
+/// How long a peer can be idle before being evicted.
+const PEER_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
+/// How often to check for stale peers.
+const EVICTION_INTERVAL_SECS: u64 = 60;
 
 /// UDP listener that accepts WireGuard handshakes and tunnels traffic.
 ///
 /// In single-hop (Phase 1) mode, decapsulated packets are forwarded to
-/// a raw socket or TUN device. For now, we log the inner packets and
-/// echo-respond (proving the tunnel works end-to-end).
+/// a raw socket or TUN device. For now, we log the inner packets
+/// (proving the tunnel works end-to-end).
 pub struct TunnelListener {
-    /// The UDP socket bound to the WireGuard listen port.
-    socket: Arc<UdpSocket>,
-    /// Node's static private key (X25519, 32 bytes).
+    socket: UdpSocket,
     private_key: [u8; 32],
-    /// Connected peers keyed by remote address.
     peers: HashMap<SocketAddr, PeerState>,
-    /// Next session id to assign.
     next_session_id: u64,
-    /// Shared bandwidth tracker.
     bandwidth: Arc<Mutex<BandwidthTracker>>,
-    /// Whether this node acts as an exit (forwards to internet) or relay-only.
     exit_mode: bool,
 }
 
@@ -48,7 +48,7 @@ impl TunnelListener {
         info!(%addr, "WireGuard UDP listener bound");
 
         Ok(Self {
-            socket: Arc::new(socket),
+            socket,
             private_key,
             peers: HashMap::new(),
             next_session_id: 1,
@@ -57,16 +57,13 @@ impl TunnelListener {
         })
     }
 
-    /// Run the tunnel listener loop. Receives UDP datagrams, routes them
-    /// through boringtun, and handles the results.
+    /// Run the tunnel listener loop.
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut recv_buf = vec![0u8; 65536];
         let mut send_buf = vec![0u8; 65536];
+        let mut last_eviction = Instant::now();
 
-        info!(
-            exit_mode = self.exit_mode,
-            "tunnel listener running"
-        );
+        info!(exit_mode = self.exit_mode, "tunnel listener running");
 
         loop {
             let (n, peer_addr) = self.socket.recv_from(&mut recv_buf).await?;
@@ -74,93 +71,85 @@ impl TunnelListener {
 
             debug!(peer = %peer_addr, bytes = n, "received UDP packet");
 
-            // Get or create tunnel state for this peer.
-            let peer = self.get_or_create_peer(peer_addr);
-            let session_id = peer.session_id;
+            // Periodic stale peer eviction.
+            if last_eviction.elapsed().as_secs() >= EVICTION_INTERVAL_SECS {
+                self.evict_stale_peers();
+                last_eviction = Instant::now();
+            }
 
-            // Decapsulate the WireGuard packet.
+            let session_id = self.get_or_create_peer(peer_addr);
+
+            let peer = self.peers.get_mut(&peer_addr).unwrap();
+            peer.last_active = Instant::now();
+
             match peer.tunnel.handle_incoming(packet, &mut send_buf) {
                 Ok(0) => {
-                    // No data to forward (e.g., keepalive). But boringtun
-                    // may have produced a handshake response in send_buf
-                    // via a subsequent call — drive the state machine.
+                    // Keepalive or handshake — drive boringtun's state machine.
                     self.drive_handshake(peer_addr, &mut send_buf).await;
                 }
                 Ok(payload_len) => {
-                    let inner = &send_buf[..payload_len];
                     debug!(
                         peer = %peer_addr,
                         inner_len = payload_len,
                         "decapsulated inner packet"
                     );
 
-                    // Record bandwidth.
                     {
                         let mut bw = self.bandwidth.lock().await;
                         bw.record_bytes(session_id, n as u64, payload_len as u64);
                     }
 
                     if self.exit_mode {
-                        // Phase 1: log the inner packet. Full exit forwarding
-                        // (TUN device / raw socket) is a later step.
-                        debug!(
-                            dst = ?&inner[..inner.len().min(20)],
-                            "exit mode: would forward inner IP packet to internet"
-                        );
+                        debug!("exit mode: would forward inner IP packet to internet");
                     } else {
                         debug!("relay mode: would forward to next hop");
                     }
                 }
                 Err(e) => {
                     debug!(peer = %peer_addr, error = %e, "decapsulation error (expected during handshake)");
-                    // During initial handshake, decapsulate may fail — that's
-                    // normal. boringtun's state machine handles retries.
                     self.drive_handshake(peer_addr, &mut send_buf).await;
                 }
             }
         }
     }
 
-    /// Get existing peer state or create a new tunnel for an unknown peer.
-    fn get_or_create_peer(&mut self, addr: SocketAddr) -> &mut PeerState {
-        if !self.peers.contains_key(&addr) {
-            let session_id = self.next_session_id;
-            self.next_session_id += 1;
+    /// Get the session_id for a peer, creating a new tunnel if needed.
+    fn get_or_create_peer(&mut self, addr: SocketAddr) -> u64 {
+        use std::collections::hash_map::Entry;
+        match self.peers.entry(addr) {
+            Entry::Occupied(e) => e.get().session_id,
+            Entry::Vacant(e) => {
+                let session_id = self.next_session_id;
+                self.next_session_id += 1;
 
-            // For a fresh peer we don't know their public key yet —
-            // boringtun handles the handshake. We use a placeholder
-            // peer key (all zeros); boringtun will negotiate the real
-            // key during the Noise IK handshake.
-            //
-            // In production, the client would pre-register its public key
-            // via the session opening flow, and we'd look it up here.
-            // For Phase 1, accept any incoming handshake.
-            let tunnel = WireguardTunnel::new(
-                self.private_key,
-                [0u8; 32], // placeholder — handshake will establish real keys
-                Some(addr),
-            );
+                // For Phase 1, accept any incoming handshake. In production,
+                // clients pre-register their public key via the session
+                // opening flow.
+                let tunnel = WireguardTunnel::new(
+                    self.private_key,
+                    [0u8; 32],
+                    Some(addr),
+                );
 
-            info!(peer = %addr, session_id, "new peer tunnel created");
+                info!(peer = %addr, session_id, "new peer tunnel created");
 
-            self.peers.insert(addr, PeerState {
-                tunnel,
-                session_id,
-            });
+                e.insert(PeerState {
+                    tunnel,
+                    session_id,
+                    last_active: Instant::now(),
+                });
+                session_id
+            }
         }
-
-        self.peers.get_mut(&addr).unwrap()
     }
 
-    /// Drive boringtun's handshake state machine by calling
-    /// `encapsulate(&[], ...)` repeatedly until there's nothing more to send.
+    /// Drive boringtun's handshake state machine — pump queued responses.
     async fn drive_handshake(&mut self, peer_addr: SocketAddr, buf: &mut [u8]) {
         let peer = match self.peers.get_mut(&peer_addr) {
             Some(p) => p,
             None => return,
         };
 
-        // boringtun may have queued handshake responses. Pump them out.
         loop {
             match peer.tunnel.handle_outgoing(&[], buf) {
                 Ok(data) if !data.is_empty() => {
@@ -175,8 +164,14 @@ impl TunnelListener {
         }
     }
 
-    /// Number of currently connected peers.
-    pub fn peer_count(&self) -> usize {
-        self.peers.len()
+    /// Remove peers that haven't been active recently.
+    fn evict_stale_peers(&mut self) {
+        let timeout = std::time::Duration::from_secs(PEER_IDLE_TIMEOUT_SECS);
+        let before = self.peers.len();
+        self.peers.retain(|_, p| p.last_active.elapsed() < timeout);
+        let evicted = before - self.peers.len();
+        if evicted > 0 {
+            info!(evicted, remaining = self.peers.len(), "evicted stale peers");
+        }
     }
 }

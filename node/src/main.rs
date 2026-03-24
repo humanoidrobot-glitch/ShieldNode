@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crypto::keys::NodeKeyPair;
 use metrics::bandwidth::BandwidthTracker;
@@ -60,40 +60,32 @@ async fn main() -> Result<()> {
     let key_path = Path::new(&cfg.node_private_key_path);
 
     if cli.generate_key {
-        let keypair = NodeKeyPair::generate();
-        // Ensure parent directory exists.
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        keypair.save_to_file(key_path)?;
-        let pub_hex = hex::encode(keypair.public_key().as_bytes());
-        info!(path = %key_path.display(), public_key = %pub_hex, "generated new node key");
+        let (keypair, _) = NodeKeyPair::load_or_generate(key_path)
+            .context("generating node key")?;
+        info!(
+            path = %key_path.display(),
+            public_key = %hex::encode(keypair.public_key().as_bytes()),
+            "node key ready"
+        );
         return Ok(());
     }
 
-    let keypair = if key_path.exists() {
-        let kp = NodeKeyPair::load_from_file(key_path)
-            .with_context(|| format!("loading node key from {}", key_path.display()))?;
+    let (keypair, was_generated) = NodeKeyPair::load_or_generate(key_path)
+        .with_context(|| format!("loading node key from {}", key_path.display()))?;
+
+    if was_generated {
         info!(
             path = %key_path.display(),
-            public_key = %hex::encode(kp.public_key().as_bytes()),
+            public_key = %hex::encode(keypair.public_key().as_bytes()),
+            "generated new node key"
+        );
+    } else {
+        info!(
+            path = %key_path.display(),
+            public_key = %hex::encode(keypair.public_key().as_bytes()),
             "loaded existing node key"
         );
-        kp
-    } else {
-        info!("no node key found, generating a new one");
-        let kp = NodeKeyPair::generate();
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        kp.save_to_file(key_path)?;
-        info!(
-            path = %key_path.display(),
-            public_key = %hex::encode(kp.public_key().as_bytes()),
-            "generated and saved new node key"
-        );
-        kp
-    };
+    }
 
     let private_key_bytes = keypair.secret().to_bytes();
 
@@ -116,18 +108,22 @@ async fn main() -> Result<()> {
 
     // ── metrics HTTP server ───────────────────────────────────────────
 
-    let metrics_addr: std::net::SocketAddr =
-        format!("0.0.0.0:{}", cfg.metrics_port).parse()?;
-    let app = metrics::api::router(bandwidth.clone());
-
+    let metrics_port = cfg.metrics_port;
+    let metrics_bw = bandwidth.clone();
     let metrics_handle = tokio::spawn(async move {
-        info!(%metrics_addr, "metrics HTTP server listening");
-        let listener = tokio::net::TcpListener::bind(metrics_addr)
-            .await
-            .expect("bind metrics port");
-        axum::serve(listener, app.into_make_service())
-            .await
-            .expect("metrics server");
+        let addr: std::net::SocketAddr = match format!("0.0.0.0:{metrics_port}").parse() {
+            Ok(a) => a,
+            Err(e) => { error!(error = %e, "invalid metrics address"); return; }
+        };
+        let app = metrics::api::router(metrics_bw);
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => { error!(error = %e, port = metrics_port, "failed to bind metrics port"); return; }
+        };
+        info!(%addr, "metrics HTTP server listening");
+        if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+            error!(error = %e, "metrics server exited with error");
+        }
     });
 
     // ── heartbeat service ─────────────────────────────────────────────
@@ -152,7 +148,7 @@ async fn main() -> Result<()> {
 
     let tunnel_handle = tokio::spawn(async move {
         if let Err(e) = tunnel_listener.run().await {
-            tracing::error!(error = %e, "tunnel listener exited with error");
+            error!(error = %e, "tunnel listener exited with error");
         }
     });
 
@@ -163,13 +159,12 @@ async fn main() -> Result<()> {
         match network::discovery::DiscoveryService::new(libp2p_port).await {
             Ok(mut svc) => {
                 info!(peer_id = %svc.local_peer_id, "libp2p discovery running");
-                // Drive the swarm event loop.
                 loop {
                     svc.swarm.select_next_some().await;
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "libp2p discovery failed to start (continuing without it)");
+                warn!(error = %e, "libp2p discovery failed to start (continuing without it)");
             }
         }
     });
@@ -185,14 +180,17 @@ async fn main() -> Result<()> {
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
 
-    // Give background tasks a moment to clean up.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Abort remaining tasks.
-    metrics_handle.abort();
-    heartbeat_handle.abort();
-    tunnel_handle.abort();
-    discovery_handle.abort();
+    // Give tasks a chance to finish gracefully, then abort stragglers.
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
+    tokio::select! {
+        _ = metrics_handle => {}
+        _ = heartbeat_handle => {}
+        _ = tunnel_handle => {}
+        _ = discovery_handle => {}
+        _ = timeout => {
+            warn!("graceful shutdown timed out, aborting remaining tasks");
+        }
+    }
 
     info!("ShieldNode stopped");
     Ok(())
