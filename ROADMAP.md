@@ -40,7 +40,7 @@ Privacy through layered encryption — no single node sees both source and desti
 
 ---
 
-## Phase 3: Staking + Slashing `← next`
+## Phase 3: Staking + Slashing -- COMPLETE
 
 Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 
@@ -54,14 +54,13 @@ Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 
 - [x] **Stake-weighted selection** — Weighted random sampling where selection probability is proportional to score. Stake is the dominant factor via sqrt scaling (1 ETH → score 10, 0.1 ETH → score 3.16), making staking a revenue accelerator. Frontend scoring updated to match
 
-### Remaining
-- [ ] Slashing evidence verification: cryptographic proofs for logging, selective denial, bandwidth fraud
+- [x] **Slashing evidence verification** — On-chain cryptographic verification for all three slash reasons. BandwidthFraud: verifies two conflicting EIP-712 dual-signed receipts (same session, different byte counts, same signers, node signer matches accused). ProvableLogging/SelectiveDenial: verifies challenger-signed EIP-712 attestation. 19 new tests in SlashingOracle.t.sol (38 total across all contracts)
 
 **Success metric:** A slashed node loses stake on Sepolia and is deprioritized by clients.
 
 ---
 
-## Phase 4: Economic Hardening + ZK Settlement Privacy
+## Phase 4: Economic Hardening + ZK Settlement Privacy `← next`
 
 Make the economics self-sustaining and add privacy to on-chain settlements.
 

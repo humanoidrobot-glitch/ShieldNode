@@ -229,7 +229,7 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 |-------|-------|--------|
 | **1. Single-Hop Tunnel (MVP)** | Working relay, contracts, client app | Complete |
 | **2. Multi-Hop + Onion Routing** | 3-node circuits, layered encryption | Complete |
-| **3. Staking + Slashing** | Cryptoeconomic security | Contracts + scoring done |
+| **3. Staking + Slashing** | Cryptoeconomic security | Complete |
 | **4. Economic Hardening + ZK** | Market pricing, ZK-private settlement | Pricing + gas monitoring done |
 | **5. Mainnet Launch** | Audits, hardening, public deploy | Planned |
 | **6. Decentralization** | Challenge bonds, mobile, ZK eligibility | Research |
