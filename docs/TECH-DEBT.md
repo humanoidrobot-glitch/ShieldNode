@@ -161,6 +161,49 @@ All fields in `Settings.tsx` (`rpcEndpoint`, `autoRotate`, `rotationIntervalMin`
 
 **When to fix:** With the shared crate migration.
 
+---
+
+## Slashing Oracle (Phase 3)
+
+### Constructor uses require strings instead of custom errors
+`SlashingOracle.sol` constructor (lines 137–139) uses `require(_registry != address(0), "string")` for zero-address checks while the rest of the contract uses custom errors. Inconsistent but constructor-only — not on any hot path.
+
+**Why deferred:** Constructor runs once at deployment. Gas savings from custom errors are negligible here.
+
+**When to fix:** Next contract refactor pass or before mainnet deployment audit.
+
+### `_verifyFraudSigners` takes 10 parameters
+The function accepts 10 individual parameters due to stack-too-deep constraints. A `FraudReceipt` struct would reduce this to 3 params (nodeId, sessionId, two receipt structs) and improve readability.
+
+**Why deferred:** Requires `via_ir` regardless due to the nested decode. The struct refactor alone doesn't eliminate the need for the function split.
+
+**When to fix:** When `via_ir` can be removed (e.g., if Solidity compiler improves stack handling) or during mainnet audit prep.
+
+### `_recoverSigner` duplicated between SlashingOracle and SessionSettlement
+Both contracts implement identical ECDSA signature recovery (assembly-based `r`/`s`/`v` extraction + `ecrecover`). The only difference is the error type (custom error vs require string).
+
+**Why deferred:** Creating a shared Solidity library requires choosing one error convention and updating both consumers. Part of the broader "shared types" migration.
+
+**When to fix:** Before mainnet deployment. Extract into a `library EIP712Utils`.
+
+### Missing test: slash proposal for non-existent node
+`proposeSlash` with an unregistered `nodeId` passes attestation verification (which doesn't check registry) but `executeSlash` would call `registry.slash` on a zero-stake entry. The behaviour is undefined/untested.
+
+**Why deferred:** Edge case unlikely in practice — challengers must be authorized and would not target non-existent nodes.
+
+**When to fix:** Before Phase 5. Add a test and either add a registry existence check in `proposeSlash` or document the expected behaviour.
+
+### Attestation domain uses settlement address as verifyingContract
+`DOMAIN_SEPARATOR` uses the SessionSettlement address as `verifyingContract` for both receipt signatures (correct) and attestation signatures (semantically wrong — attestations are oracle-native). Wallets will show the settlement address when signing attestations, which is confusing. Low real-world impact since `SlashAttestation` has a distinct typehash.
+
+**Why deferred:** Adding a second domain separator doubles complexity. The distinct typehash prevents cross-type confusion.
+
+**When to fix:** Phase 6 when decentralising the challenge system. Attestations should use their own domain with `address(this)`.
+
+---
+
+## Frontend
+
 ### Gas price display units
 The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
 
