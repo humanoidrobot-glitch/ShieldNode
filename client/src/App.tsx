@@ -75,7 +75,7 @@ function App() {
           <CircuitMap status={status} circuit={circuit} rotationCount={rotationCount} />
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <SessionCost session={session} loading={sessionLoading} />
+            <SessionCost session={session} loading={sessionLoading} nodes={nodes} gasPrice={gasPrice} />
             <GasMonitor gasPrice={gasPrice} level={gasLevel} />
           </div>
 

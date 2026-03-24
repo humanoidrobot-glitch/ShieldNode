@@ -69,7 +69,7 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 - [x] **Treasury** — Receives 50% of slashed stake
 
 ### Remaining
-- [ ] Client displays estimated session cost before connection
+- [x] Client displays estimated session cost before connection
 - [x] **Gas price monitoring** — GasMonitor component with color-coded Gwei display (green < 1, yellow 1-5, red > 5), polls every 30s, configurable gas ceiling in Settings
 - [ ] Stress test: simulate 100+ concurrent sessions, measure L1 settlement throughput
 - [x] **Hybrid PQ key exchange** — Upgrade circuit handshake from X25519-only to X25519 + ML-KEM-768 (Kyber). Session keys derived from both key exchanges via HKDF, so security is the stronger of the two. X25519 alone is vulnerable to Shor's algorithm; a "harvest now, decrypt later" adversary recording handshakes today could retroactively reveal circuit routes once quantum hardware exists. ML-KEM adds ~1 KB to the handshake per hop (~3 KB total for a 3-hop circuit) — negligible for a once-per-session operation. Uses `ml-kem` crate (RustCrypto, FIPS 203). This is the single most important PQ item because it protects the confidentiality of circuit routing, which is ShieldNode's core privacy guarantee

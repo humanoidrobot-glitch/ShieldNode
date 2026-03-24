@@ -19,7 +19,13 @@ export function useNodes(): UseNodesReturn {
     setError(null);
     try {
       const result = await invoke<NodeInfo[]>("get_nodes");
-      setNodes(result ?? []);
+      setNodes((prev) => {
+        const next = result ?? [];
+        if (prev.length === next.length && prev.every((n, i) => n.nodeId === next[i].nodeId && n.pricePerByte === next[i].pricePerByte && n.stake === next[i].stake)) {
+          return prev;
+        }
+        return next;
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);

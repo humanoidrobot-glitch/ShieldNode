@@ -1,8 +1,10 @@
-import type { SessionInfo } from "../lib/types";
+import type { NodeInfo, SessionInfo } from "../lib/types";
 
 interface SessionCostProps {
   session: SessionInfo | null;
   loading: boolean;
+  nodes: NodeInfo[];
+  gasPrice: number | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -21,22 +23,74 @@ function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
-export function SessionCost({ session, loading }: SessionCostProps) {
+// Gas units for on-chain operations (from CLAUDE.md gas budget)
+const GAS_OPEN_SESSION = 100_000;
+const GAS_SETTLE_SESSION = 120_000;
+const ESTIMATE_BYTES_1GB = 1024 * 1024 * 1024;
+
+/** Estimate per-session gas cost in ETH at the given Gwei price. */
+function estimateGasCostEth(gasPriceGwei: number): number {
+  const totalGas = GAS_OPEN_SESSION + GAS_SETTLE_SESSION;
+  return totalGas * gasPriceGwei * 1e-9;
+}
+
+/** Estimate bandwidth cost in ETH for a given data amount and price-per-byte. */
+function estimateBandwidthCostEth(bytesEstimate: number, avgPricePerByte: number): number {
+  // pricePerByte is in wei-like units; convert to ETH
+  return bytesEstimate * avgPricePerByte * 1e-18;
+}
+
+/** Compute median price-per-byte from available nodes. */
+function medianPrice(nodes: NodeInfo[]): number {
+  if (nodes.length === 0) return 0;
+  const prices = nodes.map((n) => n.pricePerByte).sort((a, b) => a - b);
+  const mid = Math.floor(prices.length / 2);
+  return prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
+}
+
+export function SessionCost({ session, loading, nodes, gasPrice }: SessionCostProps) {
   if (!session) {
+    const price = medianPrice(nodes);
+    const hasData = nodes.length > 0 && gasPrice !== null;
+    const gasCost = gasPrice !== null ? estimateGasCostEth(gasPrice) : 0;
+    const bwCost = estimateBandwidthCostEth(ESTIMATE_BYTES_1GB, price);
+    const totalCost = gasCost + bwCost;
+
     return (
       <div
         className="rounded-lg p-4"
         style={{ background: "var(--card-bg)", border: "1px solid var(--border-color)" }}
       >
         <h3
-          className="text-xs font-semibold uppercase tracking-wider mb-2"
+          className="text-xs font-semibold uppercase tracking-wider mb-3"
           style={{ color: "var(--text-secondary)" }}
         >
-          Session
+          Estimated Cost
         </h3>
-        <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-          No active session
-        </p>
+        {hasData ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Per 1 GB</p>
+              <p className="text-sm font-mono">{bwCost.toFixed(6)} ETH</p>
+            </div>
+            <div>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Gas (open+settle)</p>
+              <p className="text-sm font-mono">{gasCost.toFixed(6)} ETH</p>
+            </div>
+            <div>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Total (1 GB)</p>
+              <p className="text-sm font-mono">{totalCost.toFixed(6)} ETH</p>
+            </div>
+            <div>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>Median price</p>
+              <p className="text-sm font-mono">{price} wei/byte</p>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+            {nodes.length === 0 ? "Loading nodes..." : "Loading gas price..."}
+          </p>
+        )}
       </div>
     );
   }
