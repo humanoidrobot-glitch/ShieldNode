@@ -131,6 +131,87 @@ pub async fn register_sessions(circuit: &CircuitState) -> Result<(), String> {
     Ok(())
 }
 
+/// Request the exit node to co-sign a bandwidth receipt.
+///
+/// Sends a RECEIPT_SIGN control message (0x03) to the exit node's relay port
+/// and waits for a 65-byte co-signature response.
+///
+/// Wire format sent:
+/// ```text
+/// [session_id=0 (8 bytes)][0x03][8-byte session_id BE][8-byte cumulative_bytes BE][8-byte timestamp BE][65-byte client_sig]
+/// ```
+///
+/// Expected response: 65 bytes (node signature) on success, or 1 byte (error code) on failure.
+pub async fn request_receipt_cosign(
+    exit_endpoint: &str,
+    session_id: u64,
+    cumulative_bytes: u64,
+    timestamp: u64,
+    client_signature: &[u8], // 65 bytes
+) -> Result<Vec<u8>, String> {
+    if client_signature.len() != 65 {
+        return Err(format!(
+            "client_signature must be 65 bytes, got {}",
+            client_signature.len()
+        ));
+    }
+
+    let relay_addr = relay_addr_for(exit_endpoint)?;
+
+    // Build the RECEIPT_SIGN control message.
+    let mut msg = Vec::with_capacity(8 + 1 + 8 + 8 + 8 + 65);
+    msg.extend_from_slice(&0u64.to_be_bytes()); // session_id = 0 (control)
+    msg.push(0x03); // RECEIPT_SIGN command
+    msg.extend_from_slice(&session_id.to_be_bytes());
+    msg.extend_from_slice(&cumulative_bytes.to_be_bytes());
+    msg.extend_from_slice(&timestamp.to_be_bytes());
+    msg.extend_from_slice(client_signature);
+
+    info!(
+        exit_endpoint,
+        relay_addr = %relay_addr,
+        session_id,
+        cumulative_bytes,
+        timestamp,
+        msg_len = msg.len(),
+        "sending RECEIPT_SIGN to exit node"
+    );
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("failed to bind UDP socket for receipt cosign: {e}"))?;
+
+    socket
+        .send_to(&msg, relay_addr)
+        .await
+        .map_err(|e| format!("failed to send RECEIPT_SIGN to {relay_addr}: {e}"))?;
+
+    // Wait for the node's co-signature response.
+    let mut resp_buf = [0u8; 128];
+    match tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut resp_buf)).await {
+        Ok(Ok((n, from))) => {
+            if n == 65 {
+                info!(
+                    from = %from,
+                    "received 65-byte node co-signature"
+                );
+                Ok(resp_buf[..65].to_vec())
+            } else if n == 1 {
+                Err(format!(
+                    "exit node rejected receipt co-sign with error code: 0x{:02x}",
+                    resp_buf[0]
+                ))
+            } else {
+                Err(format!(
+                    "unexpected response size from exit node: {n} bytes (expected 65)"
+                ))
+            }
+        }
+        Ok(Err(e)) => Err(format!("failed to receive RECEIPT_SIGN response: {e}")),
+        Err(_) => Err("RECEIPT_SIGN response timed out (10s)".to_string()),
+    }
+}
+
 /// Send a framed relay packet using a cached socket.
 pub async fn send_sphinx_packet(
     socket: &UdpSocket,

@@ -16,7 +16,7 @@ pub struct WalletConfig {
 }
 
 impl WalletConfig {
-    fn parse_signer(&self) -> Result<PrivateKeySigner, String> {
+    pub(crate) fn parse_signer(&self) -> Result<PrivateKeySigner, String> {
         let pk = self.private_key.as_deref()
             .ok_or("no private key configured - set operator_private_key in settings")?;
         let stripped = pk.strip_prefix("0x").unwrap_or(pk);
@@ -77,12 +77,14 @@ pub async fn open_session(
     Ok((tx_hash, session_id))
 }
 
-/// Settle a session on-chain. Phase 1 uses a minimal receipt with
-/// placeholder signatures — real EIP-712 co-signed receipts come in Phase 2.
+/// Settle a session on-chain with a fully ABI-encoded, dual-signed receipt.
+///
+/// `receipt_data` should come from `receipts::encode_settlement_receipt()` and
+/// contains the sessionId, cumulativeBytes, timestamp, clientSig, and nodeSig.
 pub async fn settle_session(
     wallet: &WalletConfig,
     session_id: u64,
-    _bytes_used: u64,
+    receipt_data: Vec<u8>,
 ) -> Result<String, String> {
     let signer = wallet.parse_signer()?;
     let provider = ProviderBuilder::new()
@@ -90,24 +92,13 @@ pub async fn settle_session(
         .connect_http(wallet.parse_url()?);
     let settlement = wallet.parse_settlement()?;
 
-    info!(session_id, "settling on-chain session");
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let receipt_data = alloy::sol_types::SolValue::abi_encode(&(
-        U256::from(session_id),
-        U256::from(0u64),
-        U256::from(timestamp),
-        vec![0u8; 65],
-        vec![0u8; 65],
-    ));
+    info!(session_id, receipt_len = receipt_data.len(), "settling on-chain session with signed receipt");
 
     let contract = ISessionSettlement::new(settlement, &provider);
-    let pending = contract.settleSession(U256::from(session_id), receipt_data.into())
-        .send().await
+    let pending = contract
+        .settleSession(U256::from(session_id), receipt_data.into())
+        .send()
+        .await
         .map_err(|e| format!("settleSession tx failed: {e}"))?;
 
     let tx_hash = format!("{:?}", pending.tx_hash());

@@ -173,26 +173,97 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
-    let (session_id_str, bytes_used) = {
+    // 1. Get session state (session_id, bytes_used) and exit endpoint.
+    let (session_id_str, bytes_used, exit_endpoint) = {
         let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         match &*conn {
-            ConnectionState::Connected { session_id, bytes_used, .. } => {
-                (session_id.clone(), *bytes_used)
+            ConnectionState::Connected { session_id, bytes_used, node_id, .. } => {
+                // Determine exit endpoint from circuit state or fall back to node_id's endpoint.
+                let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+                let endpoint = circ
+                    .as_ref()
+                    .map(|c| c.exit.endpoint.clone())
+                    .unwrap_or_else(|| node_id.clone());
+                (session_id.clone(), *bytes_used, endpoint)
             }
             _ => return Err("not connected".to_string()),
         }
     };
 
+    let session_id: u64 = session_id_str
+        .parse()
+        .map_err(|e| format!("invalid session id: {e}"))?;
+
+    // 2. Create a BandwidthReceipt with the current timestamp.
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    info!(
+        session_id,
+        bytes_used,
+        timestamp,
+        "preparing EIP-712 bandwidth receipt for settlement"
+    );
+
+    // 3. Parse the client's private key and sign the EIP-712 digest.
+    let (wallet_cfg, chain_id) = {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        let wc = state.wallet_config()?;
+        (wc, cfg.chain_id)
+    };
+
+    let signer = wallet_cfg.parse_signer()?;
+
+    let settlement_address: Address = SETTLEMENT_ADDRESS
+        .parse()
+        .map_err(|e| format!("invalid settlement address: {e}"))?;
+
+    let domain_sep = receipts::compute_domain_separator(chain_id, settlement_address);
+    let digest =
+        receipts::compute_receipt_digest(&domain_sep, session_id, bytes_used, timestamp);
+    let client_sig = receipts::sign_receipt(&digest, &signer).await?;
+
+    info!(
+        session_id,
+        client_sig_len = client_sig.len(),
+        "client EIP-712 signature produced, requesting node co-signature"
+    );
+
+    // 4. Send to exit node for co-signing.
+    let node_sig = tunnel::request_receipt_cosign(
+        &exit_endpoint,
+        session_id,
+        bytes_used,
+        timestamp,
+        &client_sig,
+    )
+    .await?;
+
+    info!(
+        session_id,
+        node_sig_len = node_sig.len(),
+        "received node co-signature"
+    );
+
+    // 5. ABI-encode the dual-signed receipt.
+    let receipt_data = receipts::encode_settlement_receipt(
+        session_id,
+        bytes_used,
+        timestamp,
+        &client_sig,
+        &node_sig,
+    );
+
+    // 6. Stop the tunnel before the on-chain call.
     {
         let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
         tun.stop_tunnel()?;
     }
 
-    let session_id: u64 = session_id_str.parse()
-        .map_err(|e| format!("invalid session id: {e}"))?;
-
-    let wallet_cfg = state.wallet_config()?;
-    let tx_hash = wallet::settle_session(&wallet_cfg, session_id, bytes_used).await?;
+    // 7. Call settle_session with the real receipt.
+    let tx_hash = wallet::settle_session(&wallet_cfg, session_id, receipt_data).await?;
 
     // Clear circuit state.
     {
@@ -205,7 +276,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         *conn = ConnectionState::Disconnected;
     }
 
-    info!(tx = %tx_hash, "disconnected and session settled");
+    info!(tx = %tx_hash, "disconnected and session settled with EIP-712 receipt");
     Ok(tx_hash)
 }
 

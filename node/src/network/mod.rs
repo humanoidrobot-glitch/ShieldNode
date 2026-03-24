@@ -2,5 +2,6 @@ pub mod chain;
 pub mod discovery;
 pub mod heartbeat;
 pub mod hop_codec;
+pub mod receipts;
 pub mod relay;
 pub mod relay_listener;

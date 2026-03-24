@@ -17,6 +17,15 @@ pub struct NodeConfig {
     #[serde(default)]
     pub stake_address: Option<String>,
 
+    /// Optional SessionSettlement contract address for EIP-712 receipt
+    /// co-signing.
+    #[serde(default)]
+    pub settlement_address: Option<String>,
+
+    /// Chain ID for EIP-712 domain (defaults to Sepolia 11155111).
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u64,
+
     /// Ethereum JSON-RPC endpoint.
     #[serde(default = "default_ethereum_rpc")]
     pub ethereum_rpc: String,
@@ -89,6 +98,9 @@ fn default_price_per_byte() -> u64 {
 fn default_data_dir() -> String {
     "./data".to_string()
 }
+fn default_chain_id() -> u64 {
+    11155111 // Sepolia
+}
 fn default_relay_port() -> u16 {
     51821
 }
@@ -107,6 +119,8 @@ impl Default for NodeConfig {
             listen_port: default_listen_port(),
             metrics_port: default_metrics_port(),
             stake_address: None,
+            settlement_address: None,
+            chain_id: default_chain_id(),
             ethereum_rpc: default_ethereum_rpc(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             node_private_key_path: default_node_private_key_path(),

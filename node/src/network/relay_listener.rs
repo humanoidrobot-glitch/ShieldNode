@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use alloy::primitives::{Address, B256};
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -11,6 +13,7 @@ use crate::metrics::bandwidth::BandwidthTracker;
 use crate::tunnel::tun_device::TunDevice;
 
 use super::hop_codec;
+use super::receipts;
 use super::relay::{RelayService, SessionState};
 
 /// Minimum packet size: 8-byte session_id + at least 1 byte of payload.
@@ -27,6 +30,7 @@ const DEFAULT_RELAY_PORT: u16 = 51821;
 
 const MSG_SESSION_SETUP: u8 = 0x01;
 const MSG_SESSION_TEARDOWN: u8 = 0x02;
+const MSG_RECEIPT_SIGN: u8 = 0x03;
 
 /// Expected payload length for SESSION_SETUP after the message-type byte:
 /// 8 (session_id) + 32 (session_key) + 8 (hop_index) = 48
@@ -35,6 +39,10 @@ const SESSION_SETUP_PAYLOAD_LEN: usize = 8 + 32 + 8;
 /// Expected payload length for SESSION_TEARDOWN after the message-type byte:
 /// 8 (session_id) = 8
 const SESSION_TEARDOWN_PAYLOAD_LEN: usize = 8;
+
+/// Expected payload length for RECEIPT_SIGN after the message-type byte:
+/// 8 (session_id) + 8 (cumulative_bytes) + 8 (timestamp) + 65 (client_signature) = 89
+const RECEIPT_SIGN_PAYLOAD_LEN: usize = 8 + 8 + 8 + 65;
 
 // ── ACK bytes ─────────────────────────────────────────────────────────
 
@@ -64,15 +72,27 @@ pub struct RelayListener {
     /// Kept for future direct bandwidth bookkeeping (e.g. per-relay-hop stats).
     #[allow(dead_code)]
     bandwidth: Arc<Mutex<BandwidthTracker>>,
+    /// Operator's ECDSA signer for co-signing EIP-712 bandwidth receipts.
+    operator_signer: Option<PrivateKeySigner>,
+    /// Pre-computed EIP-712 domain separator for the SessionSettlement contract.
+    domain_separator: Option<B256>,
 }
 
 impl RelayListener {
     /// Bind the relay listener to `0.0.0.0:<port>`.
+    ///
+    /// When `operator_signer`, `chain_id`, and `settlement_address` are
+    /// provided the listener can co-sign EIP-712 bandwidth receipts in
+    /// response to `RECEIPT_SIGN` (0x03) control messages.  All three are
+    /// optional — if any is `None` receipt signing is disabled.
     pub async fn bind(
         port: u16,
         relay_service: Arc<Mutex<RelayService>>,
         tun: Option<Arc<TunDevice>>,
         bandwidth: Arc<Mutex<BandwidthTracker>>,
+        operator_signer: Option<PrivateKeySigner>,
+        chain_id: Option<u64>,
+        settlement_address: Option<Address>,
     ) -> Result<Self> {
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
         let socket = UdpSocket::bind(addr)
@@ -80,11 +100,27 @@ impl RelayListener {
             .with_context(|| format!("binding relay listener on {addr}"))?;
         info!(%addr, "relay UDP listener bound");
 
+        // Pre-compute the domain separator when all EIP-712 params are available.
+        let domain_separator = match (chain_id, settlement_address) {
+            (Some(cid), Some(addr)) => {
+                let ds = receipts::compute_domain_separator(cid, addr);
+                info!(
+                    chain_id = cid,
+                    settlement = %addr,
+                    "EIP-712 domain separator computed for receipt co-signing"
+                );
+                Some(ds)
+            }
+            _ => None,
+        };
+
         Ok(Self {
             socket,
             relay_service,
             tun,
             bandwidth,
+            operator_signer,
+            domain_separator,
         })
     }
 
@@ -114,8 +150,8 @@ impl RelayListener {
 
             // ── control channel (session_id == 0) ─────────────────────
             if session_id == 0 {
-                let ack = self.handle_control_message(&packet[8..], peer_addr).await;
-                if let Err(e) = self.socket.send_to(&[ack], peer_addr).await {
+                let response = self.handle_control_message(&packet[8..], peer_addr).await;
+                if let Err(e) = self.socket.send_to(&response, peer_addr).await {
                     warn!(
                         peer = %peer_addr,
                         error = %e,
@@ -215,12 +251,14 @@ impl RelayListener {
 
     /// Parse and execute a control message received on session_id 0.
     ///
-    /// Returns the 1-byte ACK value to send back to the peer:
-    /// `0x01` on success, `0x00` on failure.
-    async fn handle_control_message(&self, data: &[u8], peer_addr: SocketAddr) -> u8 {
+    /// Returns the response bytes to send back to the peer.  For most
+    /// message types this is a single-byte ACK (`0x01` success / `0x00`
+    /// failure).  For `RECEIPT_SIGN` the response is the 65-byte node
+    /// signature on success, or a 1-byte `0x00` on failure.
+    async fn handle_control_message(&self, data: &[u8], peer_addr: SocketAddr) -> Vec<u8> {
         if data.is_empty() {
             warn!(peer = %peer_addr, "control message has no type byte");
-            return ACK_FAILURE;
+            return vec![ACK_FAILURE];
         }
 
         let msg_type = data[0];
@@ -235,7 +273,7 @@ impl RelayListener {
                         got = payload.len(),
                         "SESSION_SETUP payload too short"
                     );
-                    return ACK_FAILURE;
+                    return vec![ACK_FAILURE];
                 }
 
                 let real_session_id = u64::from_be_bytes(
@@ -265,14 +303,14 @@ impl RelayListener {
                         hop_index,
                         "SESSION_SETUP accepted"
                     );
-                    ACK_SUCCESS
+                    vec![ACK_SUCCESS]
                 } else {
                     warn!(
                         peer = %peer_addr,
                         session_id = real_session_id,
                         "SESSION_SETUP rejected (duplicate session_id)"
                     );
-                    ACK_FAILURE
+                    vec![ACK_FAILURE]
                 }
             }
 
@@ -284,7 +322,7 @@ impl RelayListener {
                         got = payload.len(),
                         "SESSION_TEARDOWN payload too short"
                     );
-                    return ACK_FAILURE;
+                    return vec![ACK_FAILURE];
                 }
 
                 let target_session_id = u64::from_be_bytes(
@@ -301,7 +339,11 @@ impl RelayListener {
                     session_id = target_session_id,
                     "SESSION_TEARDOWN accepted"
                 );
-                ACK_SUCCESS
+                vec![ACK_SUCCESS]
+            }
+
+            MSG_RECEIPT_SIGN => {
+                self.handle_receipt_sign(payload, peer_addr).await
             }
 
             other => {
@@ -310,7 +352,91 @@ impl RelayListener {
                     msg_type = other,
                     "unknown control message type"
                 );
-                ACK_FAILURE
+                vec![ACK_FAILURE]
+            }
+        }
+    }
+
+    /// Handle a `RECEIPT_SIGN` (0x03) control message.
+    ///
+    /// Payload layout (89 bytes):
+    /// ```text
+    /// [8 bytes: session_id BE]
+    /// [8 bytes: cumulative_bytes BE]
+    /// [8 bytes: timestamp BE]
+    /// [65 bytes: client_signature (r||s||v)]
+    /// ```
+    ///
+    /// On success returns the 65-byte node co-signature.
+    /// On failure returns a single `0x00` byte.
+    async fn handle_receipt_sign(&self, payload: &[u8], peer_addr: SocketAddr) -> Vec<u8> {
+        // ── validate prerequisites ───────────────────────────────────
+        let (signer, domain_sep) = match (&self.operator_signer, &self.domain_separator) {
+            (Some(s), Some(ds)) => (s, ds),
+            _ => {
+                warn!(
+                    peer = %peer_addr,
+                    "RECEIPT_SIGN received but receipt signing is not configured"
+                );
+                return vec![ACK_FAILURE];
+            }
+        };
+
+        if payload.len() < RECEIPT_SIGN_PAYLOAD_LEN {
+            warn!(
+                peer = %peer_addr,
+                expected = RECEIPT_SIGN_PAYLOAD_LEN,
+                got = payload.len(),
+                "RECEIPT_SIGN payload too short"
+            );
+            return vec![ACK_FAILURE];
+        }
+
+        // ── parse fields ─────────────────────────────────────────────
+        let session_id =
+            u64::from_be_bytes(payload[..8].try_into().expect("slice is exactly 8 bytes"));
+        let cumulative_bytes =
+            u64::from_be_bytes(payload[8..16].try_into().expect("slice is exactly 8 bytes"));
+        let timestamp =
+            u64::from_be_bytes(payload[16..24].try_into().expect("slice is exactly 8 bytes"));
+        let _client_signature = &payload[24..89]; // 65 bytes, kept for future verification
+
+        // ── verify session exists ────────────────────────────────────
+        {
+            let svc = self.relay_service.lock().await;
+            if !svc.has_session(session_id) {
+                warn!(
+                    peer = %peer_addr,
+                    session_id,
+                    "RECEIPT_SIGN for unknown session"
+                );
+                return vec![ACK_FAILURE];
+            }
+        }
+
+        // ── compute EIP-712 digest and sign ──────────────────────────
+        let digest =
+            receipts::compute_receipt_digest(domain_sep, session_id, cumulative_bytes, timestamp);
+
+        match receipts::sign_receipt_digest(&digest, signer).await {
+            Ok(sig) => {
+                info!(
+                    peer = %peer_addr,
+                    session_id,
+                    cumulative_bytes,
+                    timestamp,
+                    "RECEIPT_SIGN: co-signed receipt"
+                );
+                sig
+            }
+            Err(e) => {
+                warn!(
+                    peer = %peer_addr,
+                    session_id,
+                    error = %e,
+                    "RECEIPT_SIGN: signing failed"
+                );
+                vec![ACK_FAILURE]
             }
         }
     }

@@ -117,6 +117,11 @@ impl RelayService {
         Ok((next_hop, inner))
     }
 
+    /// Check whether a session with the given ID exists.
+    pub fn has_session(&self, session_id: u64) -> bool {
+        self.sessions.contains_key(&session_id)
+    }
+
     /// Number of active sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()

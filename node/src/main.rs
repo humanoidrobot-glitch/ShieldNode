@@ -7,7 +7,8 @@ mod tunnel;
 use std::path::Path;
 use std::sync::Arc;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, FixedBytes};
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
@@ -287,9 +288,47 @@ async fn main() -> Result<()> {
 
     let relay_service = Arc::new(Mutex::new(RelayService::new(bandwidth.clone())));
 
-    let relay_listener = RelayListener::bind(cfg.relay_port, relay_service, tun, bandwidth.clone())
-        .await
-        .context("failed to bind relay listener")?;
+    // Build operator signer and settlement address for EIP-712 receipt
+    // co-signing (all three must be present to enable the feature).
+    let operator_signer: Option<PrivateKeySigner> = cfg
+        .operator_private_key
+        .as_deref()
+        .and_then(|hex_str| {
+            parse_hex_private_key(hex_str)
+                .ok()
+                .and_then(|key_bytes| {
+                    PrivateKeySigner::from_bytes(&FixedBytes::from(key_bytes))
+                        .map_err(|e| {
+                            warn!(error = %e, "failed to create operator PrivateKeySigner");
+                            e
+                        })
+                        .ok()
+                })
+        });
+
+    let settlement_address: Option<Address> = cfg
+        .settlement_address
+        .as_deref()
+        .and_then(|s| {
+            s.parse::<Address>()
+                .map_err(|e| {
+                    warn!(error = %e, "invalid settlement_address in config");
+                    e
+                })
+                .ok()
+        });
+
+    let relay_listener = RelayListener::bind(
+        cfg.relay_port,
+        relay_service,
+        tun,
+        bandwidth.clone(),
+        operator_signer,
+        Some(cfg.chain_id),
+        settlement_address,
+    )
+    .await
+    .context("failed to bind relay listener")?;
 
     let relay_handle = tokio::spawn(async move {
         if let Err(e) = relay_listener.run().await {
