@@ -189,7 +189,7 @@ contract SlashingOracleTest is Test {
         oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.BandwidthFraud), evidence);
 
         // Proposal should be stored.
-        (bytes32 nid,,,,, bool executed) = oracle.proposals(0);
+        (bytes32 nid,,,, bool executed) = oracle.proposals(0);
         assertEq(nid, NODE_ID);
         assertFalse(executed);
     }
@@ -257,7 +257,7 @@ contract SlashingOracleTest is Test {
         vm.prank(challAddr);
         oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);
 
-        (bytes32 nid,,,,, bool executed) = oracle.proposals(0);
+        (bytes32 nid,,,, bool executed) = oracle.proposals(0);
         assertEq(nid, NODE_ID);
         assertFalse(executed);
     }
@@ -269,7 +269,7 @@ contract SlashingOracleTest is Test {
         vm.prank(challAddr);
         oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.SelectiveDenial), evidence);
 
-        (bytes32 nid,,,,, bool executed) = oracle.proposals(0);
+        (bytes32 nid,,,, bool executed) = oracle.proposals(0);
         assertEq(nid, NODE_ID);
         assertFalse(executed);
     }
@@ -404,10 +404,10 @@ contract SlashingOracleTest is Test {
         bytes memory ev2 = _buildAttestation(NODE_ID, block.timestamp, keccak256("second"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.SelectiveDenial), ev2);
 
-        // Third slash (100% + ban).
+        // Third slash (100% + ban) — use attestation to test all three paths.
         vm.warp(block.timestamp + 1);
         bytes memory ev3 = _buildAttestation(NODE_ID, block.timestamp, keccak256("third"));
-        _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.BandwidthFraud), _buildFraudEvidence(1, 100, 10, 200, 20));
+        _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), ev3);
 
         INodeRegistry.NodeInfo memory after_ = registry.getNode(NODE_ID);
         assertEq(after_.stake, 0);

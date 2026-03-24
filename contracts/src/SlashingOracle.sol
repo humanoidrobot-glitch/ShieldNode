@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {ISlashingOracle} from "./interfaces/ISlashingOracle.sol";
-import {INodeRegistry}   from "./interfaces/INodeRegistry.sol";
-import {NodeRegistry}    from "./NodeRegistry.sol";
+import {ISlashingOracle}  from "./interfaces/ISlashingOracle.sol";
+import {INodeRegistry}    from "./interfaces/INodeRegistry.sol";
+import {NodeRegistry}     from "./NodeRegistry.sol";
+import {SessionSettlement} from "./SessionSettlement.sol";
 
 /// @title SlashingOracle
 /// @notice Manages slash proposals with on-chain evidence verification,
@@ -64,8 +65,8 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Treasury that receives its share of slashed funds.
     address public immutable treasury;
 
-    /// @notice SessionSettlement contract — used to look up session info
-    ///         for BandwidthFraud verification.
+    /// @notice SessionSettlement contract whose EIP-712 domain this oracle
+    ///         shares for receipt signature verification.
     address public immutable settlement;
 
     // ──────────────────────────────────────────────────────────────
@@ -78,11 +79,11 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Authorised challengers.
     mapping(address => bool) public challengers;
 
-    /// @dev Proposal storage.
+    /// @dev Proposal storage.  Evidence is not stored — it is verified
+    ///      at proposal time and emitted in the SlashProposed event.
     struct Proposal {
         bytes32     nodeId;
         SlashReason reason;
-        bytes       evidence;
         address     challenger;
         uint256     createdAt;
         bool        executed;
@@ -108,6 +109,7 @@ contract SlashingOracle is ISlashingOracle {
     error UnknownProposal();
     error AlreadyExecuted();
     error GracePeriodActive();
+    error TransferFailed(string recipient);
 
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
@@ -153,6 +155,12 @@ contract SlashingOracle is ISlashingOracle {
                 _settlement
             )
         );
+
+        // Safety: verify our computed separator matches the live contract.
+        require(
+            DOMAIN_SEPARATOR == SessionSettlement(_settlement).DOMAIN_SEPARATOR(),
+            "SlashingOracle: domain separator mismatch"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -192,7 +200,6 @@ contract SlashingOracle is ISlashingOracle {
         proposals[proposalId] = Proposal({
             nodeId:     nodeId,
             reason:     sr,
-            evidence:   evidence,
             challenger: msg.sender,
             createdAt:  block.timestamp,
             executed:   false
@@ -237,11 +244,11 @@ contract SlashingOracle is ISlashingOracle {
 
         if (challengerReward > 0) {
             (bool ok1, ) = p.challenger.call{value: challengerReward}("");
-            require(ok1, "SlashingOracle: challenger transfer failed");
+            if (!ok1) revert TransferFailed("challenger");
         }
         if (treasuryReward > 0) {
             (bool ok2, ) = treasury.call{value: treasuryReward}("");
-            require(ok2, "SlashingOracle: treasury transfer failed");
+            if (!ok2) revert TransferFailed("treasury");
         }
 
         emit SlashExecuted(proposalId, p.nodeId, slashAmount);
