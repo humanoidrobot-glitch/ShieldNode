@@ -10,8 +10,11 @@ pub struct ClientConfig {
     /// Chain ID of the target network.
     pub chain_id: u64,
 
-    /// Whether to automatically rotate exit nodes during a session.
+    /// Whether to automatically rotate circuits during a session.
     pub auto_rotate: bool,
+
+    /// Interval in seconds between circuit rotations (default: 600 = 10 min).
+    pub circuit_rotation_interval_secs: u64,
 
     /// Kill-switch: block all traffic when tunnel drops unexpectedly.
     pub kill_switch: bool,
@@ -34,6 +37,7 @@ impl Default for ClientConfig {
             rpc_url: "https://eth-sepolia.g.alchemy.com/v2/demo".to_string(),
             chain_id: 11155111, // Sepolia
             auto_rotate: false,
+            circuit_rotation_interval_secs: 600,
             kill_switch: true,
             gas_price_ceiling_gwei: 5.0,
             preferred_nodes: Vec::new(),

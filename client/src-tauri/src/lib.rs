@@ -8,11 +8,13 @@ mod sphinx;
 mod tunnel;
 mod wallet;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use chain::ChainReader;
@@ -31,6 +33,8 @@ pub enum ConnectionState {
         bytes_used: u64,
         /// Number of hops in the active circuit (1 = single, 3 = multi-hop).
         hop_count: u32,
+        /// How many times the circuit has been rotated since connect.
+        rotation_count: u32,
     },
 }
 
@@ -45,11 +49,15 @@ const REGISTRY_ADDRESS: &str = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11";
 const SETTLEMENT_ADDRESS: &str = "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959";
 
 pub struct AppState {
-    pub connection: Mutex<ConnectionState>,
-    pub circuit: Mutex<Option<CircuitState>>,
-    pub tunnel: Mutex<TunnelManager>,
-    pub config: Mutex<config::ClientConfig>,
+    pub connection: Arc<Mutex<ConnectionState>>,
+    pub circuit: Arc<Mutex<Option<CircuitState>>>,
+    pub tunnel: Arc<Mutex<TunnelManager>>,
+    pub config: Arc<Mutex<config::ClientConfig>>,
     pub chain_reader: ChainReader,
+    /// Cancel token for the background circuit rotation task.
+    pub rotation_cancel: Mutex<Option<CancellationToken>>,
+    /// Atomic counter bumped on each successful rotation.
+    pub rotation_count: Arc<AtomicU32>,
 }
 
 impl Default for AppState {
@@ -59,10 +67,12 @@ impl Default for AppState {
         let settlement: Address = SETTLEMENT_ADDRESS.parse().expect("invalid settlement address");
         Self {
             chain_reader: ChainReader::new(cfg.rpc_url.clone(), registry, settlement),
-            connection: Mutex::new(ConnectionState::default()),
-            circuit: Mutex::new(None),
-            tunnel: Mutex::new(TunnelManager::new()),
-            config: Mutex::new(cfg),
+            connection: Arc::new(Mutex::new(ConnectionState::default())),
+            circuit: Arc::new(Mutex::new(None)),
+            tunnel: Arc::new(Mutex::new(TunnelManager::new())),
+            config: Arc::new(Mutex::new(cfg)),
+            rotation_cancel: Mutex::new(None),
+            rotation_count: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -157,6 +167,8 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
     let session_id_str = session_id.to_string();
 
+    state.rotation_count.store(0, Ordering::Relaxed);
+
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
@@ -164,7 +176,42 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             session_id: session_id_str.clone(),
             bytes_used: 0,
             hop_count,
+            rotation_count: 0,
         };
+    }
+
+    // Spawn circuit auto-rotation background task if enabled and multi-hop.
+    if hop_count == 3 {
+        let (auto_rotate, interval_secs) = {
+            let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+            (cfg.auto_rotate, cfg.circuit_rotation_interval_secs)
+        };
+
+        if auto_rotate && interval_secs > 0 {
+            let cancel = CancellationToken::new();
+            {
+                let mut rc = state.rotation_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+                *rc = Some(cancel.clone());
+            }
+
+            let connection = Arc::clone(&state.connection);
+            let circuit = Arc::clone(&state.circuit);
+            let tunnel = Arc::clone(&state.tunnel);
+            let chain_reader = state.chain_reader.clone();
+            let rotation_counter = Arc::clone(&state.rotation_count);
+
+            tokio::spawn(rotation_loop(
+                cancel,
+                interval_secs,
+                connection,
+                circuit,
+                tunnel,
+                chain_reader,
+                rotation_counter,
+            ));
+
+            info!(interval_secs, "circuit auto-rotation enabled");
+        }
     }
 
     info!(session_id, tx = %tx_hash, hop_count, "connected — session opened on-chain");
@@ -173,6 +220,9 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
+    // 0. Cancel any running rotation task.
+    stop_rotation(&state)?;
+
     // 1. Get session state (session_id, bytes_used) and exit endpoint.
     let (session_id_str, bytes_used, exit_endpoint) = {
         let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -400,6 +450,199 @@ async fn send_packet(
     .await?;
 
     Ok(format!("sent {} bytes through circuit", sphinx_bytes.len()))
+}
+
+// ── Circuit rotation ──────────────────────────────────────────────────────
+
+/// Cancel the background rotation task, if any.
+fn stop_rotation(state: &AppState) -> Result<(), String> {
+    let mut rc = state
+        .rotation_cancel
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+    if let Some(token) = rc.take() {
+        token.cancel();
+        info!("circuit rotation task cancelled");
+    }
+    Ok(())
+}
+
+/// Background loop that rotates the circuit on a fixed interval.
+///
+/// On each tick:
+/// 1. Teardown sessions on the old circuit's relay nodes
+/// 2. Fetch fresh node list from the registry
+/// 3. Select a new 3-hop circuit through different nodes
+/// 4. Register session keys on the new hops
+/// 5. Swap the circuit state atomically
+async fn rotation_loop(
+    cancel: CancellationToken,
+    interval_secs: u64,
+    connection: Arc<Mutex<ConnectionState>>,
+    circuit: Arc<Mutex<Option<CircuitState>>>,
+    tunnel: Arc<Mutex<TunnelManager>>,
+    chain_reader: ChainReader,
+    rotation_count: Arc<AtomicU32>,
+) {
+    let interval = std::time::Duration::from_secs(interval_secs);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("rotation loop cancelled");
+                return;
+            }
+            _ = tokio::time::sleep(interval) => {}
+        }
+
+        info!("circuit rotation triggered");
+
+        // 1. Teardown old sessions.
+        let old_circuit = {
+            let circ = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            circ.clone()
+        };
+        if let Some(ref old) = old_circuit {
+            tunnel::teardown_sessions(old).await;
+        }
+
+        // 2. Fetch nodes.
+        let nodes = match chain_reader.get_active_nodes().await {
+            Ok(on_chain) if on_chain.len() >= 3 => {
+                on_chain
+                    .into_iter()
+                    .map(|n| NodeInfo {
+                        node_id: n.node_id,
+                        public_key: decode_hex_32(&n.public_key),
+                        endpoint: n.endpoint,
+                        stake: (n.stake * 1e18) as u64,
+                        uptime: n.uptime,
+                        price_per_byte: n.price_per_byte as u64,
+                        slash_count: n.slash_count,
+                    })
+                    .collect::<Vec<_>>()
+            }
+            Ok(_) => {
+                warn!("fewer than 3 nodes available, skipping rotation");
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to fetch nodes for rotation, skipping");
+                continue;
+            }
+        };
+
+        // 3. Select new circuit (try to pick different nodes from old circuit).
+        let selected = match select_rotation_circuit(&nodes, old_circuit.as_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to select rotation circuit, skipping");
+                continue;
+            }
+        };
+
+        info!(
+            entry = %selected[0].node_id,
+            relay = %selected[1].node_id,
+            exit  = %selected[2].node_id,
+            "selected new circuit for rotation"
+        );
+
+        // 4. Build new circuit and register sessions.
+        let new_circuit = match circuit::build_circuit(&selected) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "failed to build rotation circuit, skipping");
+                continue;
+            }
+        };
+
+        if let Err(e) = tunnel::register_sessions(&new_circuit).await {
+            warn!(error = %e, "failed to register sessions on new circuit, skipping");
+            continue;
+        }
+
+        // 5. Reconnect tunnel to new entry node.
+        {
+            let mut tun = tunnel.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key) {
+                warn!(error = %e, "failed to start tunnel to new entry, skipping rotation");
+                continue;
+            }
+        }
+
+        // 6. Swap circuit state.
+        {
+            let mut circ = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            *circ = Some(new_circuit);
+        }
+
+        // 7. Update rotation count.
+        let count = rotation_count.fetch_add(1, Ordering::Relaxed) + 1;
+        {
+            let mut conn = connection.lock().unwrap_or_else(|e| e.into_inner());
+            if let ConnectionState::Connected {
+                ref mut node_id,
+                ref mut rotation_count,
+                ..
+            } = *conn
+            {
+                *node_id = selected[0].node_id.clone();
+                *rotation_count = count;
+            }
+        }
+
+        info!(
+            rotation_count = count,
+            entry = %selected[0].node_id,
+            "circuit rotation complete"
+        );
+    }
+}
+
+/// Select a 3-hop circuit for rotation, preferring nodes not in the old circuit.
+fn select_rotation_circuit(
+    nodes: &[NodeInfo],
+    old_circuit: Option<&CircuitState>,
+) -> Result<[NodeInfo; 3], String> {
+    if nodes.len() < 3 {
+        return Err(format!(
+            "need at least 3 nodes, got {}",
+            nodes.len()
+        ));
+    }
+
+    let old_ids: Vec<&str> = old_circuit
+        .map(|c| {
+            vec![
+                c.entry.node_id.as_str(),
+                c.relay.node_id.as_str(),
+                c.exit.node_id.as_str(),
+            ]
+        })
+        .unwrap_or_default();
+
+    // Score nodes, boosting those not in the old circuit.
+    let mut scored: Vec<(f64, &NodeInfo)> = nodes
+        .iter()
+        .map(|n| {
+            let base = circuit::score_node(n);
+            let bonus = if old_ids.contains(&n.node_id.as_str()) {
+                -100.0 // strongly deprioritize reuse
+            } else {
+                0.0
+            };
+            (base + bonus, n)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok([
+        scored[0].1.clone(),
+        scored[1].1.clone(),
+        scored[2].1.clone(),
+    ])
 }
 
 // Helpers

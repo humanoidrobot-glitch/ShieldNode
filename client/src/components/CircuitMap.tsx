@@ -3,6 +3,7 @@ import type { ConnectionStatus, CircuitInfo } from "../lib/types";
 interface CircuitMapProps {
   status: ConnectionStatus;
   circuit: CircuitInfo | null;
+  rotationCount?: number;
 }
 
 function truncateId(id: string): string {
@@ -64,7 +65,7 @@ function Arrow({ active }: { active: boolean }) {
   );
 }
 
-export function CircuitMap({ status, circuit }: CircuitMapProps) {
+export function CircuitMap({ status, circuit, rotationCount }: CircuitMapProps) {
   const active = status === "connected";
 
   // When connected with a 3-hop circuit, show all hops.
@@ -77,12 +78,22 @@ export function CircuitMap({ status, circuit }: CircuitMapProps) {
           border: "1px solid var(--border-color)",
         }}
       >
-        <h3
-          className="text-xs font-semibold uppercase tracking-wider mb-3"
-          style={{ color: "var(--text-secondary)" }}
-        >
-          Circuit Path
-        </h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3
+            className="text-xs font-semibold uppercase tracking-wider"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            Circuit Path
+          </h3>
+          {rotationCount != null && rotationCount > 0 && (
+            <span
+              className="text-xs font-mono"
+              style={{ color: "var(--accent-green)" }}
+            >
+              rotated {rotationCount}x
+            </span>
+          )}
+        </div>
         <div className="flex items-center justify-center flex-wrap gap-y-2">
           <Hop label="You" active />
           <Arrow active />

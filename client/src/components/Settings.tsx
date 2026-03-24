@@ -3,6 +3,7 @@ import { useState } from "react";
 interface SettingsState {
   rpcEndpoint: string;
   autoRotate: boolean;
+  rotationIntervalMin: number;
   killSwitch: boolean;
   gasCeiling: number;
 }
@@ -46,6 +47,7 @@ export function Settings() {
   const [settings, setSettings] = useState<SettingsState>({
     rpcEndpoint: "https://rpc.sepolia.org",
     autoRotate: false,
+    rotationIntervalMin: 10,
     killSwitch: true,
     gasCeiling: 10,
   });
@@ -71,10 +73,28 @@ export function Settings() {
 
       <Toggle
         label="Auto-rotate circuits"
-        description="Periodically switch to a new node"
+        description="Periodically rebuild circuit through different nodes"
         checked={settings.autoRotate}
         onChange={(v) => update("autoRotate", v)}
       />
+
+      {settings.autoRotate && (
+        <div>
+          <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+            Rotation interval (minutes)
+          </label>
+          <input
+            type="number"
+            min={1}
+            max={60}
+            step={1}
+            value={settings.rotationIntervalMin}
+            onChange={(e) => update("rotationIntervalMin", Number(e.target.value))}
+            className="w-full px-3 py-2 rounded text-sm font-mono"
+            style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+          />
+        </div>
+      )}
 
       <Toggle
         label="Kill switch"

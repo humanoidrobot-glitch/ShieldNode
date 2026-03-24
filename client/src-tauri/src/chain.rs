@@ -81,6 +81,7 @@ pub struct OnChainNodeInfo {
 // ---------------------------------------------------------------------------
 
 /// Read-only interface to on-chain ShieldNode contracts.
+#[derive(Clone)]
 pub struct ChainReader {
     rpc_url: String,
     registry_address: Address,

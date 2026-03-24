@@ -131,6 +131,40 @@ pub async fn register_sessions(circuit: &CircuitState) -> Result<(), String> {
     Ok(())
 }
 
+/// Send SESSION_TEARDOWN (0x02) to each hop in the circuit.
+///
+/// Wire format: `[session_id=0 (8 bytes)][0x02][8-byte session_id BE]`
+pub async fn teardown_sessions(circuit: &CircuitState) {
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "failed to bind socket for SESSION_TEARDOWN");
+            return;
+        }
+    };
+
+    for hop in [&circuit.entry, &circuit.relay, &circuit.exit] {
+        let relay_addr = match relay_addr_for(&hop.endpoint) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(node_id = %hop.node_id, error = %e, "skipping teardown for bad endpoint");
+                continue;
+            }
+        };
+
+        let mut msg = Vec::with_capacity(8 + 1 + 8);
+        msg.extend_from_slice(&0u64.to_be_bytes()); // session_id = 0 (control)
+        msg.push(0x02); // SESSION_TEARDOWN
+        msg.extend_from_slice(&hop.session_id.to_be_bytes());
+
+        if let Err(e) = socket.send_to(&msg, relay_addr).await {
+            warn!(node_id = %hop.node_id, error = %e, "failed to send SESSION_TEARDOWN");
+        } else {
+            info!(node_id = %hop.node_id, session_id = hop.session_id, "sent SESSION_TEARDOWN");
+        }
+    }
+}
+
 /// Request the exit node to co-sign a bandwidth receipt.
 ///
 /// Sends a RECEIPT_SIGN control message (0x03) to the exit node's relay port
