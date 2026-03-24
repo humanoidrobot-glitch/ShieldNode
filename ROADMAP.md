@@ -20,7 +20,7 @@ The foundation: a working relay node, on-chain contracts, and a basic client.
 
 ---
 
-## Phase 2: Multi-Hop + Onion Routing
+## Phase 2: Multi-Hop + Onion Routing -- COMPLETE
 
 Privacy through layered encryption — no single node sees both source and destination.
 
@@ -34,14 +34,13 @@ Privacy through layered encryption — no single node sees both source and desti
 - [x] **Live multi-hop traffic** — Client sends Sphinx-wrapped packets through 3-node relay chain end-to-end
 - [x] **EIP-712 bandwidth receipt co-signing** — Client signs receipt digest, sends RECEIPT_SIGN (0x03) control message to exit node, node co-signs and returns 65-byte signature. Dual-signed receipt ABI-encoded for on-chain settlement
 
-### Remaining
-- [ ] Auto-rotate circuits periodically for forward secrecy
+- [x] **Circuit auto-rotation** — Background task rebuilds circuit through different nodes on a configurable interval (default 10 min). SESSION_TEARDOWN sent to old hops, new circuit selected with reuse penalty, sessions registered on new nodes. CancellationToken lifecycle, rotation count shown in UI
 
 **Success metric:** Traffic routes through 3 independent nodes; no single node can see both source and destination.
 
 ---
 
-## Phase 3: Staking + Slashing
+## Phase 3: Staking + Slashing `← next`
 
 Cryptoeconomic security — honest behavior earns ETH, misbehavior costs ETH.
 
