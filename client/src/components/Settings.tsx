@@ -47,7 +47,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     circuit_rotation_interval_secs: s.rotationIntervalMin * 60,
     kill_switch: s.killSwitch,
     gas_price_ceiling_gwei: s.gasCeiling,
-    preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit].filter(Boolean),
+    preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit],
   };
 }
 

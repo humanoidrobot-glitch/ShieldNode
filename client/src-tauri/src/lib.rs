@@ -105,10 +105,10 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         *conn = ConnectionState::Connecting;
     }
 
-    // Read pinned nodes from config for circuit selection.
-    let pinned = {
+    // Read config values needed for connect (single lock acquisition).
+    let (pinned, kill_switch_enabled) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        cfg.preferred_nodes.clone()
+        (cfg.preferred_nodes.clone(), cfg.kill_switch)
     };
     let pin_entry = pinned.first().map(|s| s.as_str()).unwrap_or("");
     let pin_relay = pinned.get(1).map(|s| s.as_str()).unwrap_or("");
@@ -191,18 +191,15 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // Activate kill switch if enabled — blocks non-VPN traffic to prevent IP leaks.
-    {
-        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        if cfg.kill_switch {
-            let entry_endpoint = {
-                let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
-                circ.as_ref()
-                    .map(|c| c.entry.endpoint.clone())
-                    .unwrap_or_else(|| entry_node_id.clone())
-            };
-            if let Err(e) = kill_switch::activate(&entry_endpoint) {
-                warn!(error = %e, "kill switch activation failed (continuing without)");
-            }
+    if kill_switch_enabled {
+        let entry_endpoint = {
+            let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+            circ.as_ref()
+                .map(|c| c.entry.endpoint.clone())
+                .unwrap_or_else(|| entry_node_id.clone())
+        };
+        if let Err(e) = kill_switch::activate(&entry_endpoint) {
+            warn!(error = %e, "kill switch activation failed (continuing without)");
         }
     }
 

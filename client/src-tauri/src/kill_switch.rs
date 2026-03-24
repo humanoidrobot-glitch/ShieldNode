@@ -77,13 +77,9 @@ fn activate_windows(entry_ip: &str) -> Result<(), String> {
     // Remove any stale rules first.
     let _ = deactivate_windows();
 
-    // Block all outbound traffic.
-    run_cmd("netsh", &[
-        "advfirewall", "firewall", "add", "rule",
-        &format!("name={RULE_NAME}-BlockAll"),
-        "dir=out", "action=block", "enable=yes",
-        "profile=any", "localip=any", "remoteip=any",
-    ])?;
+    // Allow rules must be added BEFORE the block-all rule.
+    // Windows Firewall evaluates rules by specificity, but explicit
+    // allow rules only override block rules when they exist first.
 
     // Allow traffic to VPN entry node.
     run_cmd("netsh", &[
@@ -101,12 +97,20 @@ fn activate_windows(entry_ip: &str) -> Result<(), String> {
         "profile=any", "remoteip=127.0.0.0/8",
     ])?;
 
-    // Allow DNS (needed for RPC endpoint resolution).
+    // Allow DNS (needed for RPC endpoint resolution until DNS-over-tunnel).
     run_cmd("netsh", &[
         "advfirewall", "firewall", "add", "rule",
         &format!("name={RULE_NAME}-AllowDNS"),
         "dir=out", "action=allow", "enable=yes",
         "profile=any", "protocol=udp", "remoteport=53",
+    ])?;
+
+    // Block all other outbound traffic.
+    run_cmd("netsh", &[
+        "advfirewall", "firewall", "add", "rule",
+        &format!("name={RULE_NAME}-BlockAll"),
+        "dir=out", "action=block", "enable=yes",
+        "profile=any", "localip=any", "remoteip=any",
     ])?;
 
     Ok(())
