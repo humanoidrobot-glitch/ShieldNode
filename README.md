@@ -260,4 +260,4 @@ This project is in early development. See [ROADMAP.md](ROADMAP.md) for milestone
 
 ## License
 
-TBD
+Dual-licensed under [MIT](LICENSE) + [Source Seppuku](https://wiki.remilia.org/Source_Seppuku_License).
