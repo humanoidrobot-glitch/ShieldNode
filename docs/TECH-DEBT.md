@@ -243,6 +243,13 @@ The EIP-712 `BandwidthReceipt` typehash is independently defined in `SessionSett
 
 ## Frontend (Phase 4 additions)
 
+### Kill switch allows DNS (port 53) outside tunnel
+`client/src-tauri/src/kill_switch.rs` explicitly allows UDP port 53 outbound so the client can resolve the RPC endpoint hostname. This means DNS queries leak outside the VPN tunnel, revealing which domains the user resolves.
+
+**Why deferred:** The WireGuard TUN integration is a stub — real tunnel traffic isn't captured yet. Once the TUN device routes all traffic (including DNS) through the tunnel, the port 53 exception can be removed and DNS will be private by default.
+
+**When to fix:** When the TUN device is fully wired. Route DNS through the tunnel, then remove the AllowDNS firewall exception. Alternatively, run a local DNS proxy on localhost that forwards queries through the tunnel.
+
 ### Zkey ProvingKey loaded from disk on every proof generation
 `client/src-tauri/src/zk_prove.rs` reads and parses the zkey file (~100MB for a 3.5M constraint circuit) on every `generate_proof()` call. The `ProvingKey<Bn254>` is immutable after loading.
 
