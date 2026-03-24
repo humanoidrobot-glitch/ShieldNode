@@ -1,3 +1,4 @@
+mod chain;
 mod circuit;
 mod config;
 mod receipts;
@@ -6,10 +7,12 @@ mod wallet;
 
 use std::sync::Mutex;
 
+use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use tracing::info;
+use tracing::{info, warn};
 
+use chain::ChainReader;
 use circuit::NodeInfo;
 use tunnel::TunnelManager;
 use wallet::WalletConfig;
@@ -32,18 +35,27 @@ impl Default for ConnectionState {
     }
 }
 
+/// Contract addresses for the ShieldNode protocol on Sepolia.
+const REGISTRY_ADDRESS: &str = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11";
+const SETTLEMENT_ADDRESS: &str = "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959";
+
 pub struct AppState {
     pub connection: Mutex<ConnectionState>,
     pub tunnel: Mutex<TunnelManager>,
     pub config: Mutex<config::ClientConfig>,
+    pub chain_reader: ChainReader,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        let cfg = config::ClientConfig::default();
+        let registry: Address = REGISTRY_ADDRESS.parse().expect("invalid registry address");
+        let settlement: Address = SETTLEMENT_ADDRESS.parse().expect("invalid settlement address");
         Self {
+            chain_reader: ChainReader::new(cfg.rpc_url.clone(), registry, settlement),
             connection: Mutex::new(ConnectionState::default()),
             tunnel: Mutex::new(TunnelManager::new()),
-            config: Mutex::new(config::ClientConfig::default()),
+            config: Mutex::new(cfg),
         }
     }
 }
@@ -139,10 +151,45 @@ async fn get_status(state: State<'_, AppState>) -> Result<ConnectionState, Strin
     Ok(conn.clone())
 }
 
-/// Return the list of available nodes (mock data for Phase 1).
+/// Return the list of available nodes.
+///
+/// Attempts to read from the on-chain NodeRegistry first; falls back to mock
+/// data when the registry is empty or the RPC call fails (useful during
+/// local development).
 #[tauri::command]
-async fn get_nodes() -> Result<Vec<NodeInfo>, String> {
-    Ok(mock_nodes())
+async fn get_nodes(state: State<'_, AppState>) -> Result<Vec<NodeInfo>, String> {
+    match state.chain_reader.get_active_nodes().await {
+        Ok(on_chain) if !on_chain.is_empty() => {
+            info!(count = on_chain.len(), "serving on-chain nodes");
+            // Convert OnChainNodeInfo -> circuit::NodeInfo so existing scoring
+            // and circuit-selection logic keeps working.
+            let nodes = on_chain
+                .into_iter()
+                .map(|n| {
+                    // Decode public_key hex back to [u8; 32].
+                    let pk_bytes = decode_hex_32(&n.public_key);
+                    NodeInfo {
+                        node_id: n.node_id,
+                        public_key: pk_bytes,
+                        endpoint: n.endpoint,
+                        stake: (n.stake * 1e18) as u64, // back to wei for scoring
+                        uptime: n.uptime,
+                        price_per_byte: n.price_per_byte as u64,
+                        slash_count: n.slash_count,
+                    }
+                })
+                .collect();
+            Ok(nodes)
+        }
+        Ok(_empty) => {
+            warn!("on-chain registry returned 0 nodes, falling back to mock data");
+            Ok(mock_nodes())
+        }
+        Err(e) => {
+            warn!(error = %e, "on-chain read failed, falling back to mock data");
+            Ok(mock_nodes())
+        }
+    }
 }
 
 /// Return information about the active session, if any.
@@ -171,21 +218,54 @@ async fn get_session(state: State<'_, AppState>) -> Result<Option<SessionInfo>, 
     }
 }
 
-/// Return the current network gas price (mock for Phase 1).
+/// Return the current network gas price in Gwei.
+///
+/// Fetches the real gas price from the RPC provider. Falls back to the
+/// wallet stub if the on-chain read fails.
 #[tauri::command]
 async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
-    let rpc_url = {
-        let cfg = state
-            .config
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
-        cfg.rpc_url.clone()
-    };
-
-    wallet::get_gas_price(&rpc_url)
+    match state.chain_reader.get_gas_price().await {
+        Ok(gwei) => Ok(gwei),
+        Err(e) => {
+            warn!(error = %e, "on-chain gas price fetch failed, using wallet fallback");
+            let rpc_url = {
+                let cfg = state
+                    .config
+                    .lock()
+                    .map_err(|e| format!("lock error: {e}"))?;
+                cfg.rpc_url.clone()
+            };
+            wallet::get_gas_price(&rpc_url).await
+        }
+    }
 }
 
-//Mock helpers
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Decode a 0x-prefixed hex string into a fixed-size 32-byte array.
+/// Returns `[0u8; 32]` on any parse failure (non-critical path).
+fn decode_hex_32(hex_str: &str) -> [u8; 32] {
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let mut out = [0u8; 32];
+    if stripped.len() != 64 {
+        return out;
+    }
+    for (i, chunk) in stripped.as_bytes().chunks(2).enumerate() {
+        if i >= 32 {
+            break;
+        }
+        if let Ok(byte) = u8::from_str_radix(
+            std::str::from_utf8(chunk).unwrap_or("00"),
+            16,
+        ) {
+            out[i] = byte;
+        }
+    }
+    out
+}
+
+// Mock helpers
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Generate a small set of mock nodes for development / testing.

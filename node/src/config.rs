@@ -44,6 +44,11 @@ pub struct NodeConfig {
     /// Directory for persistent data (keys, state, etc.).
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
+
+    /// Hex-encoded private key for signing on-chain transactions.
+    /// This is the operator/deployer wallet key, NOT the node's X25519 key.
+    #[serde(default)]
+    pub operator_private_key: Option<String>,
 }
 
 // ── serde default helpers ──────────────────────────────────────────────
@@ -88,6 +93,7 @@ impl Default for NodeConfig {
             exit_mode: false,
             price_per_byte: default_price_per_byte(),
             data_dir: default_data_dir(),
+            operator_private_key: None,
         }
     }
 }

@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tracing::{info, warn};
+
+use super::chain::ChainService;
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -17,10 +20,8 @@ pub enum HeartbeatError {
 
 /// Periodically posts an on-chain heartbeat proving liveness.
 pub struct HeartbeatService {
-    /// Ethereum JSON-RPC URL.
-    rpc_url: String,
-    /// Contract address (hex).
-    stake_address: Option<String>,
+    /// Optional chain service for real on-chain heartbeats.
+    chain: Option<Arc<ChainService>>,
     /// How often to heartbeat.
     interval: Duration,
     /// When the last heartbeat was sent.
@@ -29,13 +30,11 @@ pub struct HeartbeatService {
 
 impl HeartbeatService {
     pub fn new(
-        rpc_url: String,
-        stake_address: Option<String>,
+        chain: Option<Arc<ChainService>>,
         interval_secs: u64,
     ) -> Self {
         Self {
-            rpc_url,
-            stake_address,
+            chain,
             interval: Duration::from_secs(interval_secs),
             last_heartbeat: None,
         }
@@ -56,6 +55,7 @@ impl HeartbeatService {
     async fn run(mut self, mut cancel: tokio::sync::watch::Receiver<bool>) {
         info!(
             interval_secs = self.interval.as_secs(),
+            has_chain = self.chain.is_some(),
             "heartbeat service started"
         );
 
@@ -84,32 +84,20 @@ impl HeartbeatService {
 
     /// Actually submit the heartbeat transaction.
     async fn send_heartbeat(&self) -> Result<(), HeartbeatError> {
-        let contract_addr = match &self.stake_address {
-            Some(addr) => addr,
+        let chain = match &self.chain {
+            Some(c) => c,
             None => {
-                info!("no stake_address configured — skipping on-chain heartbeat");
+                info!("no chain service configured — skipping on-chain heartbeat");
                 return Ok(());
             }
         };
 
-        // Use alloy to call the heartbeat function on the registry
-        // contract.  For now we log intent; a full implementation would
-        // build and send the transaction via the provider.
+        let tx_hash = chain
+            .heartbeat()
+            .await
+            .map_err(|e| HeartbeatError::ContractFailed(e.to_string()))?;
 
-        info!(
-            rpc = %self.rpc_url,
-            contract = %contract_addr,
-            "would send heartbeat transaction"
-        );
-
-        // Placeholder: create a provider and send a transaction.
-        // In production this would look like:
-        //
-        //   let provider = alloy::providers::ProviderBuilder::new()
-        //       .on_http(self.rpc_url.parse().unwrap());
-        //   let tx = ... build heartbeat call ...;
-        //   provider.send_transaction(tx).await ...;
-
+        info!(tx_hash = %tx_hash, "on-chain heartbeat confirmed");
         Ok(())
     }
 

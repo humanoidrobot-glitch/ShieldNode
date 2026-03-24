@@ -7,6 +7,7 @@ mod tunnel;
 use std::path::Path;
 use std::sync::Arc;
 
+use alloy::primitives::Address;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
@@ -15,8 +16,15 @@ use tracing::{error, info, warn};
 
 use crypto::keys::NodeKeyPair;
 use metrics::bandwidth::BandwidthTracker;
+use network::chain::ChainService;
 use network::heartbeat::HeartbeatService;
 use tunnel::listener::TunnelListener;
+
+/// Default Sepolia NodeRegistry contract address.
+const DEFAULT_REGISTRY_ADDRESS: &str = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11";
+
+/// Default registration stake: 0.1 ETH in wei.
+const DEFAULT_STAKE_WEI: u128 = 100_000_000_000_000_000; // 0.1 ETH
 
 #[derive(Parser, Debug)]
 #[command(name = "shieldnode", about = "ShieldNode decentralized VPN relay")]
@@ -32,6 +40,52 @@ struct Cli {
     /// Generate a new node key and exit
     #[arg(long)]
     generate_key: bool,
+
+    /// Register the node on-chain and exit
+    #[arg(long)]
+    register: bool,
+}
+
+/// Parse a hex-encoded 32-byte private key string into a `[u8; 32]`.
+fn parse_hex_private_key(hex_str: &str) -> Result<[u8; 32]> {
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(stripped).context("invalid hex in operator_private_key")?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "operator_private_key must be 32 bytes (64 hex chars), got {} bytes",
+            bytes.len()
+        );
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+/// Build a `ChainService` from configuration values and the node's public key.
+fn build_chain_service(
+    cfg: &config::NodeConfig,
+    node_id: [u8; 32],
+) -> Result<ChainService> {
+    let operator_key_hex = cfg
+        .operator_private_key
+        .as_deref()
+        .context("operator_private_key is required for on-chain operations")?;
+
+    let operator_key = parse_hex_private_key(operator_key_hex)?;
+
+    let registry_addr: Address = cfg
+        .stake_address
+        .as_deref()
+        .unwrap_or(DEFAULT_REGISTRY_ADDRESS)
+        .parse()
+        .context("invalid registry/stake_address")?;
+
+    Ok(ChainService::new(
+        cfg.ethereum_rpc.clone(),
+        registry_addr,
+        node_id,
+        operator_key,
+    ))
 }
 
 #[tokio::main]
@@ -88,6 +142,36 @@ async fn main() -> Result<()> {
     }
 
     let private_key_bytes = keypair.secret().to_bytes();
+    let public_key_bytes: [u8; 32] = *keypair.public_key().as_bytes();
+
+    // Use the public key as the node_id (a simple, unique 32-byte identifier).
+    let node_id = public_key_bytes;
+
+    // ── --register: on-chain registration then exit ───────────────────
+
+    if cli.register {
+        let chain = build_chain_service(&cfg, node_id)
+            .context("building ChainService for registration")?;
+
+        let endpoint = format!("0.0.0.0:{}", cfg.listen_port);
+
+        info!(
+            endpoint = %endpoint,
+            stake_wei = DEFAULT_STAKE_WEI,
+            "registering node on-chain"
+        );
+
+        let tx_hash = chain
+            .register(public_key_bytes, &endpoint, DEFAULT_STAKE_WEI)
+            .await
+            .context("on-chain registration failed")?;
+
+        info!(tx_hash = %tx_hash, "node registered on-chain");
+        println!("Registration tx: {tx_hash}");
+        return Ok(());
+    }
+
+    // ── normal startup ────────────────────────────────────────────────
 
     info!(
         listen_port = cfg.listen_port,
@@ -126,11 +210,28 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── chain service (optional) ──────────────────────────────────────
+
+    let chain_service: Option<Arc<ChainService>> =
+        if cfg.stake_address.is_some() && cfg.operator_private_key.is_some() {
+            match build_chain_service(&cfg, node_id) {
+                Ok(svc) => {
+                    info!("chain service initialised for on-chain heartbeats");
+                    Some(Arc::new(svc))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to create chain service — heartbeats will be no-ops");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // ── heartbeat service ─────────────────────────────────────────────
 
     let heartbeat = HeartbeatService::new(
-        cfg.ethereum_rpc.clone(),
-        cfg.stake_address.clone(),
+        chain_service,
         cfg.heartbeat_interval_secs,
     );
     let heartbeat_handle = heartbeat.spawn(shutdown_rx.clone());

@@ -1,3 +1,4 @@
+use alloy::providers::Provider;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -56,15 +57,28 @@ pub fn settle_session(
     Ok(mock_tx_hash)
 }
 
-/// Fetch the current gas price from the RPC endpoint.
+/// Fetch the current gas price from the RPC endpoint and return it in Gwei.
 ///
-/// **Phase 1 stub** — returns a hard-coded mock value (20 gwei in wei).
-pub fn get_gas_price(rpc_url: &str) -> Result<u64, String> {
-    info!(rpc = rpc_url, "fetching gas price (stub)");
+/// Uses an alloy HTTP provider to query `eth_gasPrice`, then converts from
+/// wei to gwei.  Falls back to a hard-coded 20 gwei if the RPC call fails.
+pub async fn get_gas_price(rpc_url: &str) -> Result<u64, String> {
+    info!(rpc = rpc_url, "fetching gas price via alloy provider");
 
-    // 20 gwei = 20_000_000_000 wei
-    let mock_gas_price: u64 = 20_000_000_000;
+    let url: url::Url = rpc_url
+        .parse()
+        .map_err(|e| format!("invalid RPC URL: {e}"))?;
 
-    info!(gas_price_wei = mock_gas_price, "gas price fetched (mock)");
-    Ok(mock_gas_price)
+    let provider = alloy::providers::ProviderBuilder::new().connect_http(url);
+
+    match provider.get_gas_price().await {
+        Ok(gas_price_wei) => {
+            let gwei = gas_price_wei / 1_000_000_000;
+            info!(gas_price_gwei = gwei, gas_price_wei, "gas price fetched");
+            Ok(gwei as u64)
+        }
+        Err(e) => {
+            info!(error = %e, "RPC gas price fetch failed, returning fallback 20 gwei");
+            Ok(20)
+        }
+    }
 }
