@@ -29,12 +29,9 @@ const MIN_THROUGHPUT_BPS: u64 = 10 * 1024; // 10 KB/s
 /// 3 samples × 5s = 15s sustained low throughput.
 const THROUGHPUT_FAIL_COUNT: u32 = 3;
 
-/// Maximum acceptable RTT in milliseconds.
-const MAX_LATENCY_MS: u64 = 2000;
-
-/// Number of consecutive high-latency samples before triggering rebuild.
-/// 6 samples × 5s = 30s sustained high latency.
-const LATENCY_FAIL_COUNT: u32 = 6;
+/// Number of consecutive zero-data samples before flagging a silent drop.
+/// 6 samples × 5s = 30s with no data after initial transfer started.
+const ZERO_DATA_FAIL_COUNT: u32 = 6;
 
 // ── health state ──────────────────────────────────────────────────────
 
@@ -42,7 +39,7 @@ struct HealthState {
     last_bytes: u64,
     last_sample: Instant,
     low_throughput_streak: u32,
-    high_latency_streak: u32,
+    zero_data_streak: u32,
     rebuild_count: u32,
 }
 
@@ -52,7 +49,7 @@ impl HealthState {
             last_bytes: 0,
             last_sample: Instant::now(),
             low_throughput_streak: 0,
-            high_latency_streak: 0,
+            zero_data_streak: 0,
             rebuild_count: 0,
         }
     }
@@ -67,9 +64,18 @@ impl HealthState {
         self.last_bytes = current_bytes;
         self.last_sample = Instant::now();
 
+        // Track zero-data circuits: node accepted but never forwards packets.
+        if current_bytes == 0 {
+            self.zero_data_streak += 1;
+        } else {
+            self.zero_data_streak = 0;
+        }
+
+        if self.zero_data_streak >= ZERO_DATA_FAIL_COUNT {
+            return true;
+        }
+
         if bps < MIN_THROUGHPUT_BPS && current_bytes > 0 {
-            // Only flag low throughput if we've started transferring data.
-            // A fresh circuit with 0 bytes isn't degraded, it just hasn't been used.
             self.low_throughput_streak += 1;
         } else {
             self.low_throughput_streak = 0;
@@ -78,21 +84,10 @@ impl HealthState {
         self.low_throughput_streak >= THROUGHPUT_FAIL_COUNT
     }
 
-    /// Update with a latency sample. Returns true if rebuild is needed.
-    fn sample_latency(&mut self, rtt_ms: u64) -> bool {
-        if rtt_ms > MAX_LATENCY_MS {
-            self.high_latency_streak += 1;
-        } else {
-            self.high_latency_streak = 0;
-        }
-
-        self.high_latency_streak >= LATENCY_FAIL_COUNT
-    }
-
     fn record_rebuild(&mut self) {
         self.rebuild_count += 1;
         self.low_throughput_streak = 0;
-        self.high_latency_streak = 0;
+        self.zero_data_streak = 0;
         self.last_bytes = 0;
         self.last_sample = Instant::now();
     }
@@ -135,23 +130,16 @@ pub async fn health_monitor_loop(
             continue;
         }
 
-        // Sample throughput.
-        let throughput_bad = state.sample_throughput(bytes_used);
+        // Sample throughput (includes zero-data detection).
+        let needs_rebuild = state.sample_throughput(bytes_used);
 
-        // Latency check: measure UDP round-trip to entry node.
-        let latency_bad = if let Some(rtt) = measure_entry_latency(&circuit).await {
-            state.sample_latency(rtt)
-        } else {
-            false
-        };
-
-        if throughput_bad || latency_bad {
-            let reason = if throughput_bad { "low throughput" } else { "high latency" };
+        if needs_rebuild {
+            let reason = if state.zero_data_streak > 0 { "zero data (silent drop)" } else { "low throughput" };
             warn!(
                 reason,
                 rebuild_count = state.rebuild_count,
                 low_streak = state.low_throughput_streak,
-                latency_streak = state.high_latency_streak,
+                zero_streak = state.zero_data_streak,
                 "circuit health degraded — triggering rebuild"
             );
 
@@ -200,30 +188,6 @@ pub async fn health_monitor_loop(
                 }
             }
         }
-    }
-}
-
-/// Measure UDP round-trip time to the entry node (ping-like).
-async fn measure_entry_latency(circuit: &Arc<Mutex<Option<CircuitState>>>) -> Option<u64> {
-    let endpoint = {
-        let circ = circuit.lock().ok()?;
-        circ.as_ref()?.entry.endpoint.clone()
-    };
-
-    let addr: std::net::SocketAddr = endpoint.parse().ok()?;
-    let relay_addr = std::net::SocketAddr::new(addr.ip(), addr.port() + 1);
-
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
-
-    // Send a minimal ping (8-byte zero session_id + 0x04 PING command).
-    let ping = [0u8; 9]; // session_id=0, cmd=0x04
-    socket.send_to(&ping, relay_addr).await.ok()?;
-
-    let start = Instant::now();
-    let mut buf = [0u8; 16];
-    match tokio::time::timeout(Duration::from_millis(MAX_LATENCY_MS * 2), socket.recv_from(&mut buf)).await {
-        Ok(Ok(_)) => Some(start.elapsed().as_millis() as u64),
-        _ => Some(MAX_LATENCY_MS * 2), // Treat timeout as very high latency.
     }
 }
 

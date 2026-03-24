@@ -64,6 +64,8 @@ pub struct AppState {
     pub health_cancel: Mutex<Option<CancellationToken>>,
     /// Local node reputation cache (low-bandwidth flags).
     pub reputation: Arc<Mutex<reputation::ReputationCache>>,
+    /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
+    pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
 }
 
 impl Default for AppState {
@@ -80,6 +82,10 @@ impl Default for AppState {
             rotation_cancel: Mutex::new(None),
             health_cancel: Mutex::new(None),
             reputation: Arc::new(Mutex::new(reputation::ReputationCache::new())),
+            completion_rates_cache: Arc::new(Mutex::new((
+                std::collections::HashMap::new(),
+                std::time::Instant::now() - std::time::Duration::from_secs(600),
+            ))),
         }
     }
 }
@@ -740,14 +746,37 @@ pub(crate) fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
     }
 }
 
+/// Completion rate cache TTL (10 minutes).
+const COMPLETION_RATE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Fetch nodes from on-chain registry, falling back to mock data.
-/// Enriches nodes with completion rates and local reputation penalties.
+/// Enriches nodes with completion rates (cached) and local reputation penalties.
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
-    let completion_rates = state
-        .chain_reader
-        .get_completion_rates()
-        .await
-        .unwrap_or_default();
+    // Use cached completion rates if fresh; otherwise refresh.
+    let cached = {
+        let cache = state.completion_rates_cache.lock().map_err(|_| ()).ok();
+        cache.and_then(|c| {
+            if c.1.elapsed() < COMPLETION_RATE_TTL {
+                Some(c.0.clone())
+            } else {
+                None
+            }
+        })
+    };
+    let completion_rates = match cached {
+        Some(rates) => rates,
+        None => {
+            let fresh = state
+                .chain_reader
+                .get_completion_rates()
+                .await
+                .unwrap_or_default();
+            if let Ok(mut cache) = state.completion_rates_cache.lock() {
+                *cache = (fresh.clone(), std::time::Instant::now());
+            }
+            fresh
+        }
+    };
 
     // Evict stale reputation flags.
     if let Ok(mut rep) = state.reputation.lock() {
@@ -764,11 +793,12 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
                     if let Some(&rate) = completion_rates.get(&node.node_id) {
                         node.completion_rate = rate;
                     }
-                    // Apply local reputation penalty.
+                    // Apply local reputation penalty as a direct score-equivalent
+                    // deduction on completion_rate. This is separate from on-chain
+                    // completion data — penalized nodes get completion_rate zeroed.
                     if let Ok(rep) = state.reputation.lock() {
-                        let penalty = rep.score_penalty(&node.node_id);
-                        if penalty > 0.0 {
-                            node.completion_rate = (node.completion_rate - penalty / 15.0).max(0.0);
+                        if rep.score_penalty(&node.node_id) > 0.0 {
+                            node.completion_rate = 0.0;
                         }
                     }
                     node
