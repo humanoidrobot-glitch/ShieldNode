@@ -8,6 +8,7 @@ mod receipts;
 mod sphinx;
 mod tunnel;
 mod wallet;
+mod zk_prove;
 
 use std::sync::{Arc, Mutex};
 

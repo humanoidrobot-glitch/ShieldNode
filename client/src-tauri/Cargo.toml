@@ -27,3 +27,11 @@ hkdf = "0.12"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
+
+# ZK proof generation (Groth16 over BN254)
+ark-circom = { version = "0.5" }
+ark-groth16 = { version = "0.5", features = ["parallel"] }
+ark-bn254 = "0.5"
+ark-std = "0.5"
+ark-serialize = "0.5"
+num-bigint = { version = "0.4", features = ["serde"] }

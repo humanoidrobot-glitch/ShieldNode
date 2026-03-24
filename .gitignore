@@ -13,6 +13,14 @@ node_modules/
 dist/
 client/src-tauri/gen/
 
+# Circuits (cloned deps + build artifacts)
+circuits/circomlib/
+circuits/circom-ecdsa/
+circuits/keccak256-circom/
+circuits/build/
+circuits/trusted_setup/*.ptau
+circuits/trusted_setup/*.zkey
+
 # Environment
 .env
 .env.*
