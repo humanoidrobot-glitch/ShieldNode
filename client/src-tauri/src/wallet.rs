@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, FixedBytes, U256};
+use alloy::primitives::{keccak256, Address, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::network::EthereumWallet;
@@ -63,15 +63,18 @@ pub async fn open_session(
     let receipt = pending.get_receipt().await
         .map_err(|e| format!("failed to get tx receipt: {e}"))?;
 
-    // Parse session ID from SessionOpened event (topic[1] = sessionId indexed).
-    let session_id: u64 = receipt.inner.logs().first()
+    // Parse session ID from SessionOpened event.
+    // Scan all logs for the matching event signature rather than assuming it's the first.
+    let session_opened_sig = keccak256("SessionOpened(uint256,address,bytes32[3],uint256)");
+    let session_id: u64 = receipt.inner.logs().iter()
+        .find(|log| log.topics().first() == Some(&session_opened_sig))
         .and_then(|log| log.topics().get(1))
         .map(|topic| {
             u64::from_be_bytes(
                 topic.0[24..32].try_into().unwrap_or([0u8; 8])
             )
         })
-        .ok_or("failed to parse session ID from openSession receipt")?;
+        .ok_or("no SessionOpened event found in openSession receipt")?;
 
     info!(tx = %tx_hash, session_id, "session opened on-chain");
     Ok((tx_hash, session_id))
