@@ -4,6 +4,7 @@ mod circuit;
 mod config;
 mod hop_codec;
 mod kex;
+mod kill_switch;
 mod receipts;
 mod sphinx;
 mod tunnel;
@@ -104,10 +105,23 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         *conn = ConnectionState::Connecting;
     }
 
+    // Read pinned nodes from config for circuit selection.
+    let pinned = {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        cfg.preferred_nodes.clone()
+    };
+    let pin_entry = pinned.first().map(|s| s.as_str()).unwrap_or("");
+    let pin_relay = pinned.get(1).map(|s| s.as_str()).unwrap_or("");
+    let pin_exit = pinned.get(2).map(|s| s.as_str()).unwrap_or("");
+
     // Decide between 3-hop and single-hop based on available nodes.
     let (entry_node_id, hop_count) = if nodes.len() >= 3 {
         // ── 3-hop circuit ────────────────────────────────────────────
-        let selected = circuit::select_circuit(&nodes, &[])?;
+        let selected = circuit::select_circuit_with_pins(
+            &nodes,
+            &[],
+            &[pin_entry, pin_relay, pin_exit],
+        )?;
         info!(
             entry = %selected[0].node_id,
             relay = %selected[1].node_id,
@@ -174,6 +188,22 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             hop_count,
             rotation_count: 0,
         };
+    }
+
+    // Activate kill switch if enabled — blocks non-VPN traffic to prevent IP leaks.
+    {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        if cfg.kill_switch {
+            let entry_endpoint = {
+                let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+                circ.as_ref()
+                    .map(|c| c.entry.endpoint.clone())
+                    .unwrap_or_else(|| entry_node_id.clone())
+            };
+            if let Err(e) = kill_switch::activate(&entry_endpoint) {
+                warn!(error = %e, "kill switch activation failed (continuing without)");
+            }
+        }
     }
 
     // Spawn circuit auto-rotation background task if enabled and multi-hop.
@@ -318,6 +348,11 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Disconnected;
+    }
+
+    // Deactivate kill switch — restore normal traffic.
+    if let Err(e) = kill_switch::deactivate() {
+        warn!(error = %e, "kill switch deactivation failed");
     }
 
     info!(tx = %tx_hash, "disconnected and session settled with EIP-712 receipt");

@@ -18,9 +18,11 @@ interface SettingsState {
   rotationIntervalMin: number;
   killSwitch: boolean;
   gasCeiling: number;
+  pinnedEntry: string;
+  pinnedRelay: string;
+  pinnedExit: string;
   // Fields not editable in the UI but preserved on round-trip.
   _chainId: number;
-  _preferredNodes: string[];
 }
 
 function toLocal(p: SettingsPayload): SettingsState {
@@ -30,8 +32,10 @@ function toLocal(p: SettingsPayload): SettingsState {
     rotationIntervalMin: Math.round(p.circuit_rotation_interval_secs / 60),
     killSwitch: p.kill_switch,
     gasCeiling: p.gas_price_ceiling_gwei,
+    pinnedEntry: p.preferred_nodes[0] || "",
+    pinnedRelay: p.preferred_nodes[1] || "",
+    pinnedExit: p.preferred_nodes[2] || "",
     _chainId: p.chain_id,
-    _preferredNodes: p.preferred_nodes,
   };
 }
 
@@ -43,7 +47,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     circuit_rotation_interval_secs: s.rotationIntervalMin * 60,
     kill_switch: s.killSwitch,
     gas_price_ceiling_gwei: s.gasCeiling,
-    preferred_nodes: s._preferredNodes,
+    preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit].filter(Boolean),
   };
 }
 
@@ -89,8 +93,10 @@ export function Settings() {
     rotationIntervalMin: 10,
     killSwitch: true,
     gasCeiling: 10,
+    pinnedEntry: "",
+    pinnedRelay: "",
+    pinnedExit: "",
     _chainId: 11155111,
-    _preferredNodes: [],
   });
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -192,6 +198,27 @@ export function Settings() {
           className="w-full px-3 py-2 rounded text-sm font-mono"
           style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
         />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+          Circuit pinning (leave blank for random)
+        </label>
+        {(["pinnedEntry", "pinnedRelay", "pinnedExit"] as const).map((key, i) => (
+          <div key={key} className="mb-2">
+            <label className="block text-xs mb-0.5" style={{ color: "var(--text-secondary)" }}>
+              {["Entry node", "Relay node", "Exit node"][i]}
+            </label>
+            <input
+              type="text"
+              placeholder="node-id (optional)"
+              value={settings[key]}
+              onChange={(e) => update(key, e.target.value)}
+              className="w-full px-3 py-1.5 rounded text-xs font-mono"
+              style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+            />
+          </div>
+        ))}
       </div>
 
       <p className="text-xs" style={{ color: "var(--text-secondary)" }}>

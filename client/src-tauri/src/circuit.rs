@@ -195,16 +195,24 @@ pub fn score_node(node: &NodeInfo) -> f64 {
 
 /// Select a three-hop circuit (entry, relay, exit) via weighted random sampling.
 ///
-/// Each node's selection probability is proportional to its score (clamped to
-/// a minimum of 1.0 so even low-scored nodes have *some* chance).  This means
-/// higher-staked nodes are picked more often — staking is a revenue accelerator
-/// — but the network still distributes load across all viable nodes.
+/// `pinned_ids` optionally fixes specific positions: `[entry, relay, exit]`.
+/// Empty strings mean "select randomly". For example, `["node-a", "", "node-b"]`
+/// pins entry to node-a and exit to node-b, with relay chosen randomly.
 ///
-/// When `exclude_ids` is non-empty, those nodes receive a heavy score penalty
-/// to encourage diversity on circuit rotation.
+/// When `exclude_ids` is non-empty, those nodes are deprioritized to encourage
+/// diversity on circuit rotation.
 pub fn select_circuit(
     nodes: &[NodeInfo],
     exclude_ids: &[&str],
+) -> Result<[NodeInfo; 3], String> {
+    select_circuit_with_pins(nodes, exclude_ids, &["", "", ""])
+}
+
+/// Select a circuit with optional pinning per hop.
+pub fn select_circuit_with_pins(
+    nodes: &[NodeInfo],
+    exclude_ids: &[&str],
+    pinned_ids: &[&str; 3],
 ) -> Result<[NodeInfo; 3], String> {
     if nodes.len() < 3 {
         return Err(format!(
@@ -213,28 +221,51 @@ pub fn select_circuit(
         ));
     }
 
-    // Filter out excluded nodes entirely, score the rest.
+    let mut selected: [Option<NodeInfo>; 3] = [None, None, None];
+    let mut used_ids: Vec<String> = Vec::new();
+
+    // Phase 1: Fill pinned positions.
+    for (slot, pin_id) in pinned_ids.iter().enumerate() {
+        if pin_id.is_empty() {
+            continue;
+        }
+        let node = nodes
+            .iter()
+            .find(|n| n.node_id == *pin_id)
+            .ok_or_else(|| format!("pinned node '{}' not found in available nodes", pin_id))?;
+        selected[slot] = Some(node.clone());
+        used_ids.push(node.node_id.clone());
+    }
+
+    // Phase 2: Fill remaining positions via weighted random sampling.
     let mut candidates: Vec<(f64, &NodeInfo)> = nodes
         .iter()
-        .filter(|n| !exclude_ids.contains(&n.node_id.as_str()))
-        .map(|n| {
-            let weight = score_node(n).max(1.0);
-            (weight, n)
+        .filter(|n| {
+            !used_ids.contains(&n.node_id)
+                && !exclude_ids.contains(&n.node_id.as_str())
         })
+        .map(|n| (score_node(n).max(1.0), n))
         .collect();
 
-    if candidates.len() < 3 {
-        // Not enough non-excluded nodes — fall back to scoring all nodes.
+    if candidates.len() < selected.iter().filter(|s| s.is_none()).count() {
+        // Not enough non-excluded candidates — fall back to all non-pinned nodes.
         candidates = nodes
             .iter()
+            .filter(|n| !used_ids.contains(&n.node_id))
             .map(|n| (score_node(n).max(1.0), n))
             .collect();
     }
 
-    let mut selected = Vec::with_capacity(3);
     let mut rng = rand::thread_rng();
 
-    for _ in 0..3 {
+    for slot in 0..3 {
+        if selected[slot].is_some() {
+            continue;
+        }
+        if candidates.is_empty() {
+            return Err("not enough nodes to fill circuit".to_string());
+        }
+
         let total: f64 = candidates.iter().map(|(w, _)| w).sum();
         let mut roll: f64 = rng.gen::<f64>() * total;
 
@@ -247,14 +278,14 @@ pub fn select_circuit(
             }
         }
 
-        selected.push(candidates[pick_idx].1.clone());
+        selected[slot] = Some(candidates[pick_idx].1.clone());
         candidates.swap_remove(pick_idx);
     }
 
     Ok([
-        selected.remove(0),
-        selected.remove(0),
-        selected.remove(0),
+        selected[0].take().unwrap(),
+        selected[1].take().unwrap(),
+        selected[2].take().unwrap(),
     ])
 }
 
