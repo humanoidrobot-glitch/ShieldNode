@@ -1,0 +1,39 @@
+[package]
+name = "shieldnode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+boringtun = "0.7"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+libp2p = { version = "0.54", features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "kad",
+    "gossipsub",
+    "mdns",
+    "tokio",
+    "macros",
+    "identify",
+] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", features = ["parse"] }
+alloy = { version = "1", features = [
+    "provider-http",
+    "signer-local",
+    "contract",
+    "sol-types",
+    "network",
+] }
+thiserror = "2"
+anyhow = "1"
+rand = "0.8"
+base64 = "0.22"
