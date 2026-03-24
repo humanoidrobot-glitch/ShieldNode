@@ -49,6 +49,14 @@ pub struct NodeConfig {
     /// This is the operator/deployer wallet key, NOT the node's X25519 key.
     #[serde(default)]
     pub operator_private_key: Option<String>,
+
+    /// TUN device IP address for exit-mode forwarding.
+    #[serde(default = "default_tun_address")]
+    pub tun_address: String,
+
+    /// TUN device subnet prefix length.
+    #[serde(default = "default_tun_netmask")]
+    pub tun_netmask: u8,
 }
 
 // ── serde default helpers ──────────────────────────────────────────────
@@ -77,6 +85,12 @@ fn default_price_per_byte() -> u64 {
 fn default_data_dir() -> String {
     "./data".to_string()
 }
+fn default_tun_address() -> String {
+    "10.13.37.1".to_string()
+}
+fn default_tun_netmask() -> u8 {
+    24
+}
 
 // ── impl ───────────────────────────────────────────────────────────────
 
@@ -94,6 +108,8 @@ impl Default for NodeConfig {
             price_per_byte: default_price_per_byte(),
             data_dir: default_data_dir(),
             operator_private_key: None,
+            tun_address: default_tun_address(),
+            tun_netmask: default_tun_netmask(),
         }
     }
 }
