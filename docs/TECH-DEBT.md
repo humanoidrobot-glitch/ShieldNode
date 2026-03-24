@@ -98,6 +98,45 @@ Three separate hex-to-bytes32 functions exist:
 
 ---
 
+## Multi-Hop Relay (Phase 2)
+
+### Relay Mutex lock per packet
+`relay_listener.rs` acquires `Arc<Mutex<RelayService>>` on every incoming relay packet. Under high packet rates this becomes a bottleneck.
+
+**Why deferred:** Acceptable throughput for Phase 2 testing with <10 nodes. Lock hold time is minimal (HashMap lookup + crypto peel).
+
+**When to fix:** Phase 4 stress testing. Replace with `RwLock` or `DashMap` for concurrent session lookups.
+
+### SphinxPacket allocates Vec on every serialize/deserialize
+`to_bytes()` and `from_bytes()` allocate new `Vec<u8>` per call. `peel_layer()` also copies the inner payload. On the relay hot path this creates allocation pressure.
+
+**Why deferred:** Correctness over performance for Phase 2. Buffer pooling or `Cow<[u8]>` references add complexity.
+
+**When to fix:** Phase 4 stress testing, when per-packet allocation becomes measurable.
+
+### HKDF key derivation duplicated between node and client
+`node/src/crypto/noise.rs` and `client/src-tauri/src/circuit.rs` both implement HKDF-SHA256 key derivation with different salts. Should be a shared utility.
+
+**Why deferred:** Part of the broader "shared crate" migration (see Architecture section above).
+
+**When to fix:** With the shared crate migration before Phase 3.
+
+### Next-hop address encoding lacks bidirectional codec
+`relay_listener.rs` parses next-hop as `[4-byte IPv4][2-byte port][26 unused]`. No corresponding encoder exists for building next-hop bytes from (IP, port). Client will need this when wiring live traffic.
+
+**Why deferred:** Will be built as part of the "live traffic wiring" Phase 2 remaining item.
+
+**When to fix:** Next Phase 2 sprint — wire client Sphinx packet construction with proper next-hop encoding.
+
+### Sphinx MAC is a placeholder
+The `mac` field in `SphinxHeader` uses a weak binding tag (first 32 bytes of payload) instead of HMAC-SHA256. Packet tampering is not detected.
+
+**Why deferred:** Placeholder since initial scaffold. Does not affect correctness in a trusted test environment.
+
+**When to fix:** Before Phase 5 mainnet launch. Implement HMAC-SHA256 over the full header.
+
+---
+
 ## Frontend
 
 ### Polling vs event-driven updates

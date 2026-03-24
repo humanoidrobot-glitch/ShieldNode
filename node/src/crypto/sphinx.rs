@@ -124,7 +124,9 @@ impl SphinxPacket {
         let mut next_hop = [0u8; 32];
         next_hop.copy_from_slice(&data[..32]);
 
-        let payload_len = u32::from_be_bytes(data[32..36].try_into().unwrap()) as usize;
+        let payload_len = u32::from_be_bytes(
+            data[32..36].try_into().map_err(|_| SphinxError::MalformedHeader)?
+        ) as usize;
 
         if data.len() < 36 + payload_len {
             return Err(SphinxError::MalformedHeader);

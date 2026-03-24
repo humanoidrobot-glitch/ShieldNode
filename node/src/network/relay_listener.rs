@@ -173,13 +173,14 @@ impl RelayListener {
     ) -> Result<()> {
         let ip = std::net::Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]);
 
+        // Reject reserved/unroutable addresses.
+        if ip.is_unspecified() || ip.is_loopback() || ip.is_broadcast() || ip.is_multicast() {
+            anyhow::bail!("next-hop IP {ip} is a reserved address");
+        }
+
         let port = {
             let p = u16::from_be_bytes([next_hop[4], next_hop[5]]);
-            if p == 0 {
-                51821
-            } else {
-                p
-            }
+            if p == 0 { 51821 } else { p }
         };
 
         let dest = SocketAddr::from((ip, port));
