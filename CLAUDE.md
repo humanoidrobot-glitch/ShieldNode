@@ -252,34 +252,42 @@ The glue between nodes, clients, and contracts.
 ## Build Order & Milestones
 
 ### Phase 1: Single-hop tunnel (MVP)
-- [ ] Rust node binary that accepts WireGuard connections and forwards traffic (single relay, no onion routing yet)
+- [x] Rust node binary scaffold: WireGuard tunnel (boringtun), Sphinx routing, crypto (HKDF-SHA256, ChaCha20-Poly1305), libp2p discovery, metrics API
+- [x] NodeRegistry contract: staking, heartbeats, paginated queries, oracle slashing, commitment field for Phase 6 ZK
+- [x] SessionSettlement contract: EIP-712 receipts, 25/25/50 payment split, force-settle after timeout
+- [x] SlashingOracle contract: progressive slashing (10%/25%/100%), challenger rewards, treasury split
+- [x] Treasury contract: timelock withdrawals, slash proceeds receiver
+- [x] Foundry test suite: 19 tests passing (12 NodeRegistry + 7 SessionSettlement)
+- [ ] Wire end-to-end: node accepts live WireGuard connections and forwards traffic through a single relay
 - [ ] Basic Tauri client that connects to a single node
-- [ ] NodeRegistry contract deployed on Ethereum Sepolia testnet
+- [ ] Deploy contracts to Ethereum Sepolia testnet
 - [ ] Node registers on-chain, client reads registry to find the node
-- [ ] SessionSettlement contract: client opens session with deposit, settles on disconnect
+- [ ] End-to-end session lifecycle: client opens session with deposit, settles on disconnect
 - **Success metric**: you can browse the internet through a single ShieldNode relay and pay for it on L1 testnet
 
 ### Phase 2: Multi-hop + onion routing
-- [ ] Implement Sphinx packet format
+- [x] Implement Sphinx packet format (create + peel_layer in crypto/sphinx.rs)
+- [x] Circuit management and pure relay forwarding function (tunnel/circuit.rs)
+- [x] Noise NK-pattern handshake for session key establishment (crypto/noise.rs)
 - [ ] Circuit construction (3-hop) in client
-- [ ] Each node correctly peels its encryption layer and forwards
+- [ ] Each node correctly peels its encryption layer and forwards live traffic
 - [ ] Circuit visualization in client UI
 - [ ] Bandwidth receipt co-signing between client and all 3 nodes
 - **Success metric**: traffic routes through 3 independent nodes; no single node can see both source and destination
 
 ### Phase 3: Staking + slashing
-- [ ] Minimum stake requirement enforced in NodeRegistry
-- [ ] SlashingOracle accepts evidence and slashes misbehaving nodes
+- [x] Minimum stake requirement enforced in NodeRegistry (0.1 ETH)
+- [x] SlashingOracle accepts evidence and slashes misbehaving nodes (with 24h grace period)
 - [ ] Client factors slash history and stake size into node scoring
-- [ ] Unstaking cooldown period enforced
-- [ ] Progressive slashing logic (10% → 25% → 100%)
+- [x] Unstaking cooldown period enforced (7 days)
+- [x] Progressive slashing logic (10% → 25% → 100% + permanent ban)
 - **Success metric**: a slashed node is deprioritized by clients and loses stake on Sepolia
 
 ### Phase 4: Economic hardening + ZK settlement privacy
-- [ ] Market-driven pricing: nodes set their own price-per-byte in the registry
+- [x] Market-driven pricing: nodes set their own price-per-byte in the registry (updatePricePerByte in NodeRegistry)
 - [ ] Client displays estimated session cost before connection
 - [ ] Gas price monitoring and spike warnings in client UI
-- [ ] Treasury contract receiving slash proceeds
+- [x] Treasury contract receiving slash proceeds (50% of slashed stake)
 - [ ] Stress testing: simulate 100+ concurrent sessions and measure L1 settlement throughput
 - [ ] Design ZK bandwidth receipt circuit (see ZK Integration Roadmap section below): define the statement to be proved, select proving system, build initial circuit
 - [ ] Implement `ZKSettlement.sol` verifier contract alongside the existing `SessionSettlement.sol` — both paths work, ZK is opt-in
