@@ -131,9 +131,9 @@ pub async fn register_sessions(circuit: &CircuitState) -> Result<(), String> {
     Ok(())
 }
 
-/// Send SESSION_TEARDOWN (0x02) to each hop in the circuit.
+/// Send SESSION_TEARDOWN (0x02) to all hops in the circuit concurrently.
 ///
-/// Wire format: `[session_id=0 (8 bytes)][0x02][8-byte session_id BE]`
+/// Fire-and-forget — best effort, errors are logged but not propagated.
 pub async fn teardown_sessions(circuit: &CircuitState) {
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
@@ -143,26 +143,37 @@ pub async fn teardown_sessions(circuit: &CircuitState) {
         }
     };
 
-    for hop in [&circuit.entry, &circuit.relay, &circuit.exit] {
-        let relay_addr = match relay_addr_for(&hop.endpoint) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(node_id = %hop.node_id, error = %e, "skipping teardown for bad endpoint");
-                continue;
+    let send_teardown = |hop: &crate::circuit::CircuitHop| {
+        let relay_addr = relay_addr_for(&hop.endpoint);
+        let node_id = hop.node_id.clone();
+        let session_id = hop.session_id;
+        let socket = &socket;
+        async move {
+            let addr = match relay_addr {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(node_id = %node_id, error = %e, "skipping teardown for bad endpoint");
+                    return;
+                }
+            };
+            let mut msg = Vec::with_capacity(8 + 1 + 8);
+            msg.extend_from_slice(&0u64.to_be_bytes());
+            msg.push(0x02);
+            msg.extend_from_slice(&session_id.to_be_bytes());
+
+            if let Err(e) = socket.send_to(&msg, addr).await {
+                warn!(node_id = %node_id, error = %e, "failed to send SESSION_TEARDOWN");
+            } else {
+                info!(node_id = %node_id, session_id, "sent SESSION_TEARDOWN");
             }
-        };
-
-        let mut msg = Vec::with_capacity(8 + 1 + 8);
-        msg.extend_from_slice(&0u64.to_be_bytes()); // session_id = 0 (control)
-        msg.push(0x02); // SESSION_TEARDOWN
-        msg.extend_from_slice(&hop.session_id.to_be_bytes());
-
-        if let Err(e) = socket.send_to(&msg, relay_addr).await {
-            warn!(node_id = %hop.node_id, error = %e, "failed to send SESSION_TEARDOWN");
-        } else {
-            info!(node_id = %hop.node_id, session_id = hop.session_id, "sent SESSION_TEARDOWN");
         }
-    }
+    };
+
+    tokio::join!(
+        send_teardown(&circuit.entry),
+        send_teardown(&circuit.relay),
+        send_teardown(&circuit.exit),
+    );
 }
 
 /// Request the exit node to co-sign a bandwidth receipt.

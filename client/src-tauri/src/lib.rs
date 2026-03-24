@@ -8,7 +8,6 @@ mod sphinx;
 mod tunnel;
 mod wallet;
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::Address;
@@ -56,8 +55,6 @@ pub struct AppState {
     pub chain_reader: ChainReader,
     /// Cancel token for the background circuit rotation task.
     pub rotation_cancel: Mutex<Option<CancellationToken>>,
-    /// Atomic counter bumped on each successful rotation.
-    pub rotation_count: Arc<AtomicU32>,
 }
 
 impl Default for AppState {
@@ -72,7 +69,6 @@ impl Default for AppState {
             tunnel: Arc::new(Mutex::new(TunnelManager::new())),
             config: Arc::new(Mutex::new(cfg)),
             rotation_cancel: Mutex::new(None),
-            rotation_count: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -109,7 +105,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     // Decide between 3-hop and single-hop based on available nodes.
     let (entry_node_id, hop_count) = if nodes.len() >= 3 {
         // ── 3-hop circuit ────────────────────────────────────────────
-        let selected = circuit::select_circuit(&nodes)?;
+        let selected = circuit::select_circuit(&nodes, &[])?;
         info!(
             entry = %selected[0].node_id,
             relay = %selected[1].node_id,
@@ -167,8 +163,6 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
     let session_id_str = session_id.to_string();
 
-    state.rotation_count.store(0, Ordering::Relaxed);
-
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
@@ -198,7 +192,6 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             let circuit = Arc::clone(&state.circuit);
             let tunnel = Arc::clone(&state.tunnel);
             let chain_reader = state.chain_reader.clone();
-            let rotation_counter = Arc::clone(&state.rotation_count);
 
             tokio::spawn(rotation_loop(
                 cancel,
@@ -207,7 +200,6 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
                 circuit,
                 tunnel,
                 chain_reader,
-                rotation_counter,
             ));
 
             info!(interval_secs, "circuit auto-rotation enabled");
@@ -468,13 +460,6 @@ fn stop_rotation(state: &AppState) -> Result<(), String> {
 }
 
 /// Background loop that rotates the circuit on a fixed interval.
-///
-/// On each tick:
-/// 1. Teardown sessions on the old circuit's relay nodes
-/// 2. Fetch fresh node list from the registry
-/// 3. Select a new 3-hop circuit through different nodes
-/// 4. Register session keys on the new hops
-/// 5. Swap the circuit state atomically
 async fn rotation_loop(
     cancel: CancellationToken,
     interval_secs: u64,
@@ -482,9 +467,9 @@ async fn rotation_loop(
     circuit: Arc<Mutex<Option<CircuitState>>>,
     tunnel: Arc<Mutex<TunnelManager>>,
     chain_reader: ChainReader,
-    rotation_count: Arc<AtomicU32>,
 ) {
     let interval = std::time::Duration::from_secs(interval_secs);
+    let mut count: u32 = 0;
 
     loop {
         tokio::select! {
@@ -499,7 +484,10 @@ async fn rotation_loop(
 
         // 1. Teardown old sessions.
         let old_circuit = {
-            let circ = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(circ) = circuit.lock() else {
+                warn!("circuit mutex poisoned, stopping rotation");
+                return;
+            };
             circ.clone()
         };
         if let Some(ref old) = old_circuit {
@@ -509,18 +497,7 @@ async fn rotation_loop(
         // 2. Fetch nodes.
         let nodes = match chain_reader.get_active_nodes().await {
             Ok(on_chain) if on_chain.len() >= 3 => {
-                on_chain
-                    .into_iter()
-                    .map(|n| NodeInfo {
-                        node_id: n.node_id,
-                        public_key: decode_hex_32(&n.public_key),
-                        endpoint: n.endpoint,
-                        stake: (n.stake * 1e18) as u64,
-                        uptime: n.uptime,
-                        price_per_byte: n.price_per_byte as u64,
-                        slash_count: n.slash_count,
-                    })
-                    .collect::<Vec<_>>()
+                on_chain.into_iter().map(map_on_chain_node).collect::<Vec<_>>()
             }
             Ok(_) => {
                 warn!("fewer than 3 nodes available, skipping rotation");
@@ -532,8 +509,17 @@ async fn rotation_loop(
             }
         };
 
-        // 3. Select new circuit (try to pick different nodes from old circuit).
-        let selected = match select_rotation_circuit(&nodes, old_circuit.as_ref()) {
+        // 3. Build exclude list from old circuit.
+        let exclude_ids: Vec<&str> = old_circuit
+            .as_ref()
+            .map(|c| vec![
+                c.entry.node_id.as_str(),
+                c.relay.node_id.as_str(),
+                c.exit.node_id.as_str(),
+            ])
+            .unwrap_or_default();
+
+        let selected = match circuit::select_circuit(&nodes, &exclude_ids) {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "failed to select rotation circuit, skipping");
@@ -564,7 +550,10 @@ async fn rotation_loop(
 
         // 5. Reconnect tunnel to new entry node.
         {
-            let mut tun = tunnel.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(mut tun) = tunnel.lock() else {
+                warn!("tunnel mutex poisoned, stopping rotation");
+                return;
+            };
             if let Err(e) = tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key) {
                 warn!(error = %e, "failed to start tunnel to new entry, skipping rotation");
                 continue;
@@ -573,14 +562,20 @@ async fn rotation_loop(
 
         // 6. Swap circuit state.
         {
-            let mut circ = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(mut circ) = circuit.lock() else {
+                warn!("circuit mutex poisoned, stopping rotation");
+                return;
+            };
             *circ = Some(new_circuit);
         }
 
         // 7. Update rotation count.
-        let count = rotation_count.fetch_add(1, Ordering::Relaxed) + 1;
+        count += 1;
         {
-            let mut conn = connection.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(mut conn) = connection.lock() else {
+                warn!("connection mutex poisoned, stopping rotation");
+                return;
+            };
             if let ConnectionState::Connected {
                 ref mut node_id,
                 ref mut rotation_count,
@@ -600,70 +595,28 @@ async fn rotation_loop(
     }
 }
 
-/// Select a 3-hop circuit for rotation, preferring nodes not in the old circuit.
-fn select_rotation_circuit(
-    nodes: &[NodeInfo],
-    old_circuit: Option<&CircuitState>,
-) -> Result<[NodeInfo; 3], String> {
-    if nodes.len() < 3 {
-        return Err(format!(
-            "need at least 3 nodes, got {}",
-            nodes.len()
-        ));
-    }
-
-    let old_ids: Vec<&str> = old_circuit
-        .map(|c| {
-            vec![
-                c.entry.node_id.as_str(),
-                c.relay.node_id.as_str(),
-                c.exit.node_id.as_str(),
-            ]
-        })
-        .unwrap_or_default();
-
-    // Score nodes, boosting those not in the old circuit.
-    let mut scored: Vec<(f64, &NodeInfo)> = nodes
-        .iter()
-        .map(|n| {
-            let base = circuit::score_node(n);
-            let bonus = if old_ids.contains(&n.node_id.as_str()) {
-                -100.0 // strongly deprioritize reuse
-            } else {
-                0.0
-            };
-            (base + bonus, n)
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    Ok([
-        scored[0].1.clone(),
-        scored[1].1.clone(),
-        scored[2].1.clone(),
-    ])
-}
-
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
+
+/// Convert an on-chain node record to the client's internal `NodeInfo`.
+fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
+    NodeInfo {
+        node_id: n.node_id,
+        public_key: decode_hex_32(&n.public_key),
+        endpoint: n.endpoint,
+        stake: (n.stake * 1e18) as u64,
+        uptime: n.uptime,
+        price_per_byte: n.price_per_byte as u64,
+        slash_count: n.slash_count,
+    }
+}
 
 /// Fetch nodes from on-chain registry, falling back to mock data.
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
     match state.chain_reader.get_active_nodes().await {
         Ok(on_chain) if !on_chain.is_empty() => {
             info!(count = on_chain.len(), "fetched on-chain nodes");
-            on_chain.into_iter().map(|n| {
-                NodeInfo {
-                    node_id: n.node_id,
-                    public_key: decode_hex_32(&n.public_key),
-                    endpoint: n.endpoint,
-                    stake: (n.stake * 1e18) as u64,
-                    uptime: n.uptime,
-                    price_per_byte: n.price_per_byte as u64,
-                    slash_count: n.slash_count,
-                }
-            }).collect()
+            on_chain.into_iter().map(map_on_chain_node).collect()
         }
         Ok(_) => {
             warn!("on-chain registry empty, using mock data");

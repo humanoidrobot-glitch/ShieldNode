@@ -115,7 +115,7 @@ pub fn encode_settlement_receipt(
         client_sig.to_vec(),
         node_sig.to_vec(),
     )
-        .abi_encode();
+        .abi_encode_params();
 
     info!(
         session_id,

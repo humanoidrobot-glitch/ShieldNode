@@ -33,15 +33,19 @@ export function useCircuit(): UseCircuitReturn {
       return;
     }
 
+    let lastRotation = 0;
     const poll = async () => {
       try {
-        const info = await invoke<CircuitInfo | null>("get_circuit");
-        setCircuit(info);
-      } catch { /* ignore */ }
-      try {
         const state = await invoke<ConnectionStateResponse>("get_status");
-        if (state.rotation_count != null) {
-          setRotationCount(state.rotation_count);
+        const newCount = state.rotation_count ?? 0;
+        if (newCount !== lastRotation) {
+          lastRotation = newCount;
+          setRotationCount(newCount);
+          // Circuit changed — refetch it.
+          try {
+            const info = await invoke<CircuitInfo | null>("get_circuit");
+            setCircuit(info);
+          } catch { /* ignore */ }
         }
       } catch { /* ignore */ }
     };

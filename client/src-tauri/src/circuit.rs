@@ -174,8 +174,12 @@ pub fn score_node(node: &NodeInfo) -> f64 {
 /// Select a three-hop circuit (entry, relay, exit) from the candidate list.
 ///
 /// Nodes are ranked by [`score_node`] and the top three *distinct* nodes are
-/// returned.  In the future this will also enforce geographic / AS diversity.
-pub fn select_circuit(nodes: &[NodeInfo]) -> Result<[NodeInfo; 3], String> {
+/// returned.  When `exclude_ids` is non-empty, those nodes receive a heavy
+/// score penalty to encourage diversity on circuit rotation.
+pub fn select_circuit(
+    nodes: &[NodeInfo],
+    exclude_ids: &[&str],
+) -> Result<[NodeInfo; 3], String> {
     if nodes.len() < 3 {
         return Err(format!(
             "need at least 3 nodes to form a circuit, got {}",
@@ -183,7 +187,18 @@ pub fn select_circuit(nodes: &[NodeInfo]) -> Result<[NodeInfo; 3], String> {
         ));
     }
 
-    let mut scored: Vec<(f64, &NodeInfo)> = nodes.iter().map(|n| (score_node(n), n)).collect();
+    let mut scored: Vec<(f64, &NodeInfo)> = nodes
+        .iter()
+        .map(|n| {
+            let base = score_node(n);
+            let penalty = if exclude_ids.contains(&n.node_id.as_str()) {
+                -100.0
+            } else {
+                0.0
+            };
+            (base + penalty, n)
+        })
+        .collect();
 
     // Sort descending by score.
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -252,7 +267,7 @@ mod tests {
             make_node("a", 500, 0.80, 50, 0),
             make_node("b", 600, 0.90, 40, 0),
         ];
-        assert!(select_circuit(&nodes).is_err());
+        assert!(select_circuit(&nodes, &[]).is_err());
     }
 
     #[test]
@@ -263,7 +278,7 @@ mod tests {
             make_node("c", 2_000, 0.70, 30, 0),
             make_node("d", 80_000, 0.95, 15, 0),
         ];
-        let circuit = select_circuit(&nodes).unwrap();
+        let circuit = select_circuit(&nodes, &[]).unwrap();
         assert_eq!(circuit.len(), 3);
         // Best node should be entry
         assert_eq!(circuit[0].node_id, "b");
@@ -271,11 +286,15 @@ mod tests {
 
     #[test]
     fn build_circuit_produces_unique_keys() {
-        let nodes = [
+        // Use distinct non-zero public keys so DH produces different shared secrets.
+        let mut nodes = [
             make_node("entry", 100_000, 0.99, 10, 0),
             make_node("relay", 75_000, 0.98, 15, 0),
             make_node("exit", 50_000, 0.96, 8, 0),
         ];
+        nodes[0].public_key = [1u8; 32];
+        nodes[1].public_key = [2u8; 32];
+        nodes[2].public_key = [3u8; 32];
         let state = build_circuit(&nodes).unwrap();
         assert_eq!(state.entry.hop_index, 0);
         assert_eq!(state.relay.hop_index, 1);
