@@ -66,6 +66,8 @@ impl AppState {
         Ok(WalletConfig {
             rpc_url: cfg.rpc_url.clone(),
             chain_id: cfg.chain_id,
+            private_key: cfg.operator_private_key.clone(),
+            settlement_address: SETTLEMENT_ADDRESS.to_string(),
         })
     }
 }
@@ -80,7 +82,24 @@ pub struct SessionInfo {
 
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
-    let nodes = mock_nodes();
+    // Try on-chain nodes first, fall back to mock.
+    let nodes = match state.chain_reader.get_active_nodes().await {
+        Ok(on_chain) if !on_chain.is_empty() => {
+            on_chain.into_iter().map(|n| {
+                let pk_bytes = decode_hex_32(&n.public_key);
+                NodeInfo {
+                    node_id: n.node_id,
+                    public_key: pk_bytes,
+                    endpoint: n.endpoint,
+                    stake: (n.stake * 1e18) as u64,
+                    uptime: n.uptime,
+                    price_per_byte: n.price_per_byte as u64,
+                    slash_count: n.slash_count,
+                }
+            }).collect()
+        }
+        _ => mock_nodes(),
+    };
     let node = circuit::select_single_node(&nodes)?;
 
     {
@@ -96,25 +115,32 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     let wallet_cfg = state.wallet_config()?;
-    let session_id =
-        wallet::open_session(&wallet_cfg, &[node.node_id.clone()], 1_000_000_000_000_000)?;
+
+    // Open on-chain session (0.001 ETH deposit = minimum).
+    let (tx_hash, session_id) = wallet::open_session(
+        &wallet_cfg,
+        &node.node_id,
+        1_000_000_000_000_000, // 0.001 ETH
+    ).await?;
+
+    let session_id_str = session_id.to_string();
 
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
             node_id: node.node_id.clone(),
-            session_id: session_id.clone(),
+            session_id: session_id_str.clone(),
             bytes_used: 0,
         };
     }
 
-    info!(session_id = %session_id, "connected");
-    Ok(session_id)
+    info!(session_id, tx = %tx_hash, "connected — session opened on-chain");
+    Ok(session_id_str)
 }
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
-    let (session_id, bytes_used) = {
+    let (session_id_str, bytes_used) = {
         let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         match &*conn {
             ConnectionState::Connected { session_id, bytes_used, .. } => {
@@ -129,8 +155,11 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         tun.stop_tunnel()?;
     }
 
+    let session_id: u64 = session_id_str.parse()
+        .map_err(|e| format!("invalid session id: {e}"))?;
+
     let wallet_cfg = state.wallet_config()?;
-    let tx_hash = wallet::settle_session(&wallet_cfg, &session_id, bytes_used)?;
+    let tx_hash = wallet::settle_session(&wallet_cfg, session_id, bytes_used).await?;
 
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;

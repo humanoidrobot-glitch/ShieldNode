@@ -21,6 +21,11 @@ pub struct ClientConfig {
 
     /// Node IDs the user prefers to connect through.
     pub preferred_nodes: Vec<String>,
+
+    /// Hex-encoded private key for signing on-chain transactions.
+    /// In production this would be replaced by WalletConnect / injected wallet.
+    #[serde(default)]
+    pub operator_private_key: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -32,6 +37,7 @@ impl Default for ClientConfig {
             kill_switch: true,
             gas_price_ceiling_gwei: 5.0,
             preferred_nodes: Vec::new(),
+            operator_private_key: None,
         }
     }
 }
