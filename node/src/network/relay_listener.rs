@@ -253,18 +253,27 @@ impl RelayListener {
                     hop_index,
                 };
 
-                {
+                let accepted = {
                     let mut svc = self.relay_service.lock().await;
-                    svc.add_session(state);
-                }
+                    svc.add_session(state)
+                };
 
-                info!(
-                    peer = %peer_addr,
-                    session_id = real_session_id,
-                    hop_index,
-                    "SESSION_SETUP accepted"
-                );
-                ACK_SUCCESS
+                if accepted {
+                    info!(
+                        peer = %peer_addr,
+                        session_id = real_session_id,
+                        hop_index,
+                        "SESSION_SETUP accepted"
+                    );
+                    ACK_SUCCESS
+                } else {
+                    warn!(
+                        peer = %peer_addr,
+                        session_id = real_session_id,
+                        "SESSION_SETUP rejected (duplicate session_id)"
+                    );
+                    ACK_FAILURE
+                }
             }
 
             MSG_SESSION_TEARDOWN => {

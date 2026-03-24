@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 use zeroize::Zeroize;
 
 use crate::crypto::sphinx::{SphinxError, SphinxPacket};
@@ -59,10 +59,21 @@ impl RelayService {
         }
     }
 
-    /// Register a new relay session.
-    pub fn add_session(&mut self, state: SessionState) {
-        info!(session_id = state.session_id, "relay session registered");
-        self.sessions.insert(state.session_id, state);
+    /// Register a new relay session. Returns false if the session_id
+    /// already exists (collision).
+    pub fn add_session(&mut self, state: SessionState) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.sessions.entry(state.session_id) {
+            Entry::Occupied(_) => {
+                warn!(session_id = state.session_id, "session ID collision — rejecting duplicate");
+                false
+            }
+            Entry::Vacant(e) => {
+                info!(session_id = state.session_id, "relay session registered");
+                e.insert(state);
+                true
+            }
+        }
     }
 
     /// Remove a relay session.

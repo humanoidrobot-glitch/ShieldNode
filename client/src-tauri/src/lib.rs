@@ -8,7 +8,7 @@ mod sphinx;
 mod tunnel;
 mod wallet;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
@@ -298,15 +298,30 @@ async fn send_packet(
         circ.clone().ok_or_else(|| "no active circuit".to_string())?
     };
 
-    // Build the 3-hop Sphinx route.
-    let route = circuit_state.build_sphinx_route();
+    // Check if we already have a cached socket.
+    let existing = {
+        let tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+        tun.relay_socket.clone()
+    };
+    let socket = match existing {
+        Some(s) => s,
+        None => {
+            let sock = Arc::new(
+                tokio::net::UdpSocket::bind("0.0.0.0:0").await
+                    .map_err(|e| format!("failed to bind relay socket: {e}"))?
+            );
+            let mut tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+            tun.relay_socket = Some(Arc::clone(&sock));
+            sock
+        }
+    };
 
-    // Create the onion packet (3 layers of encryption).
+    let route = circuit_state.build_sphinx_route();
     let sphinx_pkt = sphinx::SphinxPacket::create(&route, &packet)?;
     let sphinx_bytes = sphinx_pkt.to_bytes();
 
-    // Send to entry node's relay port with entry hop's session_id.
     tunnel::send_sphinx_packet(
+        &socket,
         &circuit_state.entry.endpoint,
         circuit_state.entry.session_id,
         &sphinx_bytes,
