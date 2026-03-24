@@ -33,6 +33,10 @@ contract ZKSettlement {
 
     uint256 public constant MINIMUM_DEPOSIT = 0.001 ether;
 
+    /// @notice Payment split (basis points out of 100). Must match SessionSettlement.
+    uint256 public constant ENTRY_SHARE = 25;
+    uint256 public constant RELAY_SHARE = 25;
+
     // Public signal indices (must match circuit's public input order)
     uint256 private constant SIG_DOMAIN_SEPARATOR   = 0;
     uint256 private constant SIG_TOTAL_PAYMENT      = 1;
@@ -169,9 +173,9 @@ contract ZKSettlement {
         uint256 totalPayment = pubSignals[SIG_TOTAL_PAYMENT];
         require(totalPayment <= depositAmount, "ZKSettlement: payment exceeds deposit");
 
-        // 7. Compute the 25/25/50 split.
-        uint256 entryPay = (totalPayment * 25) / 100;
-        uint256 relayPay = (totalPayment * 25) / 100;
+        // 7. Compute the 25/25/50 split (must match SessionSettlement).
+        uint256 entryPay = (totalPayment * ENTRY_SHARE) / 100;
+        uint256 relayPay = (totalPayment * RELAY_SHARE) / 100;
         uint256 exitPay  = totalPayment - entryPay - relayPay;
         uint256 refund   = depositAmount - totalPayment;
 

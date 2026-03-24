@@ -78,6 +78,14 @@ Proving time estimate: 3-10s on modern hardware (16GB RAM, 8 cores) with Groth16
 - [circomlib](https://github.com/iden3/circomlib) — Poseidon, comparators, mux
 - [circom-ecdsa](https://github.com/0xPARC/circom-ecdsa) — secp256k1 ECDSA verification
 
+## Known Limitation: EIP-712 Digest Computed Off-Circuit
+
+The EIP-712 message hash (`msgHash`) is passed as a private input rather than computed inside the circuit. Computing keccak256 in circom costs ~150K constraints — adding it would increase the circuit by ~5% for marginal benefit.
+
+**Critical assumption:** The prover is trusted to supply the correct digest for the receipt data (sessionId, cumulativeBytes, timestamp). The circuit verifies signatures over this digest but cannot verify the digest itself was correctly derived. A malicious prover could supply a valid signature over a different message.
+
+**Mitigation:** The client generates both the receipt and the proof — there is no incentive to forge a digest against itself. A future iteration will compute the full EIP-712 digest in-circuit for complete trustlessness (accept ~150K additional constraints).
+
 ## Post-Quantum Note
 
 The circuit accepts ECDSA signatures now. The `Signer` trait selector (ECDSA vs ML-DSA) will be added as a circuit input in a future iteration. Inside the ZK circuit, ML-DSA's 3,293-byte signatures carry no gas penalty — only the constant-size proof goes on-chain.

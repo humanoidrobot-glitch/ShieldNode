@@ -144,33 +144,27 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     totalPayment === totalPaymentPub;
 
     // ── 5. Compute payment split (25/25/50) ───────────────────────
-    // Integer division: entryPay = totalPayment * 25 / 100
-    // We use constrained division: totalPayment * 25 = entryPay * 100 + remainder
+    // Constrained integer division: totalPayment * 25 = entryPay * 100 + remainder
     signal entryPay;
     signal relayPay;
     signal exitPay;
     signal refund;
 
-    // entryPay = floor(totalPayment * 25 / 100)
     signal tp25;
     tp25 <== totalPayment * 25;
     entryPay <-- tp25 \ 100;
     signal entryRem;
     entryRem <-- tp25 % 100;
     tp25 === entryPay * 100 + entryRem;
-    // Ensure remainder is in [0, 100)
     component entryRemCheck = LessThan(8);
     entryRemCheck.in[0] <== entryRem;
     entryRemCheck.in[1] <== 100;
     entryRemCheck.out === 1;
 
-    // relayPay = floor(totalPayment * 25 / 100)
-    relayPay <-- tp25 \ 100;
-    signal relayRem;
-    relayRem <-- tp25 % 100;
-    tp25 === relayPay * 100 + relayRem;
+    // Entry and relay both take 25% — same value.
+    relayPay <== entryPay;
 
-    // exitPay = totalPayment - entryPay - relayPay (remainder goes to exit)
+    // Exit gets the remainder (handles rounding).
     exitPay <== totalPayment - entryPay - relayPay;
 
     // refund = deposit - totalPayment

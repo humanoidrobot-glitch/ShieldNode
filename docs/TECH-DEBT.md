@@ -186,6 +186,67 @@ Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't c
 
 **When to fix:** Before Phase 5. Use `app.path().app_config_dir()` from Tauri v2 path API.
 
+---
+
+## Crypto Trait Abstractions (Phase 4)
+
+### Client kex.rs duplicates node crypto traits
+`client/src-tauri/src/kex.rs` duplicates `node/src/crypto/traits.rs` + `x25519_kem.rs` + `mlkem.rs` + `hybrid.rs`. The client version is a stripped-down subset (no `SecretKey`, no `decapsulate`, `String` errors instead of `CryptoError`). Documented in the file header.
+
+**Why deferred:** No shared crate exists yet. Extracting `shieldnode-crypto` as a workspace member is the proper fix.
+
+**When to fix:** With the shared crate migration (see Architecture section). Highest-priority candidate alongside EIP-712 receipt logic.
+
+### Dual backward-compat accessors on NodeKeyPair
+`node/src/crypto/keys.rs` exposes parallel accessor pairs: `public_key()` / `public_key_kem()`, `secret()` / `secret_kem()`. The raw dalek-typed accessors exist for callers that haven't migrated to trait types.
+
+**Why deferred:** `main.rs` and `noise.rs` still use the dalek types in some paths.
+
+**When to fix:** When all callers are migrated to trait-based types, remove the raw dalek accessors.
+
+### SymmetricCipher trait re-keys per call
+`ChaCha20Poly1305Cipher` creates a new cipher instance on every `encrypt`/`decrypt`. The trait is stateless by design (`fn encrypt(key, nonce, plaintext)`).
+
+**Why deferred:** Not in a hot loop currently — used for Sphinx layer encryption (once per hop) and Noise messages. Overhead per call is negligible.
+
+**When to fix:** If this trait is ever used in a per-packet hot path, redesign to accept a pre-keyed cipher instance.
+
+---
+
+## ZK Settlement (Phase 4)
+
+### ZK recipient addresses not verified against commitments
+`ZKSettlement.settleWithProof()` accepts `entryAddr`, `relayAddr`, `exitAddr`, `refundAddr` as plain parameters but does not verify they match the Poseidon commitments in the proof's public signals. A caller could submit a valid proof but route payments to different addresses.
+
+**Why deferred:** Poseidon hashes cannot be verified on-chain with keccak256. Fixing requires either: (a) a Poseidon precompile/library on-chain, (b) making individual payment amounts public signals and having the contract compute commitments, or (c) redesigning the circuit to output addresses as public signals.
+
+**When to fix:** Before Phase 5 mainnet launch. Option (b) is the most practical — add `entryPay`, `relayPay`, `exitPay`, `refundAmount` as public circuit outputs and verify the split on-chain against those values.
+
+### EIP-712 digest computed off-circuit
+The circuit accepts `msgHash` as a private input rather than computing the full keccak256 EIP-712 digest in-circuit. The prover is trusted to supply the correct digest. Documented in `circuits/bandwidth_receipt/README.md`.
+
+**Why deferred:** Keccak256 in circom adds ~150K constraints (~5% circuit size increase). The client generates both receipt and proof, so there's no incentive to forge a digest against itself.
+
+**When to fix:** When the circuit is mature and constraint budget allows. Adds ~150K constraints but provides full trustlessness.
+
+### Owner-gated registry root updates
+`ZKSettlement.updateRegistryRoot()` uses a simple `owner == msg.sender` check. Single point of failure for registry root integrity.
+
+**Why deferred:** Documented as temporary in the contract. The proper fix is reading the Merkle root directly from NodeRegistry (requires NodeRegistry to maintain a Poseidon Merkle tree of registered nodes).
+
+**When to fix:** Phase 5, alongside the mainnet security audit. Add timelock + multisig at minimum.
+
+### RECEIPT_TYPEHASH defined in three places
+The EIP-712 `BandwidthReceipt` typehash is independently defined in `SessionSettlement.sol`, `SessionSettlement.t.sol`, and referenced by the circuit. Any change to the receipt structure requires updating all three (plus the circuit).
+
+**Why deferred:** The typehash is a stable protocol constant unlikely to change. Extracting to a shared library saves ~2 lines per consumer.
+
+**When to fix:** Before mainnet. Extract to a shared `SettlementConstants` library or interface.
+
+---
+
+## Frontend (Phase 4 additions)
+
 ### Gas price display units
 The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
 
