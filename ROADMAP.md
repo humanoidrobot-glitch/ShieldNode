@@ -20,8 +20,9 @@ The foundation: a working relay node, on-chain contracts, and a basic client.
 
 ### Remaining
 - [x] **Contracts deployed to Sepolia** — NodeRegistry (`0xC6D9...df11`), SessionSettlement (`0xF32a...E959`), SlashingOracle (`0x28E5...8FeD`), Treasury (`0xaE76...619f`)
-- [ ] Node registers on-chain, client reads registry to discover nodes
-- [ ] End-to-end session lifecycle: client opens session with deposit, bandwidth receipts flow, settlement on disconnect
+- [x] **Node on-chain registration** — `--register` CLI flag sends real `register()` tx with 0.1 ETH stake and X25519 public key. Heartbeat service sends real on-chain heartbeats via alloy. First node registered and active on Sepolia
+- [x] **Client reads on-chain registry** — `get_nodes` reads live node data from NodeRegistry, falls back to mock data during development. `get_gas_price` fetches real gas price from RPC
+- [x] **Session lifecycle on-chain** — `connect` sends real `openSession` tx to SessionSettlement with 0.001 ETH deposit, parses session ID from event logs. `disconnect` sends `settleSession` tx. Phase 1 uses same node for all 3 circuit positions
 - [ ] TUN device / raw socket integration for actual IP packet forwarding (exit mode)
 
 **Success metric:** Browse the internet through a single ShieldNode relay and pay for it on L1 testnet.
