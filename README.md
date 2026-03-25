@@ -171,7 +171,8 @@ shieldnode/
 │   ├── PROTOCOL.md
 │   ├── ECONOMICS.md
 │   ├── ZK-DESIGN.md
-│   └── THREAT-MODEL.md
+│   ├── THREAT-MODEL.md
+│   └── anti-logging-research.md   # Comprehensive anti-logging analysis with citations
 └── CLAUDE.md                      # Full spec and design decisions
 ```
 
@@ -253,9 +254,9 @@ Nodes earn ETH directly from session settlements. Revenue depends on bandwidth s
 
 ShieldNode addresses two hard problems in decentralized relay networks — collusion and logging — through layered defenses documented in detail in [ROADMAP.md](ROADMAP.md).
 
-**Anti-collusion:** circuit diversity constraints prevent multiple hops from sharing infrastructure (ASN, subnet, region). Same-operator exclusion, stake concentration heuristics, and a minimum network size guard layer on top. Circuit auto-rotation limits any single correlation window. ZK node eligibility proofs (Phase 6) will hide the node set from enumeration by state actors.
+**Anti-collusion:** circuit diversity constraints prevent multiple hops from sharing infrastructure (ASN, subnet, region). Same-operator exclusion, stake concentration heuristics, and a minimum network size guard layer on top. Circuit auto-rotation limits any single correlation window. ZK node eligibility proofs (Phase 6) will hide the node set from enumeration by state actors. A dummy commitment Merkle tree obscures the real network size during bootstrapping.
 
-**Anti-logging:** the relay binary has no logging mechanism by design. Phase 5 introduces TEE remote attestation (AMD SEV-SNP) so even a malicious operator can't access traffic inside the hardware enclave. Reproducible builds verify the attested binary matches audited source. Traffic volume analysis detects exfiltration. Phase 6 adds ZK-VM execution trace proofs (proving the software didn't log) and ephemeral compute enforcement (proving the environment can't persist logs).
+**Anti-logging:** rather than attempting to prove logging doesn't occur — a problem that is fundamentally unsolvable for remote machines — ShieldNode ensures that any data an operator *could* capture is structurally useless. Nine defense layers work in concert: Sphinx onion encryption protects content, fixed-size packet normalization eliminates size fingerprinting, adaptive cover traffic obscures activity patterns, hybrid post-quantum key exchange prevents harvest-now-decrypt-later, micro-ratcheting limits key compromise to 30-second windows, TEE hardware enclaves (Phase 5) isolate traffic from the host OS, ZK-VM proofs (Phase 6) verify software integrity, ephemeral compute prevents log persistence, and traffic volume analysis detects exfiltration. The full technical analysis with citations is available in **[docs/anti-logging-research.md](docs/anti-logging-research.md)**.
 
 **Post-quantum:** the hybrid X25519 + ML-KEM-768 handshake is already implemented, protecting circuit routes from harvest-now-decrypt-later attacks. ML-DSA signatures are verified inside ZK circuits. See the [Post-Quantum Strategy](ROADMAP.md#post-quantum-strategy) section in the roadmap for the full threat model and upgrade table.
 
@@ -305,9 +306,7 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 | [Oasis Network / Sapphire](https://oasisprotocol.org) | Confidential computing runtime using TEEs. Study remote attestation verification and enclave key management |
 | [Gramine](https://gramineproject.io) | Library OS for running unmodified Linux apps inside SGX enclaves. Evaluate for relay binary enclave support |
 | [AWS Nitro Enclaves](https://aws.amazon.com/ec2/nitro/nitro-enclaves/) | Confidential computing offering. Study attestation document format and NSM API as reference for enclave attestation |
-| [Signal PQXDH](https://signal.org/docs/specifications/pqxdh/) | Hybrid X25519 + ML-KEM in production (PQ handshake precedent). Double Ratchet mechanism is prior art for ShieldNode's micro-ratcheting session keys |
-| [TARANET](https://arxiv.org/abs/1907.05943) | Traffic-analysis resistant anonymity at the network layer. Study constant-rate flowlet design and packet splitting for traffic normalization |
-| [Aqua](https://freehaven.net/anonbib/cache/Aqua:PETS2009.pdf) | Anonymous communication for bandwidth-intensive apps. Study approach to balancing traffic analysis resistance with throughput — most relevant since both are bandwidth-sensitive unlike messaging-focused mixnets |
+| [Signal PQXDH](https://signal.org/docs/specifications/pqxdh/) | Hybrid X25519 + ML-KEM in production. Closest precedent for ShieldNode's post-quantum handshake |
 | [PQ Ethereum](https://pq.ethereum.org/) | EF post-quantum initiative. ShieldNode's PQ timeline stays ahead of Ethereum's own |
 | [NIST FIPS 203/204](https://csrc.nist.gov/publications/fips) | ML-KEM (Kyber), ML-DSA (Dilithium) standards. FIPS-compliant implementations only |
 
