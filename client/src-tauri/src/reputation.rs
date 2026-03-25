@@ -167,6 +167,8 @@ impl ReputationCache {
                 let mut correlated = vec![&nodes[i]];
                 for j in (i + 1)..nodes.len() {
                     if (nodes[i].uptime - nodes[j].uptime).abs() < 0.01
+                        && !nodes[i].operator_address.is_empty()
+                        && !nodes[j].operator_address.is_empty()
                         && nodes[i].operator_address != nodes[j].operator_address
                     {
                         correlated.push(&nodes[j]);
@@ -243,6 +245,54 @@ mod tests {
             cache.record_session(&nodes, 100_000, Duration::from_secs(600));
         }
         assert_eq!(cache.score_penalty("node-a"), 0.0);
+    }
+
+    #[test]
+    fn stake_cluster_detected_for_identical_stakes() {
+        use crate::circuit::NodeInfo;
+        let mut cache = ReputationCache::new();
+        let nodes: Vec<NodeInfo> = (0..4)
+            .map(|i| NodeInfo {
+                node_id: format!("node-{i}"),
+                public_key: vec![0u8; 32],
+                endpoint: format!("10.0.{i}.1:51820"),
+                stake: 500_000_000_000_000_000, // 0.5 ETH — above minimum
+                uptime: 0.5 + (i as f64 * 0.1),  // varied uptime
+                price_per_byte: 10,
+                slash_count: 0,
+                completion_rate: 1.0,
+                operator_address: format!("0xOp{i}"),
+                asn: None,
+                region: None,
+            })
+            .collect();
+        let flagged = cache.detect_stake_clusters(&nodes);
+        // 4 nodes with identical stake > min → all flagged
+        assert_eq!(flagged.len(), 4);
+    }
+
+    #[test]
+    fn stake_cluster_not_detected_below_threshold() {
+        use crate::circuit::NodeInfo;
+        let mut cache = ReputationCache::new();
+        let nodes: Vec<NodeInfo> = (0..2)
+            .map(|i| NodeInfo {
+                node_id: format!("node-{i}"),
+                public_key: vec![0u8; 32],
+                endpoint: format!("10.0.{i}.1:51820"),
+                stake: 500_000_000_000_000_000,
+                uptime: 0.9,
+                price_per_byte: 10,
+                slash_count: 0,
+                completion_rate: 1.0,
+                operator_address: format!("0xOp{i}"),
+                asn: None,
+                region: None,
+            })
+            .collect();
+        let flagged = cache.detect_stake_clusters(&nodes);
+        // Only 2 nodes — below threshold of 3
+        assert!(flagged.is_empty());
     }
 
     #[test]

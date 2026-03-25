@@ -510,13 +510,14 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
 async fn get_network_health(state: State<'_, AppState>) -> Result<NetworkHealth, String> {
     let nodes = fetch_nodes(&state).await;
     let n = nodes.len() as f64;
-    // Probability that an attacker controlling 10% of nodes gets both entry+exit.
-    let collusion_risk = if n >= 3.0 { (0.1f64).powi(2) } else { 1.0 };
+    // Probability of a single attacker node capturing both entry+exit: (1/n)².
+    // With diversity constraints this is a lower bound; real risk is lower.
+    let collusion_risk = if n >= 3.0 { (1.0 / n).powi(2) * 100.0 } else { 100.0 };
     Ok(NetworkHealth {
         node_count: nodes.len(),
         minimum_threshold: MINIMUM_NETWORK_SIZE,
         below_threshold: nodes.len() < MINIMUM_NETWORK_SIZE,
-        estimated_collusion_risk_pct: collusion_risk * 100.0,
+        estimated_collusion_risk_pct: collusion_risk,
     })
 }
 
@@ -793,7 +794,7 @@ const COMPLETION_RATE_TTL: std::time::Duration = std::time::Duration::from_secs(
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
     // Use cached completion rates if fresh; otherwise refresh.
     let cached = {
-        let cache = state.completion_rates_cache.lock().map_err(|_| ()).ok();
+        let cache = state.completion_rates_cache.lock().ok();
         cache.and_then(|c| {
             if c.1.elapsed() < COMPLETION_RATE_TTL {
                 Some(c.0.clone())
@@ -846,12 +847,16 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
         }
     };
 
-    // Run stake concentration analysis and apply reputation penalties.
+    // Run stake concentration analysis (brief lock for detection).
     if let Ok(mut rep) = state.reputation.lock() {
         let flagged = rep.detect_stake_clusters(&nodes);
         if !flagged.is_empty() {
             info!(count = flagged.len(), "stake concentration clusters detected");
         }
+    }
+
+    // Apply reputation penalties (separate brief lock).
+    if let Ok(rep) = state.reputation.lock() {
         for node in &mut nodes {
             if rep.score_penalty(&node.node_id) > 0.0 {
                 node.completion_rate = 0.0;

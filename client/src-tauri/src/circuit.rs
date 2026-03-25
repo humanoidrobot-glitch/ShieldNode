@@ -52,9 +52,11 @@ fn subnet_24(endpoint: &str) -> Option<String> {
 /// Check if a candidate node violates diversity constraints against already-selected nodes.
 /// Returns true if the candidate is acceptable (diverse enough).
 fn is_diverse(candidate: &NodeInfo, selected: &[Option<NodeInfo>]) -> bool {
+    let candidate_subnet = subnet_24(&candidate.endpoint);
+
     for slot in selected.iter().flatten() {
         // Same /24 subnet → reject
-        if let (Some(a), Some(b)) = (subnet_24(&candidate.endpoint), subnet_24(&slot.endpoint)) {
+        if let (Some(ref a), Some(ref b)) = (&candidate_subnet, &subnet_24(&slot.endpoint)) {
             if a == b {
                 return false;
             }
@@ -335,7 +337,12 @@ pub fn select_circuit_with_pins(
 
         // Use diverse candidates if available; fall back to all candidates if
         // diversity can't be satisfied (small networks).
-        let pool = if diverse.is_empty() { &candidates } else { &diverse };
+        let pool = if diverse.is_empty() {
+            tracing::warn!(slot, "no diverse candidates available — relaxing constraints");
+            &candidates
+        } else {
+            &diverse
+        };
 
         if pool.is_empty() {
             return Err("not enough nodes to fill circuit".to_string());
