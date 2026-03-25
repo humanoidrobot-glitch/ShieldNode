@@ -302,3 +302,35 @@ The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No te
 **Why deferred:** Both callers have slightly different error handling and context. Extracting a shared helper requires passing 5+ `Arc<Mutex>` params.
 
 **When to fix:** When either path is extended (e.g., adding completion rate enrichment to rebuilds). Extract a `rebuild_circuit_internal()` helper callable from both.
+
+---
+
+## Anti-Logging (Phase 5)
+
+### TEE enrichment pipeline not wired
+`tee_attested` is set to `false` in `map_on_chain_node` and never enriched from any data source. The comment says "enriched by attestation verification" but no call to `verify_attestation` exists in the client, and `OnChainNodeInfo` has no attestation field. The full pipeline (node submits attestation at registration → stored on-chain or via DHT → client reads and verifies → `tee_attested` set to `true`) does not exist.
+
+**Why deferred:** Requires either extending `NodeRegistry.sol` with an attestation hash field, or an off-chain attestation distribution mechanism (libp2p gossipsub). The attestation framework (`attestation.rs`) and scoring integration (`tee_attested` + bonus) are in place — the missing piece is the data path.
+
+**When to fix:** When TEE nodes are ready to deploy. Extend `NodeRegistry.register()` with an optional `attestationHash` parameter, or add a client-side attestation fetch via the DHT.
+
+### TEE_ENTRY_BONUS is dead code
+`TEE_ENTRY_BONUS` (10.0) is defined in `node/src/network/attestation.rs` but never referenced anywhere. The client's `score_node` applies the general TEE bonus (20.0) but does not apply position-specific preference — the same score is used for all three hop positions. Entry nodes (most sensitive — see client IP) should preferentially be TEE-attested.
+
+**Why deferred:** Position-aware scoring requires changing `select_circuit_with_pins` to pass the hop position to `score_node`, or applying a post-selection bonus/filter for the entry slot. Moderate refactor.
+
+**When to fix:** When TEE nodes exist on the network. Add a position parameter to scoring or a post-selection filter that rerolls the entry slot if a TEE candidate is available.
+
+### Client hardcodes TEE scoring bonus
+The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. The node crate defines `TEE_SCORE_BONUS = 20.0` in `attestation.rs`. These are currently equal but can silently diverge since the client crate has no dependency on the node crate.
+
+**Why deferred:** Part of the broader shared crate migration (see Architecture section). No mechanism to share constants between node and client without a workspace-level shared crate.
+
+**When to fix:** With the shared crate migration. Move `TEE_SCORE_BONUS` and `TEE_ENTRY_BONUS` to the shared types crate.
+
+### TEE attestation only does structural validation
+`verify_attestation` in `attestation.rs` checks report size and binary hash but does not verify hardware signatures. Any node can submit 1200 arbitrary bytes as `report_data` and receive `StructurallyValid`. Full verification requires platform-specific SDKs (sevctl for AMD, Intel DCAP, AWS NSM).
+
+**Why deferred:** Hardware signature verification libraries are platform-specific and add significant dependency complexity. The structural framework is in place; the crypto verification is the last step.
+
+**When to fix:** Before mainnet TEE scoring has real economic impact. Integrate `sev` crate for AMD SEV-SNP verification, or use a remote verification service.
