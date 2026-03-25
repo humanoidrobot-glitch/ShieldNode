@@ -352,3 +352,21 @@ Both `node/src/network/challenge.rs` and `node/src/network/receipts.rs` implemen
 **Why deferred:** Each contract genuinely needs a different DOMAIN_SEPARATOR (different `verifyingContract`). A shared `computeDomainSeparator()` in `EIP712Utils` would save ~5 lines per contract but adds a function call in the constructor. Low ROI.
 
 **When to fix:** Optional cleanup during audit prep. Add `EIP712Utils.computeDomainSeparator(string name, string version)` and have each constructor call it.
+
+---
+
+## Crypto — Ratcheting (Phase 5)
+
+### HKDF-SHA256 helper duplicated across 3 crypto files
+`ratchet.rs::derive_keys`, `noise.rs::derive_session_key`, and `hybrid.rs::combine_shared_secrets` all instantiate `Hkdf::<Sha256>` with the same pattern (new → expand → expect). A shared `fn hkdf_sha256(ikm, salt, info) -> [u8; 32]` would eliminate this.
+
+**Why deferred:** Each call site has slightly different parameters (salt, info, output size). Extracting a shared helper requires a flexible signature (optional salt, variable output length).
+
+**When to fix:** Extract to `node/src/crypto/kdf.rs` or add to an existing shared module. Low priority — the pattern is correct in all three sites.
+
+### No shared control message type registry
+Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN, `0x03` RECEIPT_SIGN). Ratchet uses a 4-byte ASCII magic (`RATC`). These are independent ad-hoc schemes with no shared enum or framing layer. If messages ever share a transport, collisions are possible.
+
+**Why deferred:** Messages currently travel on different channels (Sphinx payload vs raw relay socket). No functional conflict.
+
+**When to fix:** When adding more control message types (cover traffic flags, batching negotiation). Define a `ControlMessageType` enum or a canonical framing header used by all control messages.
