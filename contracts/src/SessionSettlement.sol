@@ -279,5 +279,4 @@ contract SessionSettlement is ISessionSettlement {
         return total > s.deposit ? s.deposit : total;
     }
 
-    // _hashTypedData and _recoverSigner moved to EIP712Utils library.
 }

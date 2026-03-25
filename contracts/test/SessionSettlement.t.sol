@@ -6,6 +6,7 @@ import {NodeRegistry}       from "../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../src/SessionSettlement.sol";
 import {INodeRegistry}      from "../src/interfaces/INodeRegistry.sol";
 import {ISessionSettlement} from "../src/interfaces/ISessionSettlement.sol";
+import {EIP712Utils}        from "../src/lib/EIP712Utils.sol";
 
 /// @title SessionSettlementTest
 /// @notice Foundry tests for the SessionSettlement contract.
@@ -32,10 +33,8 @@ contract SessionSettlementTest is Test {
 
     bytes32[3] public nodeIds;
 
-    // EIP-712 constants (must mirror SessionSettlement).
-    bytes32 constant RECEIPT_TYPEHASH = keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    );
+    // EIP-712 constants — imported from shared library.
+    bytes32 constant RECEIPT_TYPEHASH = EIP712Utils.RECEIPT_TYPEHASH;
 
     function setUp() public {
         entryOp = vm.addr(ENTRY_KEY);

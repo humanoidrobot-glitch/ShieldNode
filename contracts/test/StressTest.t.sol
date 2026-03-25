@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import {NodeRegistry}       from "../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../src/SessionSettlement.sol";
 import {ISessionSettlement} from "../src/interfaces/ISessionSettlement.sol";
+import {EIP712Utils}        from "../src/lib/EIP712Utils.sol";
 
 /// @title StressTest
 /// @notice Stress test: 100+ concurrent sessions opened and settled.
@@ -31,9 +32,7 @@ contract StressTest is Test {
 
     bytes32[3] public nodeIds;
 
-    bytes32 constant RECEIPT_TYPEHASH = keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    );
+    bytes32 constant RECEIPT_TYPEHASH = EIP712Utils.RECEIPT_TYPEHASH;
 
     uint256 constant NUM_SESSIONS = 120;
 

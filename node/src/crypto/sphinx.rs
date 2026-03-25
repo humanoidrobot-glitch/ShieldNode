@@ -101,15 +101,16 @@ impl SphinxPacket {
         next_hop.copy_from_slice(&decrypted[..32]);
         let inner_payload = decrypted[32..].to_vec();
 
-        // Compute MAC for the inner packet using the same session key.
-        // The next hop will verify with its own session key.
-        let inner_mac = compute_mac(session_key, &next_hop, &inner_payload);
-
+        // The inner packet's MAC was already embedded by create() using the
+        // next hop's session key. We reconstruct the SphinxPacket without
+        // recomputing the MAC — it will be verified when the next hop peels.
+        // For the innermost layer (exit), the MAC is a placeholder that won't
+        // be verified (no further hops).
         let inner_packet = SphinxPacket {
             header: SphinxHeader {
                 next_hop,
                 routing_info: Vec::new(),
-                mac: inner_mac,
+                mac: [0u8; 32], // placeholder — real MAC is in the serialized inner packet
             },
             payload: inner_payload,
         };
@@ -184,8 +185,6 @@ fn verify_mac(
     payload: &[u8],
     expected: &[u8; 32],
 ) -> Result<(), SphinxError> {
-    let computed = compute_mac(session_key, next_hop, payload);
-    // Constant-time comparison via HMAC verify.
     let mut hmac = HmacSha256::new_from_slice(session_key)
         .expect("HMAC accepts any key length");
     hmac.update(next_hop);

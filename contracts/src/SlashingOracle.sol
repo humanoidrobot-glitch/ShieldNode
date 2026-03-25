@@ -363,5 +363,4 @@ contract SlashingOracle is ISlashingOracle {
         return EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
     }
 
-    // _recoverSigner moved to EIP712Utils library.
 }
