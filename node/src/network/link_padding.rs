@@ -77,7 +77,8 @@ impl PeerLink {
         // Jitter ±15% to prevent timing fingerprinting.
         let mut rng = rand::thread_rng();
         let jitter: f64 = rng.gen_range(0.85..1.15);
-        (needed as f64 * jitter) as u32
+        let result = (needed as f64 * jitter) as u32;
+        result.min(target_pps) // never burst more than 1 second's worth
     }
 
     fn record_padding_sent(&mut self, count: u32) {
@@ -87,6 +88,11 @@ impl PeerLink {
 }
 
 /// Manages padding for all peer links.
+///
+/// TODO: Wire add_peer/remove_peer into relay.rs — register peers when
+/// hop-to-hop connections are established, remove on teardown. Currently
+/// the manager starts with zero peers and produces no padding until peers
+/// are registered by the relay forwarding code.
 pub struct LinkPaddingManager {
     peers: HashMap<SocketAddr, PeerLink>,
     target_pps: u32,
@@ -148,12 +154,18 @@ impl LinkPaddingManager {
     }
 }
 
-/// Generate a padding packet (fixed-size, random fill with magic header).
+/// Fill a buffer with a padding packet (fixed-size, random fill with magic header).
+/// Buffer must be at least NORMALIZED_SIZE bytes.
+pub fn fill_padding_packet(buf: &mut [u8; NORMALIZED_SIZE]) {
+    buf[..4].copy_from_slice(&PADDING_MAGIC);
+    rand::thread_rng().fill(&mut buf[4..]);
+}
+
+/// Generate a padding packet on the heap (convenience for tests/one-off use).
 pub fn generate_padding_packet() -> Vec<u8> {
-    let mut packet = vec![0u8; NORMALIZED_SIZE];
-    packet[..4].copy_from_slice(&PADDING_MAGIC);
-    rand::thread_rng().fill(&mut packet[4..]);
-    packet
+    let mut buf = [0u8; NORMALIZED_SIZE];
+    fill_padding_packet(&mut buf);
+    buf.to_vec()
 }
 
 /// Check if a received packet is padding (should be discarded).
@@ -191,16 +203,31 @@ pub async fn link_padding_loop(
             mgr.padding_needed()
         };
 
+        // Send padding using a stack-allocated buffer (no heap alloc per packet).
+        let mut buf = [0u8; NORMALIZED_SIZE];
+        let mut sent_counts: Vec<(SocketAddr, u32)> = Vec::new();
+
         for (addr, count) in &padding_needed {
+            let mut actual_sent = 0u32;
             for _ in 0..*count {
-                let packet = generate_padding_packet();
-                if let Err(e) = socket.send_to(&packet, addr).await {
+                fill_padding_packet(&mut buf);
+                if let Err(e) = socket.send_to(&buf, addr).await {
                     warn!(peer = %addr, error = %e, "failed to send padding packet");
                     break;
                 }
+                actual_sent += 1;
             }
+            if actual_sent > 0 {
+                sent_counts.push((*addr, actual_sent));
+            }
+        }
+
+        // Batch-record all sent counts in a single lock acquisition.
+        if !sent_counts.is_empty() {
             let mut mgr = manager.lock().await;
-            mgr.record_padding_sent(addr, *count);
+            for (addr, count) in &sent_counts {
+                mgr.record_padding_sent(addr, *count);
+            }
         }
     }
 }
