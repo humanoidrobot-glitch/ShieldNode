@@ -11,7 +11,7 @@
 #
 # The resulting hash should match across identical source + toolchain versions.
 
-FROM rust:1.77.0-bookworm AS builder
+FROM rust:1.79.0-bookworm AS builder
 
 # Pin system dependencies for determinism.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Set build environment for reproducibility.
 ENV CARGO_INCREMENTAL=0
-ENV RUSTFLAGS="-C link-arg=-Wl,--build-id=none"
+ENV RUSTFLAGS="-C link-arg=-Wl,--build-id=none -C strip=symbols -C debuginfo=0"
 ENV SOURCE_DATE_EPOCH=0
 
 WORKDIR /build

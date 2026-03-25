@@ -29,37 +29,62 @@ const FLAG_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// Score penalty per flagged node (equivalent to a minor slash).
 pub const LOW_BW_SCORE_PENALTY: f64 = 15.0;
 
+/// Score penalty for traffic volume anomalies (higher — security signal).
+pub const ANOMALY_SCORE_PENALTY: f64 = 25.0;
+
 /// A record of low-bandwidth flags for a single node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NodeReputation {
     /// Timestamps of recent low-bandwidth flags.
     #[serde(skip)]
     flags: Vec<Instant>,
+    /// Timestamps of recent traffic anomaly flags (separate from bandwidth).
+    #[serde(skip)]
+    anomaly_flags: Vec<Instant>,
 }
 
 impl NodeReputation {
     fn new() -> Self {
-        Self { flags: Vec::new() }
+        Self {
+            flags: Vec::new(),
+            anomaly_flags: Vec::new(),
+        }
     }
 
     fn add_flag(&mut self) {
         self.flags.push(Instant::now());
     }
 
-    /// Count flags within the rolling window.
+    fn add_anomaly_flag(&mut self) {
+        self.anomaly_flags.push(Instant::now());
+    }
+
     fn recent_flag_count(&self) -> usize {
         let cutoff = Instant::now() - FLAG_WINDOW;
         self.flags.iter().filter(|&&t| t > cutoff).count()
     }
 
-    /// Evict flags older than the window.
+    fn recent_anomaly_count(&self) -> usize {
+        let cutoff = Instant::now() - FLAG_WINDOW;
+        self.anomaly_flags.iter().filter(|&&t| t > cutoff).count()
+    }
+
     fn evict_stale(&mut self) {
         let cutoff = Instant::now() - FLAG_WINDOW;
         self.flags.retain(|&t| t > cutoff);
+        self.anomaly_flags.retain(|&t| t > cutoff);
     }
 
     fn is_penalized(&self) -> bool {
         self.recent_flag_count() >= FLAG_THRESHOLD
+    }
+
+    fn is_anomaly_penalized(&self) -> bool {
+        self.recent_anomaly_count() >= FLAG_THRESHOLD
+    }
+
+    fn has_any_flags(&self) -> bool {
+        !self.flags.is_empty() || !self.anomaly_flags.is_empty()
     }
 }
 
@@ -110,10 +135,10 @@ impl ReputationCache {
             .nodes
             .entry(relay_node_id.to_string())
             .or_insert_with(NodeReputation::new);
-        rep.add_flag();
+        rep.add_anomaly_flag();
         info!(
             relay_node_id,
-            flags = rep.recent_flag_count(),
+            anomaly_flags = rep.recent_anomaly_count(),
             "traffic volume anomaly flag recorded"
         );
     }
@@ -122,8 +147,12 @@ impl ReputationCache {
     /// penalized, or LOW_BW_SCORE_PENALTY if it has 3+ flags in 24h.
     pub fn score_penalty(&self, node_id: &str) -> f64 {
         match self.nodes.get(node_id) {
-            Some(rep) if rep.is_penalized() => LOW_BW_SCORE_PENALTY,
-            _ => 0.0,
+            Some(rep) => {
+                let bw = if rep.is_penalized() { LOW_BW_SCORE_PENALTY } else { 0.0 };
+                let anomaly = if rep.is_anomaly_penalized() { ANOMALY_SCORE_PENALTY } else { 0.0 };
+                bw.max(anomaly)
+            }
+            None => 0.0,
         }
     }
 
@@ -133,7 +162,7 @@ impl ReputationCache {
             rep.evict_stale();
         }
         // Remove nodes with no remaining flags.
-        self.nodes.retain(|_, rep| !rep.flags.is_empty());
+        self.nodes.retain(|_, rep| rep.has_any_flags());
     }
 
     /// Number of currently penalized nodes.

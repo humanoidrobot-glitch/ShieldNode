@@ -47,9 +47,10 @@ pub struct AttestationReport {
 /// Result of verifying an attestation report.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttestationVerdict {
-    /// Attestation is valid — hardware signature checks out and binary
-    /// hash matches the expected reproducible build.
-    Valid {
+    /// Attestation passes structural validation: correct size, binary hash
+    /// matches expected, report is fresh. Full hardware signature verification
+    /// is TODO (requires platform-specific SDKs: sevctl, Intel DCAP, AWS NSM).
+    StructurallyValid {
         platform: TeePlatform,
         binary_hash: [u8; 32],
     },
@@ -144,7 +145,7 @@ pub fn verify_attestation(
         _ => {}
     }
 
-    AttestationVerdict::Valid {
+    AttestationVerdict::StructurallyValid {
         platform: report.platform.clone(),
         binary_hash: report.binary_hash,
     }
@@ -154,11 +155,13 @@ pub fn verify_attestation(
 mod tests {
     use super::*;
 
+    /// Create a sample attestation with fake report_data.
+    /// Passes structural size check only — no real hardware signature.
     fn sample_report(hash: [u8; 32]) -> AttestationReport {
         AttestationReport {
             platform: TeePlatform::AmdSevSnp,
             binary_hash: hash,
-            report_data: vec![0xAB; 1200], // >1184 bytes
+            report_data: vec![0xAB; 1200], // fake data, >1184 bytes for size check
             timestamp: 1000,
             node_id: "node-1".into(),
         }
@@ -171,7 +174,7 @@ mod tests {
         let verdict = verify_attestation(&report, &hash, 1500);
         assert_eq!(
             verdict,
-            AttestationVerdict::Valid {
+            AttestationVerdict::StructurallyValid {
                 platform: TeePlatform::AmdSevSnp,
                 binary_hash: hash,
             }

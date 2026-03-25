@@ -83,8 +83,10 @@ pub fn analyze_relay_traffic(
     // Check if the relay is sending back significantly more than it received.
     // This could indicate the relay is injecting extra traffic (unlikely attack)
     // or the relay is forwarding exfiltrated data through the circuit (more likely).
-    let divergence = if sent > 0.0 {
-        (received - sent).abs() / sent
+    // Only flag excess: relay sending more than it received indicates exfiltration.
+    // received < sent is normal for asymmetric traffic (downloads, streaming).
+    let divergence = if sent > 0.0 && received > sent {
+        (received - sent) / sent
     } else {
         0.0
     };

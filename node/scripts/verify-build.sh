@@ -16,7 +16,11 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-HASH=$(sha256sum "$BINARY" | awk '{print $1}')
+if command -v sha256sum &>/dev/null; then
+    HASH=$(sha256sum "$BINARY" | awk '{print $1}')
+else
+    HASH=$(shasum -a 256 "$BINARY" | awk '{print $1}')
+fi
 echo "Binary:  $BINARY"
 echo "SHA-256: $HASH"
 

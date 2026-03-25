@@ -55,6 +55,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: shieldnode-relay
+          path: ./artifact
+
       - name: Rebuild and compare hash
         working-directory: node
         run: |
@@ -63,10 +69,15 @@ jobs:
           docker cp verify-extract:/shieldnode ./shieldnode-relay-verify
           docker rm verify-extract
 
-          HASH1=$(sha256sum shieldnode-relay-verify | awk '{print $1}')
-          echo "Verification build hash: ${HASH1}"
+          HASH_BUILD=$(sha256sum ../artifact/shieldnode-relay | awk '{print $1}')
+          HASH_VERIFY=$(sha256sum shieldnode-relay-verify | awk '{print $1}')
 
-          # The two builds should produce identical hashes.
-          # Note: full reproducibility requires identical Docker layer caching.
-          # This verification step confirms the build process is deterministic.
-          echo "VERIFY_HASH=${HASH1}" >> $GITHUB_ENV
+          echo "Build hash:  ${HASH_BUILD}"
+          echo "Verify hash: ${HASH_VERIFY}"
+
+          if [ "$HASH_BUILD" = "$HASH_VERIFY" ]; then
+            echo "MATCH — reproducible build confirmed"
+          else
+            echo "MISMATCH — builds are not reproducible"
+            exit 1
+          fi
