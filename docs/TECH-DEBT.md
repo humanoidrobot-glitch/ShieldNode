@@ -388,3 +388,28 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 **Why deferred:** False-positive rate is near-zero for IPv4/IPv6 tunnel traffic. A proper fix requires a structured Sphinx inner header with a reserved `packet_type` field (similar to Nym's approach), which changes the Sphinx payload format.
 
 **When to fix:** When redesigning the Sphinx payload format (e.g., for Phase 6 batching negotiation flags). Add a 1-byte packet type prefix to all Sphinx inner payloads: `0x00` = data, `0x01` = cover, `0x02` = ratchet-step, etc.
+
+---
+
+## Link Padding (Phase 5)
+
+### Rate calculation logic duplicated between link_padding and cover_traffic
+`PeerLink::padding_needed()` in `node/src/network/link_padding.rs` and `CoverState::cover_needed()` in `client/src-tauri/src/cover_traffic.rs` are structurally identical: window reset → elapsed_secs → current_pps → deficit → ceil → jitter. Only the jitter range differs (±15% vs ±20%).
+
+**Why deferred:** The two implementations live in different crates (node vs client). Extracting a shared `TrafficRateState` requires either a shared crate or duplicating a small utility. The pattern is simple and correct in both sites.
+
+**When to fix:** With the shared crate migration, or when a third rate-tracking consumer appears. Extract to a `TrafficRateState` struct with configurable jitter range.
+
+### Link padding peer discovery not wired
+`LinkPaddingManager.add_peer()`/`remove_peer()` are never called from the relay forwarding code. The manager starts with zero peers and produces no padding even when `link_padding_enabled = true`. The relay listener needs to register peers when hop-to-hop connections are established and remove them on teardown.
+
+**Why deferred:** Documented with a TODO on the struct. Wiring requires changes to relay.rs session management to notify the padding manager of active peer links.
+
+**When to fix:** When integrating link padding into the live relay pipeline. Add `add_peer`/`remove_peer` calls in relay session setup/teardown.
+
+### AtomicBool stop flag instead of CancellationToken in link_padding_loop
+`link_padding_loop` uses `AtomicBool` with `Relaxed` ordering for the stop signal. The node crate doesn't depend on `tokio-util` (which provides `CancellationToken`). The `AtomicBool` pattern requires the loop to finish its current sleep before observing the stop, whereas `CancellationToken` with `tokio::select!` wakes immediately.
+
+**Why deferred:** Adding `tokio-util` to the node crate just for `CancellationToken` is a dependency overhead. The `AtomicBool` pattern works correctly — worst case is one extra 100ms iteration before stop.
+
+**When to fix:** If `tokio-util` is added to the node crate for other reasons. Or replace with a `tokio::sync::Notify` which is already available via tokio.
