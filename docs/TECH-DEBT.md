@@ -413,3 +413,28 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 **Why deferred:** Adding `tokio-util` to the node crate just for `CancellationToken` is a dependency overhead. The `AtomicBool` pattern works correctly — worst case is one extra 100ms iteration before stop.
 
 **When to fix:** If `tokio-util` is added to the node crate for other reasons. Or replace with a `tokio::sync::Notify` which is already available via tokio.
+
+---
+
+## ZK Settlement (Phase 5)
+
+### settlement_mode is stringly-typed (same pattern as cover_traffic)
+`ClientConfig.settlement_mode` is a `String` parsed via `SettlementMode::from_str()` which silently defaults to `Auto` on invalid input. Same issue as `cover_traffic`. Both shadow `std::str::FromStr` without implementing the trait.
+
+**Why deferred:** Same fix needed for both fields — derive `Serialize`/`Deserialize` on the enums, implement `FromStr` with `Result` return. Needs config migration for existing saved files.
+
+**When to fix:** Next config schema cleanup. Do both `CoverLevel` and `SettlementMode` together.
+
+### ZK circuit artifact paths are hardcoded relative paths
+`default_artifacts()` in `settlement.rs` uses paths like `circuits/build/circuit.r1cs` relative to the working directory. This has the same unreliability as the old `current_dir()` config persistence bug. Should use `app_data_dir()` from Tauri or make paths configurable via `ClientConfig`.
+
+**Why deferred:** Circuit artifacts don't exist yet in a deployed context — the paths are only meaningful during development. Production deployment will need a proper artifact distribution mechanism (bundled with the app or fetched from a registry).
+
+**When to fix:** When preparing the ZK pipeline for production. Add an `artifacts_path` field to `ClientConfig` or use Tauri's resource directory for bundled artifacts.
+
+### receipt_data parameter unused in ZK settlement path
+`settle_session()` takes `receipt_data: Vec<u8>` which is always ABI-encoded before the mode is checked. In ZK mode the receipt_data is unused — the ZK path needs a different witness format. The encoding work is wasted when ZK is configured exclusively.
+
+**Why deferred:** The ZK witness construction isn't wired yet. Once it is, the function signature will need to accept either a plaintext receipt or a ZK witness, not a raw `Vec<u8>`.
+
+**When to fix:** When wiring the full ZK witness construction. Refactor to accept an enum `SettlementData { Plaintext(Vec<u8>), ZkWitness(ReceiptWitness) }` or split into two distinct functions.
