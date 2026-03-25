@@ -1,3 +1,4 @@
+pub mod attestation;
 pub mod chain;
 pub mod discovery;
 pub mod heartbeat;

@@ -1,0 +1,47 @@
+# Reproducible build environment for the ShieldNode relay node.
+#
+# Produces a deterministic binary hash from the same source + toolchain.
+# Required for TEE attestation: the attestation proves "this code is running
+# in an enclave" and the client checks the binary hash matches this build.
+#
+# Usage:
+#   docker build -f Dockerfile.reproducible -t shieldnode-build .
+#   docker run --rm shieldnode-build cat /build/target/release/shieldnode > shieldnode
+#   sha256sum shieldnode
+#
+# The resulting hash should match across identical source + toolchain versions.
+
+FROM rust:1.77.0-bookworm AS builder
+
+# Pin system dependencies for determinism.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set build environment for reproducibility.
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS="-C link-arg=-Wl,--build-id=none"
+ENV SOURCE_DATE_EPOCH=0
+
+WORKDIR /build
+
+# Copy dependency manifests first (cache layer).
+COPY Cargo.toml Cargo.lock ./
+
+# Create a dummy main.rs to build dependencies.
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release 2>/dev/null || true
+
+# Copy actual source.
+COPY src/ src/
+
+# Touch main.rs to force rebuild of our code (not deps).
+RUN touch src/main.rs
+
+# Build the release binary.
+RUN cargo build --release
+
+# Output stage — minimal image with just the binary.
+FROM debian:bookworm-slim
+COPY --from=builder /build/target/release/shieldnode /shieldnode
+ENTRYPOINT ["/shieldnode"]

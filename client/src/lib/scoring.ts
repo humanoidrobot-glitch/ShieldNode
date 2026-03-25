@@ -19,6 +19,7 @@ export function scoreNode(node: NodeInfo): number {
   const priceScore = 0.001 * node.pricePerByte;
   const slashScore = 15 * node.slashCount ** 2;
   const completionScore = 15 * (node.completionRate ?? 1.0);
+  const teeBonus = node.teeAttested ? 20 : 0;
 
-  return stakeScore + uptimeScore - priceScore - slashScore + completionScore;
+  return stakeScore + uptimeScore - priceScore - slashScore + completionScore + teeBonus;
 }

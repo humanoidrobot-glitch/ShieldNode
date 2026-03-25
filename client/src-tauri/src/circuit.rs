@@ -30,6 +30,9 @@ pub struct NodeInfo {
     /// Geographic region code (optional, from registry metadata).
     #[serde(default)]
     pub region: Option<String>,
+    /// Whether this node has a valid TEE attestation.
+    #[serde(default)]
+    pub tee_attested: bool,
 }
 
 fn default_completion_rate() -> f64 {
@@ -254,8 +257,9 @@ pub fn score_node(node: &NodeInfo) -> f64 {
     let price_score = 0.001 * node.price_per_byte as f64;
     let slash_score = 15.0 * (node.slash_count as f64).powi(2);
     let completion_score = 15.0 * node.completion_rate;
+    let tee_bonus = if node.tee_attested { 20.0 } else { 0.0 };
 
-    stake_score + uptime_score - price_score - slash_score + completion_score
+    stake_score + uptime_score - price_score - slash_score + completion_score + tee_bonus
 }
 
 /// Select a three-hop circuit (entry, relay, exit) via weighted random sampling.
@@ -409,6 +413,7 @@ mod tests {
             operator_address: String::new(),
             asn: None,
             region: None,
+            tee_attested: false,
         }
     }
 

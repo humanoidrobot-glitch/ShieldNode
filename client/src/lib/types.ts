@@ -10,6 +10,7 @@ export interface NodeInfo {
   operatorAddress?: string;
   asn?: number;
   region?: string;
+  teeAttested?: boolean;
 }
 
 export interface SessionInfo {

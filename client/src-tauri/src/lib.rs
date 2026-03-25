@@ -780,9 +780,10 @@ pub(crate) fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
         price_per_byte: n.price_per_byte as u64,
         slash_count: n.slash_count,
         completion_rate: 1.0,
-        operator_address: String::new(), // populated when owner is read from registry
+        operator_address: String::new(),
         asn: None,
         region: None,
+        tee_attested: false, // enriched by attestation verification
     }
 }
 
@@ -904,6 +905,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             operator_address: "0xOp1".to_string(),
             asn: Some(13335),
             region: Some("EU-WEST".to_string()),
+            tee_attested: true,
         },
         NodeInfo {
             node_id: "node-beta-002".to_string(),
@@ -917,6 +919,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             operator_address: "0xOp2".to_string(),
             asn: Some(16509),
             region: Some("US-EAST".to_string()),
+            tee_attested: false,
         },
         NodeInfo {
             node_id: "node-gamma-003".to_string(),
@@ -930,6 +933,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             operator_address: "0xOp3".to_string(),
             asn: Some(20473),
             region: Some("EU-CENTRAL".to_string()),
+            tee_attested: false,
         },
         NodeInfo {
             node_id: "node-delta-004".to_string(),
@@ -943,6 +947,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             operator_address: "0xOp4".to_string(),
             asn: Some(14618),
             region: Some("ASIA-EAST".to_string()),
+            tee_attested: true,
         },
         NodeInfo {
             node_id: "node-epsilon-005".to_string(),
@@ -956,6 +961,7 @@ fn mock_nodes() -> Vec<NodeInfo> {
             operator_address: "0xOp5".to_string(),
             asn: Some(24940),
             region: Some("US-WEST".to_string()),
+            tee_attested: false,
         },
     ]
 }

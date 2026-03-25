@@ -103,6 +103,21 @@ impl ReputationCache {
         }
     }
 
+    /// Record a suspicious traffic volume verdict for a relay node.
+    /// Treated the same as a low-bandwidth flag — 3 verdicts in 24h = penalized.
+    pub fn record_traffic_anomaly(&mut self, relay_node_id: &str) {
+        let rep = self
+            .nodes
+            .entry(relay_node_id.to_string())
+            .or_insert_with(NodeReputation::new);
+        rep.add_flag();
+        info!(
+            relay_node_id,
+            flags = rep.recent_flag_count(),
+            "traffic volume anomaly flag recorded"
+        );
+    }
+
     /// Get the score penalty for a node. Returns 0.0 if the node is not
     /// penalized, or LOW_BW_SCORE_PENALTY if it has 3+ flags in 24h.
     pub fn score_penalty(&self, node_id: &str) -> f64 {
@@ -264,6 +279,7 @@ mod tests {
                 operator_address: format!("0xOp{i}"),
                 asn: None,
                 region: None,
+                tee_attested: false,
             })
             .collect();
         let flagged = cache.detect_stake_clusters(&nodes);
@@ -288,6 +304,7 @@ mod tests {
                 operator_address: format!("0xOp{i}"),
                 asn: None,
                 region: None,
+                tee_attested: false,
             })
             .collect();
         let flagged = cache.detect_stake_clusters(&nodes);
