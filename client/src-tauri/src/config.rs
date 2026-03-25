@@ -25,6 +25,9 @@ pub struct ClientConfig {
     /// Refuse to connect if active node count is below the safety threshold.
     pub strict_network_size: bool,
 
+    /// Cover traffic level: "off", "low" (10 pps), "high" (50 pps).
+    pub cover_traffic: String,
+
     /// Node IDs the user prefers to connect through.
     pub preferred_nodes: Vec<String>,
 
@@ -44,6 +47,7 @@ impl Default for ClientConfig {
             kill_switch: true,
             gas_price_ceiling_gwei: 5.0,
             strict_network_size: false,
+            cover_traffic: "low".to_string(),
             preferred_nodes: Vec::new(),
             operator_private_key: None,
         }
@@ -60,6 +64,7 @@ pub struct SettingsPayload {
     pub kill_switch: bool,
     pub gas_price_ceiling_gwei: f64,
     pub strict_network_size: bool,
+    pub cover_traffic: String,
     pub preferred_nodes: Vec<String>,
 }
 
@@ -73,6 +78,7 @@ impl From<&ClientConfig> for SettingsPayload {
             kill_switch: cfg.kill_switch,
             gas_price_ceiling_gwei: cfg.gas_price_ceiling_gwei,
             strict_network_size: cfg.strict_network_size,
+            cover_traffic: cfg.cover_traffic.clone(),
             preferred_nodes: cfg.preferred_nodes.clone(),
         }
     }
@@ -88,6 +94,7 @@ impl ClientConfig {
         self.kill_switch = s.kill_switch;
         self.gas_price_ceiling_gwei = s.gas_price_ceiling_gwei;
         self.strict_network_size = s.strict_network_size;
+        self.cover_traffic = s.cover_traffic.clone();
         self.preferred_nodes = s.preferred_nodes.clone();
     }
 

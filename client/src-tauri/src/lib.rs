@@ -2,6 +2,7 @@ mod aead;
 mod chain;
 pub mod circuit;
 mod config;
+mod cover_traffic;
 mod health_monitor;
 mod hop_codec;
 mod kex;
@@ -67,6 +68,10 @@ pub struct AppState {
     pub health_cancel: Mutex<Option<CancellationToken>>,
     /// Local node reputation cache (low-bandwidth flags).
     pub reputation: Arc<Mutex<reputation::ReputationCache>>,
+    /// Cancel token for the cover traffic generator.
+    pub cover_cancel: Mutex<Option<CancellationToken>>,
+    /// Real packet counter (shared with cover traffic generator).
+    pub real_packet_counter: Arc<Mutex<u64>>,
     /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
     pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
 }
@@ -89,6 +94,8 @@ impl Default for AppState {
                 std::collections::HashMap::new(),
                 std::time::Instant::now() - std::time::Duration::from_secs(600),
             ))),
+            cover_cancel: Mutex::new(None),
+            real_packet_counter: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -262,6 +269,25 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         info!("circuit health monitor started");
     }
 
+    // Spawn cover traffic generator.
+    {
+        let cover_level = {
+            let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+            cover_traffic::CoverLevel::from_str(&cfg.cover_traffic)
+        };
+        let cancel = CancellationToken::new();
+        {
+            let mut cc = state.cover_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+            *cc = Some(cancel.clone());
+        }
+        tokio::spawn(cover_traffic::cover_traffic_loop(
+            cancel,
+            cover_level,
+            Arc::clone(&state.circuit),
+            Arc::clone(&state.real_packet_counter),
+        ));
+    }
+
     // Spawn circuit auto-rotation background task if enabled and multi-hop.
     if hop_count == 3 {
         let (auto_rotate, interval_secs) = {
@@ -300,9 +326,10 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
-    // 0. Cancel background tasks (rotation + health monitor).
+    // 0. Cancel background tasks.
     stop_rotation(&state)?;
     stop_health_monitor(&state)?;
+    stop_cover_traffic(&state)?;
 
     // 1. Get session state (session_id, bytes_used) and exit endpoint.
     let (session_id_str, bytes_used, exit_endpoint) = {
@@ -636,6 +663,19 @@ fn stop_health_monitor(state: &AppState) -> Result<(), String> {
     if let Some(token) = hc.take() {
         token.cancel();
         info!("health monitor task cancelled");
+    }
+    Ok(())
+}
+
+/// Cancel the background cover traffic task, if any.
+fn stop_cover_traffic(state: &AppState) -> Result<(), String> {
+    let mut cc = state
+        .cover_cancel
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+    if let Some(token) = cc.take() {
+        token.cancel();
+        info!("cover traffic task cancelled");
     }
     Ok(())
 }

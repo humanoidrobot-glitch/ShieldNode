@@ -9,6 +9,7 @@ interface SettingsPayload {
   kill_switch: boolean;
   gas_price_ceiling_gwei: number;
   strict_network_size: boolean;
+  cover_traffic: string;
   preferred_nodes: string[];
 }
 
@@ -20,6 +21,7 @@ interface SettingsState {
   killSwitch: boolean;
   gasCeiling: number;
   strictNetwork: boolean;
+  coverTraffic: string;
   pinnedEntry: string;
   pinnedRelay: string;
   pinnedExit: string;
@@ -35,6 +37,7 @@ function toLocal(p: SettingsPayload): SettingsState {
     killSwitch: p.kill_switch,
     gasCeiling: p.gas_price_ceiling_gwei,
     strictNetwork: p.strict_network_size,
+    coverTraffic: p.cover_traffic,
     pinnedEntry: p.preferred_nodes[0] || "",
     pinnedRelay: p.preferred_nodes[1] || "",
     pinnedExit: p.preferred_nodes[2] || "",
@@ -51,6 +54,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     kill_switch: s.killSwitch,
     gas_price_ceiling_gwei: s.gasCeiling,
     strict_network_size: s.strictNetwork,
+    cover_traffic: s.coverTraffic,
     preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit],
   };
 }
@@ -98,6 +102,7 @@ export function Settings() {
     killSwitch: true,
     gasCeiling: 10,
     strictNetwork: false,
+    coverTraffic: "low",
     pinnedEntry: "",
     pinnedRelay: "",
     pinnedExit: "",
@@ -196,6 +201,25 @@ export function Settings() {
         checked={settings.strictNetwork}
         onChange={(v) => update("strictNetwork", v)}
       />
+
+      <div>
+        <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+          Cover traffic
+        </label>
+        <select
+          value={settings.coverTraffic}
+          onChange={(e) => update("coverTraffic", e.target.value)}
+          className="w-full px-3 py-2 rounded text-sm"
+          style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+        >
+          <option value="off">Off (no overhead)</option>
+          <option value="low">Low — 10 pps (~1.1 GB/day)</option>
+          <option value="high">High — 50 pps (~5.5 GB/day)</option>
+        </select>
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+          Prevents timing-based activity detection
+        </p>
+      </div>
 
       <div>
         <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
