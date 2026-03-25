@@ -242,3 +242,113 @@ async fn rebuild_circuit(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Scenario 1: Node drops after accepting circuit ──────────────
+
+    #[test]
+    fn silent_drop_detected_after_zero_data_streak() {
+        let mut state = HealthState::new();
+
+        // Simulate 6 samples with zero bytes (node accepted but never sends).
+        for _ in 0..ZERO_DATA_FAIL_COUNT - 1 {
+            assert!(!state.sample_throughput(0), "should not trigger yet");
+        }
+        // The 6th zero-data sample triggers rebuild.
+        assert!(state.sample_throughput(0), "should trigger rebuild on zero-data streak");
+    }
+
+    #[test]
+    fn zero_data_streak_resets_on_any_data() {
+        let mut state = HealthState::new();
+
+        // Build up 5 zero-data samples (one short of threshold).
+        for _ in 0..ZERO_DATA_FAIL_COUNT - 1 {
+            state.sample_throughput(0);
+        }
+        assert_eq!(state.zero_data_streak, ZERO_DATA_FAIL_COUNT - 1);
+
+        // Any data resets the streak.
+        state.sample_throughput(1000);
+        assert_eq!(state.zero_data_streak, 0);
+    }
+
+    // ── Scenario 2: Node throttles to near-zero bandwidth ───────────
+
+    #[test]
+    fn low_throughput_triggers_after_sustained_period() {
+        let mut state = HealthState::new();
+
+        // First sample with some data establishes baseline.
+        state.sample_throughput(100_000);
+
+        // Next samples show tiny increase (low bps). Each counts as 1 low-throughput sample.
+        // Need THROUGHPUT_FAIL_COUNT (3) consecutive low samples to trigger.
+        for i in 0..THROUGHPUT_FAIL_COUNT - 1 {
+            let bytes = 100_001 + i as u64;
+            let needs_rebuild = state.sample_throughput(bytes);
+            assert!(!needs_rebuild, "should not trigger on sample {i} (streak={})", i + 1);
+        }
+
+        // One more low-throughput sample hits the threshold.
+        let needs_rebuild = state.sample_throughput(100_001 + THROUGHPUT_FAIL_COUNT as u64);
+        assert!(needs_rebuild, "should trigger after {THROUGHPUT_FAIL_COUNT} consecutive low samples");
+    }
+
+    #[test]
+    fn low_throughput_streak_resets_on_good_throughput() {
+        let mut state = HealthState::new();
+        state.sample_throughput(1000);
+
+        // Build up low-throughput streak.
+        state.sample_throughput(1001);
+        assert!(state.low_throughput_streak > 0);
+
+        // Big jump in data resets the streak (high bps).
+        state.sample_throughput(2_000_000);
+        assert_eq!(state.low_throughput_streak, 0);
+    }
+
+    // ── Scenario 3: Rebuild resets all state ─────────────────────────
+
+    #[test]
+    fn record_rebuild_resets_counters() {
+        let mut state = HealthState::new();
+        state.low_throughput_streak = 5;
+        state.zero_data_streak = 4;
+        state.last_bytes = 999;
+
+        state.record_rebuild();
+
+        assert_eq!(state.low_throughput_streak, 0);
+        assert_eq!(state.zero_data_streak, 0);
+        assert_eq!(state.last_bytes, 0);
+        assert_eq!(state.rebuild_count, 1);
+    }
+
+    #[test]
+    fn rebuild_count_increments() {
+        let mut state = HealthState::new();
+        state.record_rebuild();
+        state.record_rebuild();
+        state.record_rebuild();
+        assert_eq!(state.rebuild_count, 3);
+    }
+
+    // ── Scenario 4: Normal traffic never triggers ────────────────────
+
+    #[test]
+    fn healthy_circuit_never_triggers() {
+        let mut state = HealthState::new();
+
+        // Simulate 100 samples of healthy traffic (~1MB per 5s = 200 KB/s).
+        for i in 0..100u64 {
+            let bytes = i * 1_000_000;
+            assert!(!state.sample_throughput(bytes));
+        }
+        assert_eq!(state.rebuild_count, 0);
+    }
+}

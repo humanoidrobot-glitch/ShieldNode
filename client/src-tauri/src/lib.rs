@@ -1,13 +1,13 @@
 mod aead;
 mod chain;
-mod circuit;
+pub mod circuit;
 mod config;
 mod health_monitor;
 mod hop_codec;
 mod kex;
 mod kill_switch;
 mod receipts;
-mod reputation;
+pub mod reputation;
 mod sphinx;
 mod tunnel;
 mod wallet;

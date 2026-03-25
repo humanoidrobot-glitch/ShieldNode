@@ -131,7 +131,7 @@ Security audits, hardening, and public deployment.
 - [ ] ZK settlement as default for privacy-conscious users, plaintext settlement as fallback
 - [ ] Documentation site: how to run a node, use the client, verify the contracts
 - [ ] **Operator security guide** — Recommend smart contract wallets (Safe) with PQ-upgradeable signature verification for node staking keys, rather than raw EOAs. Document Ethereum's PQ migration path (account abstraction) so operators are prepared
-- [ ] **Anti-griefing testing** — Adversarial test suite: simulate nodes that accept circuits then drop after N seconds, nodes that throttle bandwidth to near-zero, and nodes that selectively drop traffic to specific destinations. Verify the circuit health monitor rebuilds within 20s, completion scoring deprioritizes bad nodes within 3 sessions, and the low-bandwidth flag triggers within 24 hours. Run as part of CI on every PR touching client circuit or scoring code.
+- [x] **Anti-griefing testing** — Adversarial test suite: simulate nodes that accept circuits then drop after N seconds, nodes that throttle bandwidth to near-zero, and nodes that selectively drop traffic to specific destinations. Verify the circuit health monitor rebuilds within 20s, completion scoring deprioritizes bad nodes within 3 sessions, and the low-bandwidth flag triggers within 24 hours. Run as part of CI on every PR touching client circuit or scoring code.
 - [ ] At least 10 independently operated nodes live before public client release
 
 ### Anti-Logging: Hardware & Environmental Hardening
