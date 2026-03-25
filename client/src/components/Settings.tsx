@@ -10,6 +10,7 @@ interface SettingsPayload {
   gas_price_ceiling_gwei: number;
   strict_network_size: boolean;
   cover_traffic: string;
+  settlement_mode: string;
   preferred_nodes: string[];
 }
 
@@ -22,6 +23,7 @@ interface SettingsState {
   gasCeiling: number;
   strictNetwork: boolean;
   coverTraffic: string;
+  settlementMode: string;
   pinnedEntry: string;
   pinnedRelay: string;
   pinnedExit: string;
@@ -38,6 +40,7 @@ function toLocal(p: SettingsPayload): SettingsState {
     gasCeiling: p.gas_price_ceiling_gwei,
     strictNetwork: p.strict_network_size,
     coverTraffic: p.cover_traffic,
+    settlementMode: p.settlement_mode,
     pinnedEntry: p.preferred_nodes[0] || "",
     pinnedRelay: p.preferred_nodes[1] || "",
     pinnedExit: p.preferred_nodes[2] || "",
@@ -55,6 +58,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     gas_price_ceiling_gwei: s.gasCeiling,
     strict_network_size: s.strictNetwork,
     cover_traffic: s.coverTraffic,
+    settlement_mode: s.settlementMode,
     preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit],
   };
 }
@@ -103,6 +107,7 @@ export function Settings() {
     gasCeiling: 10,
     strictNetwork: false,
     coverTraffic: "low",
+    settlementMode: "auto",
     pinnedEntry: "",
     pinnedRelay: "",
     pinnedExit: "",
@@ -218,6 +223,25 @@ export function Settings() {
         </select>
         <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
           Prevents timing-based activity detection
+        </p>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+          Settlement mode
+        </label>
+        <select
+          value={settings.settlementMode}
+          onChange={(e) => update("settlementMode", e.target.value)}
+          className="w-full px-3 py-2 rounded text-sm"
+          style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+        >
+          <option value="auto">Auto (ZK if available, plaintext fallback)</option>
+          <option value="zk">ZK only (privacy-preserving)</option>
+          <option value="plaintext">Plaintext only (legacy)</option>
+        </select>
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+          ZK hides session metadata on-chain
         </p>
       </div>
 

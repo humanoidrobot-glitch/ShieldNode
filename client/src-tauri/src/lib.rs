@@ -9,6 +9,7 @@ mod kex;
 mod kill_switch;
 mod receipts;
 pub mod reputation;
+mod settlement;
 mod sphinx;
 mod tunnel;
 mod wallet;
@@ -422,8 +423,20 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         tun.stop_tunnel()?;
     }
 
-    // 7. Call settle_session with the real receipt.
-    let tx_hash = wallet::settle_session(&wallet_cfg, session_id, receipt_data).await?;
+    // 7. Settle via configured mode (ZK or plaintext).
+    let settlement_mode = {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        settlement::SettlementMode::from_str(&cfg.settlement_mode)
+    };
+    let result = settlement::settle_session(
+        settlement_mode,
+        &wallet_cfg,
+        session_id,
+        receipt_data,
+    )
+    .await?;
+    let tx_hash = result.tx_hash;
+    info!(method = result.method, "session settled via {}", result.method);
 
     // Capture circuit node IDs for reputation tracking before clearing.
     let circuit_node_ids: Vec<String> = {

@@ -28,6 +28,9 @@ pub struct ClientConfig {
     /// Cover traffic level: "off", "low" (10 pps), "high" (50 pps).
     pub cover_traffic: String,
 
+    /// Settlement mode: "zk" (privacy-preserving), "plaintext" (legacy), "auto" (ZK if available).
+    pub settlement_mode: String,
+
     /// Node IDs the user prefers to connect through.
     pub preferred_nodes: Vec<String>,
 
@@ -48,6 +51,7 @@ impl Default for ClientConfig {
             gas_price_ceiling_gwei: 5.0,
             strict_network_size: false,
             cover_traffic: "low".to_string(),
+            settlement_mode: "auto".to_string(),
             preferred_nodes: Vec::new(),
             operator_private_key: None,
         }
@@ -65,6 +69,7 @@ pub struct SettingsPayload {
     pub gas_price_ceiling_gwei: f64,
     pub strict_network_size: bool,
     pub cover_traffic: String,
+    pub settlement_mode: String,
     pub preferred_nodes: Vec<String>,
 }
 
@@ -79,6 +84,7 @@ impl From<&ClientConfig> for SettingsPayload {
             gas_price_ceiling_gwei: cfg.gas_price_ceiling_gwei,
             strict_network_size: cfg.strict_network_size,
             cover_traffic: cfg.cover_traffic.clone(),
+            settlement_mode: cfg.settlement_mode.clone(),
             preferred_nodes: cfg.preferred_nodes.clone(),
         }
     }
@@ -95,6 +101,7 @@ impl ClientConfig {
         self.gas_price_ceiling_gwei = s.gas_price_ceiling_gwei;
         self.strict_network_size = s.strict_network_size;
         self.cover_traffic = s.cover_traffic.clone();
+        self.settlement_mode = s.settlement_mode.clone();
         self.preferred_nodes = s.preferred_nodes.clone();
     }
 
