@@ -70,6 +70,15 @@ pub struct NodeConfig {
     /// TUN device subnet prefix length.
     #[serde(default = "default_tun_netmask")]
     pub tun_netmask: u8,
+
+    /// Enable inter-node link padding (constant-rate between relay peers).
+    /// Significant bandwidth cost — only for high-bandwidth nodes.
+    #[serde(default)]
+    pub link_padding_enabled: bool,
+
+    /// Link padding target rate in packets per second per peer link.
+    #[serde(default = "default_link_padding_pps")]
+    pub link_padding_pps: u32,
 }
 
 // ── serde default helpers ──────────────────────────────────────────────
@@ -110,6 +119,9 @@ fn default_tun_address() -> String {
 fn default_tun_netmask() -> u8 {
     24
 }
+fn default_link_padding_pps() -> u32 {
+    50
+}
 
 // ── impl ───────────────────────────────────────────────────────────────
 
@@ -132,6 +144,8 @@ impl Default for NodeConfig {
             operator_private_key: None,
             tun_address: default_tun_address(),
             tun_netmask: default_tun_netmask(),
+            link_padding_enabled: false,
+            link_padding_pps: default_link_padding_pps(),
         }
     }
 }
