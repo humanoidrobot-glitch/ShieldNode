@@ -8,6 +8,7 @@ interface SettingsPayload {
   circuit_rotation_interval_secs: number;
   kill_switch: boolean;
   gas_price_ceiling_gwei: number;
+  strict_network_size: boolean;
   preferred_nodes: string[];
 }
 
@@ -18,6 +19,7 @@ interface SettingsState {
   rotationIntervalMin: number;
   killSwitch: boolean;
   gasCeiling: number;
+  strictNetwork: boolean;
   pinnedEntry: string;
   pinnedRelay: string;
   pinnedExit: string;
@@ -32,6 +34,7 @@ function toLocal(p: SettingsPayload): SettingsState {
     rotationIntervalMin: Math.round(p.circuit_rotation_interval_secs / 60),
     killSwitch: p.kill_switch,
     gasCeiling: p.gas_price_ceiling_gwei,
+    strictNetwork: p.strict_network_size,
     pinnedEntry: p.preferred_nodes[0] || "",
     pinnedRelay: p.preferred_nodes[1] || "",
     pinnedExit: p.preferred_nodes[2] || "",
@@ -47,6 +50,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     circuit_rotation_interval_secs: s.rotationIntervalMin * 60,
     kill_switch: s.killSwitch,
     gas_price_ceiling_gwei: s.gasCeiling,
+    strict_network_size: s.strictNetwork,
     preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit],
   };
 }
@@ -93,6 +97,7 @@ export function Settings() {
     rotationIntervalMin: 10,
     killSwitch: true,
     gasCeiling: 10,
+    strictNetwork: false,
     pinnedEntry: "",
     pinnedRelay: "",
     pinnedExit: "",
@@ -183,6 +188,13 @@ export function Settings() {
         description="Block traffic if VPN disconnects"
         checked={settings.killSwitch}
         onChange={(v) => update("killSwitch", v)}
+      />
+
+      <Toggle
+        label="Strict network size"
+        description="Refuse to connect if fewer than 20 active nodes"
+        checked={settings.strictNetwork}
+        onChange={(v) => update("strictNetwork", v)}
       />
 
       <div>

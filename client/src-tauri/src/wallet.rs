@@ -111,16 +111,16 @@ pub async fn settle_session(
 }
 
 /// Fetch the current gas price in Gwei.
-pub async fn get_gas_price(rpc_url: &str) -> Result<u64, String> {
+pub async fn get_gas_price(rpc_url: &str) -> Result<f64, String> {
     let url: url::Url = rpc_url.parse()
         .map_err(|e| format!("invalid RPC URL: {e}"))?;
     let provider = ProviderBuilder::new().connect_http(url);
 
     match provider.get_gas_price().await {
-        Ok(gas_price_wei) => Ok((gas_price_wei / 1_000_000_000) as u64),
+        Ok(gas_price_wei) => Ok(gas_price_wei as f64 / 1e9),
         Err(e) => {
             info!(error = %e, "RPC gas price fetch failed, returning fallback");
-            Ok(20)
+            Ok(20.0)
         }
     }
 }

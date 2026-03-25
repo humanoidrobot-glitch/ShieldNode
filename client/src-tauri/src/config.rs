@@ -22,6 +22,9 @@ pub struct ClientConfig {
     /// Maximum gas price (in gwei) the client is willing to pay.
     pub gas_price_ceiling_gwei: f64,
 
+    /// Refuse to connect if active node count is below the safety threshold.
+    pub strict_network_size: bool,
+
     /// Node IDs the user prefers to connect through.
     pub preferred_nodes: Vec<String>,
 
@@ -40,6 +43,7 @@ impl Default for ClientConfig {
             circuit_rotation_interval_secs: 600,
             kill_switch: true,
             gas_price_ceiling_gwei: 5.0,
+            strict_network_size: false,
             preferred_nodes: Vec::new(),
             operator_private_key: None,
         }
@@ -55,6 +59,7 @@ pub struct SettingsPayload {
     pub circuit_rotation_interval_secs: u64,
     pub kill_switch: bool,
     pub gas_price_ceiling_gwei: f64,
+    pub strict_network_size: bool,
     pub preferred_nodes: Vec<String>,
 }
 
@@ -67,6 +72,7 @@ impl From<&ClientConfig> for SettingsPayload {
             circuit_rotation_interval_secs: cfg.circuit_rotation_interval_secs,
             kill_switch: cfg.kill_switch,
             gas_price_ceiling_gwei: cfg.gas_price_ceiling_gwei,
+            strict_network_size: cfg.strict_network_size,
             preferred_nodes: cfg.preferred_nodes.clone(),
         }
     }
@@ -81,6 +87,7 @@ impl ClientConfig {
         self.circuit_rotation_interval_secs = s.circuit_rotation_interval_secs;
         self.kill_switch = s.kill_switch;
         self.gas_price_ceiling_gwei = s.gas_price_ceiling_gwei;
+        self.strict_network_size = s.strict_network_size;
         self.preferred_nodes = s.preferred_nodes.clone();
     }
 

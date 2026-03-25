@@ -188,9 +188,8 @@ impl ChainReader {
         Ok(nodes)
     }
 
-    /// Fetch the current gas price from the RPC provider and return it in
-    /// Gwei (rounded down).
-    pub async fn get_gas_price(&self) -> Result<u64, String> {
+    /// Fetch the current gas price from the RPC provider and return it in Gwei.
+    pub async fn get_gas_price(&self) -> Result<f64, String> {
         let url: url::Url = self
             .rpc_url
             .parse()
@@ -203,11 +202,11 @@ impl ChainReader {
             .await
             .map_err(|e| format!("get_gas_price RPC failed: {e}"))?;
 
-        // Convert wei to gwei (1 gwei = 1e9 wei).
-        let gas_price_gwei = gas_price_wei / 1_000_000_000;
+        // Convert wei to gwei (1 gwei = 1e9 wei). Use f64 for sub-Gwei precision.
+        let gas_price_gwei = gas_price_wei as f64 / 1e9;
 
         info!(gas_price_gwei, gas_price_wei, "fetched gas price from RPC");
-        Ok(gas_price_gwei as u64)
+        Ok(gas_price_gwei)
     }
 
     /// Fetch per-node session completion rates from on-chain settlement events.

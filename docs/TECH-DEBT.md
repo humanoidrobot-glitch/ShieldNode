@@ -185,12 +185,8 @@ Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't c
 
 ## Frontend
 
-### Config persistence uses current_dir()
-`update_settings` in `lib.rs` saves to `std::env::current_dir().join("shieldnode-client.json")`. The working directory is unpredictable at runtime — it depends on how the binary is launched. Should use Tauri's `app_config_dir()` for the OS-appropriate user config directory.
-
-**Why deferred:** Requires threading `AppHandle` through to the `update_settings` command, which is a structural change to how the function accesses Tauri APIs.
-
-**When to fix:** Before Phase 5. Use `app.path().app_config_dir()` from Tauri v2 path API.
+### ~~Config persistence uses current_dir()~~ — RESOLVED
+Resolved: `update_settings` now uses `app.path().app_config_dir()` via Tauri's `AppHandle`. Config saved to OS-appropriate directory.
 
 ---
 
@@ -221,12 +217,8 @@ Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't c
 
 ## ZK Settlement (Phase 4)
 
-### ZK recipient addresses not verified against commitments
-`ZKSettlement.settleWithProof()` accepts `entryAddr`, `relayAddr`, `exitAddr`, `refundAddr` as plain parameters but does not verify they match the Poseidon commitments in the proof's public signals. A caller could submit a valid proof but route payments to different addresses.
-
-**Why deferred:** Poseidon hashes cannot be verified on-chain with keccak256. Fixing requires either: (a) a Poseidon precompile/library on-chain, (b) making individual payment amounts public signals and having the contract compute commitments, or (c) redesigning the circuit to output addresses as public signals.
-
-**When to fix:** Before Phase 5 mainnet launch. Option (b) is the most practical — add `entryPay`, `relayPay`, `exitPay`, `refundAmount` as public circuit outputs and verify the split on-chain against those values.
+### ~~ZK recipient addresses not verified against commitments~~ — RESOLVED
+Resolved: Circuit now outputs `entryPay`, `relayPay`, `exitPay`, `refund` as public signals. `ZKSettlement.sol` reads proven amounts from public signals instead of recomputing the split, and verifies `entryPay + relayPay + exitPay == totalPayment`.
 
 ### ~~EIP-712 digest computed off-circuit~~ — RESOLVED
 Resolved: EIP-712 digest is now computed entirely in-circuit via two keccak256 calls (~300K constraints, ~9% increase). No external trust required.
@@ -259,23 +251,15 @@ Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both contrac
 
 **When to fix:** If batch settlements or retry logic make multiple proofs common. Cache the `ProvingKey` in `AppState` via `Arc<OnceCell<ProvingKey<Bn254>>>`.
 
-### Gas price display units
-The Rust backend returns gas price as `u64` in Gwei. The frontend displays it directly. If gas is sub-1-Gwei (common on Sepolia), it shows as 0.
-
-**Why deferred:** Cosmetic issue. Sepolia gas is effectively free.
-
-**When to fix:** Phase 4, when gas price awareness becomes a real UX feature for mainnet users. Return as `f64` or use wei with frontend conversion.
+### ~~Gas price display units~~ — RESOLVED
+Resolved: Backend now returns gas price as `f64` in Gwei. Sub-Gwei values (e.g., 0.15 Gwei) display correctly. Frontend `.toFixed(2)` handles precision.
 
 ---
 
 ## Anti-Collusion (Phase 4)
 
-### Strict mode for minimum network size guard
-The `connect()` function warns when active nodes < 20 but always proceeds. The ROADMAP specifies "refuse to connect in strict mode." Strict mode needs a `strict_mode: bool` field in `ClientConfig` / `SettingsPayload`, a UI toggle in Settings, and `connect()` returning `Err(...)` when `nodes.len() < MINIMUM_NETWORK_SIZE && strict_mode`.
-
-**Why deferred:** Requires config schema change + UI work. The warning log is sufficient during development.
-
-**When to fix:** Before Phase 5 mainnet launch. Users on a small network should have the option to refuse connection.
+### ~~Strict mode for minimum network size guard~~ — RESOLVED
+Resolved: `strict_network_size` config field + Settings UI toggle. When enabled and nodes < 20, `connect()` returns error instead of proceeding.
 
 ### Node list not cached in AppState
 `fetch_nodes()` calls `get_active_nodes()` via RPC on every invocation. Both `get_nodes` (UI) and `get_network_health` issue full RPC calls. If the UI polls frequently, this is wasteful.

@@ -10,7 +10,7 @@ interface IGroth16Verifier {
         uint256[2] calldata _pA,
         uint256[2][2] calldata _pB,
         uint256[2] calldata _pC,
-        uint256[7] calldata _pubSignals
+        uint256[11] calldata _pubSignals
     ) external view returns (bool);
 }
 
@@ -37,7 +37,7 @@ contract ZKSettlement {
     uint256 public constant ENTRY_SHARE = 25;
     uint256 public constant RELAY_SHARE = 25;
 
-    // Public signal indices (must match circuit's public input order)
+    // Public signal indices (must match circuit's public input/output order)
     uint256 private constant SIG_DOMAIN_SEPARATOR   = 0;
     uint256 private constant SIG_TOTAL_PAYMENT      = 1;
     uint256 private constant SIG_ENTRY_COMMITMENT   = 2;
@@ -45,6 +45,11 @@ contract ZKSettlement {
     uint256 private constant SIG_EXIT_COMMITMENT    = 4;
     uint256 private constant SIG_REFUND_COMMITMENT  = 5;
     uint256 private constant SIG_REGISTRY_ROOT      = 6;
+    // Circuit outputs (payment amounts for on-chain verification)
+    uint256 private constant SIG_ENTRY_PAY          = 7;
+    uint256 private constant SIG_RELAY_PAY          = 8;
+    uint256 private constant SIG_EXIT_PAY           = 9;
+    uint256 private constant SIG_REFUND             = 10;
 
     // ──────────────────────────────────────────────────────────────
     //  Immutables
@@ -136,7 +141,7 @@ contract ZKSettlement {
         uint256[2] calldata proof_a,
         uint256[2][2] calldata proof_b,
         uint256[2] calldata proof_c,
-        uint256[7] calldata pubSignals,
+        uint256[11] calldata pubSignals,
         bytes32 nullifier,
         bytes32 depositId,
         address payable entryAddr,
@@ -169,15 +174,25 @@ contract ZKSettlement {
             "ZKSettlement: invalid proof"
         );
 
-        // 6. Extract payment amounts from public signals.
+        // 6. Extract payment amounts from public signals (proven by the circuit).
         uint256 totalPayment = pubSignals[SIG_TOTAL_PAYMENT];
         require(totalPayment <= depositAmount, "ZKSettlement: payment exceeds deposit");
 
-        // 7. Compute the 25/25/50 split (must match SessionSettlement).
-        uint256 entryPay = (totalPayment * ENTRY_SHARE) / 100;
-        uint256 relayPay = (totalPayment * RELAY_SHARE) / 100;
-        uint256 exitPay  = totalPayment - entryPay - relayPay;
-        uint256 refund   = depositAmount - totalPayment;
+        // 7. Use proven payment split from the circuit (no on-chain recomputation).
+        uint256 entryPay = pubSignals[SIG_ENTRY_PAY];
+        uint256 relayPay = pubSignals[SIG_RELAY_PAY];
+        uint256 exitPay  = pubSignals[SIG_EXIT_PAY];
+        uint256 refund   = pubSignals[SIG_REFUND];
+
+        // Verify the proven split is consistent.
+        require(
+            entryPay + relayPay + exitPay == totalPayment,
+            "ZKSettlement: split mismatch"
+        );
+        require(
+            refund + totalPayment <= depositAmount,
+            "ZKSettlement: refund overflow"
+        );
 
         // 8. Effects — mark as settled before transfers.
         nullifiers[nullifier] = true;

@@ -70,6 +70,12 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     signal input refundCommitmentPub;  // Poseidon(clientAddr, refund)
     signal input registryRoot;         // Merkle root of registered nodes
 
+    // ── Public outputs (payment amounts for on-chain verification) ────
+    signal output entryPayOut;
+    signal output relayPayOut;
+    signal output exitPayOut;
+    signal output refundOut;
+
     // ── Private inputs ────────────────────────────────────────────
     signal input sessionId;
     signal input cumulativeBytes;
@@ -267,6 +273,12 @@ template BandwidthReceipt(MERKLE_DEPTH) {
 
     // refund = deposit - totalPayment
     refund <== deposit - totalPayment;
+
+    // Expose payment amounts as public outputs for on-chain verification.
+    entryPayOut <== entryPay;
+    relayPayOut <== relayPay;
+    exitPayOut <== exitPay;
+    refundOut <== refund;
 
     // ── 7. Verify commitments ─────────────────────────────────────
     component entryCommit = Poseidon(2);

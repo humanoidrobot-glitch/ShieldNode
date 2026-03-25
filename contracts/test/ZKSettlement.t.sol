@@ -18,7 +18,7 @@ contract MockVerifier is IGroth16Verifier {
         uint256[2] calldata,
         uint256[2][2] calldata,
         uint256[2] calldata,
-        uint256[7] calldata
+        uint256[11] calldata
     ) external view override returns (bool) {
         return shouldPass;
     }
@@ -48,7 +48,11 @@ contract ZKSettlementTest is Test {
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    function _pubSignals(uint256 totalPayment) internal view returns (uint256[7] memory) {
+    function _pubSignals(uint256 totalPayment) internal view returns (uint256[11] memory) {
+        uint256 entryPay = (totalPayment * 25) / 100;
+        uint256 relayPay = (totalPayment * 25) / 100;
+        uint256 exitPay  = totalPayment - entryPay - relayPay;
+        uint256 refund   = totalPayment <= 1 ether ? 1 ether - totalPayment : 0;
         return [
             uint256(zk.DOMAIN_SEPARATOR()),  // domainSeparator
             totalPayment,                     // totalPayment
@@ -56,7 +60,11 @@ contract ZKSettlementTest is Test {
             uint256(2),                       // relayCommitment (dummy)
             uint256(3),                       // exitCommitment (dummy)
             uint256(4),                       // refundCommitment (dummy)
-            uint256(12345)                    // registryRoot
+            uint256(12345),                   // registryRoot
+            entryPay,                         // entryPayOut
+            relayPay,                         // relayPayOut
+            exitPay,                          // exitPayOut
+            refund                            // refundOut
         ];
     }
 
@@ -113,7 +121,7 @@ contract ZKSettlementTest is Test {
         zk.deposit{value: 1 ether}(depositId);
 
         uint256 totalPayment = 1000; // 1000 wei
-        uint256[7] memory pub = _pubSignals(totalPayment);
+        uint256[11] memory pub = _pubSignals(totalPayment);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
 
         uint256 entryBefore = entryOp.balance;
@@ -149,7 +157,7 @@ contract ZKSettlementTest is Test {
         vm.prank(client);
         zk.deposit{value: 1 ether}(depositId);
 
-        uint256[7] memory pub = _pubSignals(100);
+        uint256[11] memory pub = _pubSignals(100);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
 
         zk.settleWithProof(
@@ -177,7 +185,7 @@ contract ZKSettlementTest is Test {
         // Make verifier reject.
         mockVerifier.setResult(false);
 
-        uint256[7] memory pub = _pubSignals(100);
+        uint256[11] memory pub = _pubSignals(100);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
 
         vm.expectRevert("ZKSettlement: invalid proof");
@@ -194,7 +202,7 @@ contract ZKSettlementTest is Test {
         vm.prank(client);
         zk.deposit{value: 1 ether}(depositId);
 
-        uint256[7] memory pub = _pubSignals(100);
+        uint256[11] memory pub = _pubSignals(100);
         pub[0] = 99999; // Wrong domain separator
 
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
@@ -213,7 +221,7 @@ contract ZKSettlementTest is Test {
         vm.prank(client);
         zk.deposit{value: 1 ether}(depositId);
 
-        uint256[7] memory pub = _pubSignals(100);
+        uint256[11] memory pub = _pubSignals(100);
         pub[6] = 99999; // Wrong registry root
 
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
@@ -233,7 +241,7 @@ contract ZKSettlementTest is Test {
         zk.deposit{value: 0.001 ether}(depositId);
 
         // Try to claim more than deposited.
-        uint256[7] memory pub = _pubSignals(2 ether);
+        uint256[11] memory pub = _pubSignals(2 ether);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
 
         vm.expectRevert("ZKSettlement: payment exceeds deposit");

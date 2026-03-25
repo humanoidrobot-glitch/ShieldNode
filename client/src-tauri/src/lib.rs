@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -124,10 +124,23 @@ pub struct SessionInfo {
 
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
+    // Read config values needed for connect (single lock acquisition).
+    let (pinned, kill_switch_enabled, strict_network) = {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        (cfg.preferred_nodes.clone(), cfg.kill_switch, cfg.strict_network_size)
+    };
+
     let nodes = fetch_nodes(&state).await;
 
-    // Minimum network size guard: warn if <20 nodes.
+    // Minimum network size guard.
     if nodes.len() < MINIMUM_NETWORK_SIZE {
+        if strict_network {
+            return Err(format!(
+                "strict mode: refusing to connect — only {} active nodes (minimum {})",
+                nodes.len(),
+                MINIMUM_NETWORK_SIZE
+            ));
+        }
         warn!(
             count = nodes.len(),
             threshold = MINIMUM_NETWORK_SIZE,
@@ -139,12 +152,6 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connecting;
     }
-
-    // Read config values needed for connect (single lock acquisition).
-    let (pinned, kill_switch_enabled) = {
-        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        (cfg.preferred_nodes.clone(), cfg.kill_switch)
-    };
     let pin_entry = pinned.first().map(|s| s.as_str()).unwrap_or("");
     let pin_relay = pinned.get(1).map(|s| s.as_str()).unwrap_or("");
     let pin_exit = pinned.get(2).map(|s| s.as_str()).unwrap_or("");
@@ -488,7 +495,7 @@ async fn get_circuit(state: State<'_, AppState>) -> Result<Option<CircuitInfo>, 
 /// Fetches the real gas price from the RPC provider. Falls back to the
 /// wallet stub if the on-chain read fails.
 #[tauri::command]
-async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
+async fn get_gas_price(state: State<'_, AppState>) -> Result<f64, String> {
     match state.chain_reader.get_gas_price().await {
         Ok(gwei) => Ok(gwei),
         Err(e) => {
@@ -531,6 +538,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<config::SettingsPayl
 /// Update settings from the frontend. Changes take effect on next connect().
 #[tauri::command]
 async fn update_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     settings: config::SettingsPayload,
 ) -> Result<(), String> {
@@ -542,10 +550,12 @@ async fn update_settings(
         cfg.clone()
     };
 
-    // Persist to disk (best-effort, outside the lock).
-    let config_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("shieldnode-client.json");
+    // Persist to OS-appropriate config directory.
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("failed to get config dir: {e}"))?;
+    let config_path = config_dir.join("shieldnode-client.json");
     if let Err(e) = snapshot.save(&config_path) {
         warn!(error = %e, "failed to persist settings to disk");
     }
