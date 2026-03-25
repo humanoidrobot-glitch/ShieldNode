@@ -4,16 +4,18 @@
 //! proof before the deadline. Uses the node's operator key to sign EIP-712
 //! challenge responses.
 
+use std::sync::LazyLock;
+
 use alloy::primitives::{keccak256, Address, B256, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-/// EIP-712 typehash for challenge responses (must match ChallengeManager.sol).
-fn response_typehash() -> B256 {
+/// EIP-712 typehash for challenge responses (computed once, matches ChallengeManager.sol).
+static RESPONSE_TYPEHASH: LazyLock<B256> = LazyLock::new(|| {
     keccak256("ChallengeResponse(uint256 challengeId,bytes32 nodeId,bytes32 responseHash)")
-}
+});
 
 /// A challenge received from the ChallengeManager contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +87,7 @@ pub async fn respond_to_challenge(
     };
 
     // Compute EIP-712 struct hash.
-    let typehash = response_typehash();
+    let typehash = *RESPONSE_TYPEHASH;
     let mut struct_buf = Vec::with_capacity(4 * 32);
     struct_buf.extend_from_slice(typehash.as_slice());
     struct_buf.extend_from_slice(&U256::from(challenge.challenge_id).to_be_bytes::<32>());

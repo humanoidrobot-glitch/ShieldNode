@@ -68,13 +68,11 @@ contract ChallengeManager {
     //  State
     // ──────────────────────────────────────────────────────────────
 
-    address public owner;
-
     mapping(uint256 => Challenge) public challenges;
     uint256 public nextChallengeId;
 
-    /// @dev Last challenge timestamp per node (for cooldown enforcement).
-    mapping(bytes32 => uint256) public lastChallenged;
+    /// @dev Last challenge timestamp per challenger per node.
+    mapping(bytes32 => mapping(address => uint256)) public lastChallenged;
 
     // ──────────────────────────────────────────────────────────────
     //  Events
@@ -104,7 +102,6 @@ contract ChallengeManager {
     //  Errors
     // ──────────────────────────────────────────────────────────────
 
-    error NotOwner();
     error NotChallenger();
     error NodeNotActive();
     error CooldownNotElapsed();
@@ -116,11 +113,6 @@ contract ChallengeManager {
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
     // ──────────────────────────────────────────────────────────────
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
 
     modifier onlyChallenger() {
         if (!oracle.challengers(msg.sender)) revert NotChallenger();
@@ -135,7 +127,6 @@ contract ChallengeManager {
         require(_registry != address(0) && _oracle != address(0), "ChallengeManager: zero address");
         registry = NodeRegistry(_registry);
         oracle = SlashingOracle(_oracle);
-        owner = msg.sender;
 
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -166,8 +157,8 @@ contract ChallengeManager {
     ) external onlyChallenger returns (uint256 challengeId) {
         if (!registry.isNodeActive(nodeId)) revert NodeNotActive();
 
-        // Enforce cooldown between challenges to the same node.
-        if (block.timestamp < lastChallenged[nodeId] + CHALLENGE_COOLDOWN) {
+        // Enforce per-challenger-per-node cooldown.
+        if (block.timestamp < lastChallenged[nodeId][msg.sender] + CHALLENGE_COOLDOWN) {
             revert CooldownNotElapsed();
         }
 
@@ -184,7 +175,7 @@ contract ChallengeManager {
             challengeData: challengeData
         });
 
-        lastChallenged[nodeId] = block.timestamp;
+        lastChallenged[nodeId][msg.sender] = block.timestamp;
 
         emit ChallengeIssued(
             challengeId,
