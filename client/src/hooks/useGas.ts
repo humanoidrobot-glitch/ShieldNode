@@ -21,7 +21,9 @@ export function useGas(): UseGasReturn {
     const fetchGas = async () => {
       try {
         const price = await invoke<number>("get_gas_price");
-        setGasPrice((prev) => (prev === price ? prev : price));
+        setGasPrice((prev) =>
+          prev !== null && Math.abs(prev - price) < 0.01 ? prev : price
+        );
       } catch (err) {
         console.error("Failed to fetch gas price:", err);
       }

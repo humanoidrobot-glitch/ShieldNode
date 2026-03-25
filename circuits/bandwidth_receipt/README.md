@@ -26,6 +26,15 @@ Groth16 requires a trusted setup (powers-of-tau ceremony). For testnet we use a 
 | `refundCommitment` | uint256 | Poseidon(clientAddress, refundAmount) |
 | `registryRoot` | uint256 | Merkle root of registered node public keys |
 
+### Public outputs (proven by the circuit, verified on-chain)
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `entryPayOut` | uint256 | Entry node's payment (25% of totalPayment) |
+| `relayPayOut` | uint256 | Relay node's payment (25% of totalPayment) |
+| `exitPayOut` | uint256 | Exit node's payment (50% of totalPayment) |
+| `refundOut` | uint256 | Refund to client (deposit - totalPayment) |
+
 ### Private (known only to prover)
 
 | Input | Type | Description |

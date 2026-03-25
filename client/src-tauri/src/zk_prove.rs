@@ -62,6 +62,11 @@ pub struct PublicInputs {
     pub exit_commitment: String,
     pub refund_commitment: String,
     pub registry_root: String,
+    // Circuit outputs (proven payment amounts).
+    pub entry_pay: String,
+    pub relay_pay: String,
+    pub exit_pay: String,
+    pub refund: String,
 }
 
 /// A generated Groth16 proof ready for on-chain submission.

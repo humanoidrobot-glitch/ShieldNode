@@ -190,8 +190,8 @@ contract ZKSettlement {
             "ZKSettlement: split mismatch"
         );
         require(
-            refund + totalPayment <= depositAmount,
-            "ZKSettlement: refund overflow"
+            refund + totalPayment == depositAmount,
+            "ZKSettlement: refund mismatch"
         );
 
         // 8. Effects — mark as settled before transfers.
