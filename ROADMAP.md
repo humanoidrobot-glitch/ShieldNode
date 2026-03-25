@@ -126,7 +126,7 @@ Security audits, hardening, and public deployment.
 - [ ] **PQ handshake audit** — Independent review of the hybrid X25519 + ML-KEM key exchange implementation, session key derivation, and that the hybrid combiner correctly ensures security under both classical and quantum assumptions
 - [ ] **PQ signature verification in ZK circuit** — Confirm ML-DSA signature verification inside the ZK receipt circuit is sound and matches the on-chain verifier's acceptance criteria
 - [x] Kill switch, auto-rotate circuits, and circuit pinning fully functional in client
-- [ ] Challenge-response protocol v1 (trusted challenger set)
+- [x] Challenge-response protocol v1 (trusted challenger set)
 - [ ] Deploy immutable contracts to Ethereum mainnet (no proxy)
 - [ ] ZK settlement as default for privacy-conscious users, plaintext settlement as fallback
 - [ ] Documentation site: how to run a node, use the client, verify the contracts
