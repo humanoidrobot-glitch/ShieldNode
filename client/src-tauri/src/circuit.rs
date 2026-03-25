@@ -19,13 +19,69 @@ pub struct NodeInfo {
     pub price_per_byte: u64,
     pub slash_count: u32,
     /// Session completion rate (0.0–1.0). Derived from on-chain settlement events.
-    /// Default 1.0 for nodes with no history.
     #[serde(default = "default_completion_rate")]
     pub completion_rate: f64,
+    /// On-chain registrant address (hex). Used for same-operator exclusion.
+    #[serde(default)]
+    pub operator_address: String,
+    /// Autonomous System Number (optional, from registry metadata).
+    #[serde(default)]
+    pub asn: Option<u32>,
+    /// Geographic region code (optional, from registry metadata).
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 fn default_completion_rate() -> f64 {
     1.0
+}
+
+// ── circuit diversity helpers ─────────────────────────────────────────
+
+/// Extract /24 subnet prefix from an endpoint string (e.g., "1.2.3.4:51820" → "1.2.3").
+fn subnet_24(endpoint: &str) -> Option<String> {
+    let host = endpoint.split(':').next()?;
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == 4 {
+        Some(format!("{}.{}.{}", octets[0], octets[1], octets[2]))
+    } else {
+        None
+    }
+}
+
+/// Check if a candidate node violates diversity constraints against already-selected nodes.
+/// Returns true if the candidate is acceptable (diverse enough).
+fn is_diverse(candidate: &NodeInfo, selected: &[Option<NodeInfo>]) -> bool {
+    for slot in selected.iter().flatten() {
+        // Same /24 subnet → reject
+        if let (Some(a), Some(b)) = (subnet_24(&candidate.endpoint), subnet_24(&slot.endpoint)) {
+            if a == b {
+                return false;
+            }
+        }
+
+        // Same ASN → reject (if both have ASN data)
+        if let (Some(a), Some(b)) = (candidate.asn, slot.asn) {
+            if a == b {
+                return false;
+            }
+        }
+
+        // Same region → reject (if both have region data)
+        if let (Some(ref a), Some(ref b)) = (&candidate.region, &slot.region) {
+            if a == b {
+                return false;
+            }
+        }
+
+        // Same operator address → reject
+        if !candidate.operator_address.is_empty()
+            && candidate.operator_address == slot.operator_address
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// A single hop in a 3-hop circuit.
@@ -269,15 +325,27 @@ pub fn select_circuit_with_pins(
         if selected[slot].is_some() {
             continue;
         }
-        if candidates.is_empty() {
+
+        // Filter candidates by diversity constraints against already-selected nodes.
+        let diverse: Vec<(f64, &NodeInfo)> = candidates
+            .iter()
+            .filter(|(_, n)| is_diverse(n, &selected))
+            .copied()
+            .collect();
+
+        // Use diverse candidates if available; fall back to all candidates if
+        // diversity can't be satisfied (small networks).
+        let pool = if diverse.is_empty() { &candidates } else { &diverse };
+
+        if pool.is_empty() {
             return Err("not enough nodes to fill circuit".to_string());
         }
 
-        let total: f64 = candidates.iter().map(|(w, _)| w).sum();
+        let total: f64 = pool.iter().map(|(w, _)| w).sum();
         let mut roll: f64 = rng.gen::<f64>() * total;
 
-        let mut pick_idx = candidates.len() - 1;
-        for (i, (w, _)) in candidates.iter().enumerate() {
+        let mut pick_idx = pool.len() - 1;
+        for (i, (w, _)) in pool.iter().enumerate() {
             roll -= w;
             if roll <= 0.0 {
                 pick_idx = i;
@@ -285,8 +353,12 @@ pub fn select_circuit_with_pins(
             }
         }
 
-        selected[slot] = Some(candidates[pick_idx].1.clone());
-        candidates.swap_remove(pick_idx);
+        let picked = pool[pick_idx].1.clone();
+        // Remove from main candidates list.
+        if let Some(pos) = candidates.iter().position(|(_, n)| n.node_id == picked.node_id) {
+            candidates.swap_remove(pos);
+        }
+        selected[slot] = Some(picked);
     }
 
     Ok([
@@ -327,6 +399,9 @@ mod tests {
             price_per_byte: price,
             slash_count: slashes,
             completion_rate: 1.0,
+            operator_address: String::new(),
+            asn: None,
+            region: None,
         }
     }
 
@@ -447,5 +522,56 @@ mod tests {
         // Serialised info should not contain session_key field
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("session_key"));
+    }
+
+    #[test]
+    fn subnet_24_extraction() {
+        assert_eq!(subnet_24("1.2.3.4:51820"), Some("1.2.3".to_string()));
+        assert_eq!(subnet_24("10.0.0.1:51820"), Some("10.0.0".to_string()));
+        assert_eq!(subnet_24("invalid"), None);
+    }
+
+    #[test]
+    fn diversity_rejects_same_subnet() {
+        let mut a = make_node("a", 100_000, 0.9, 10, 0);
+        a.endpoint = "10.0.1.1:51820".to_string();
+        let mut b = make_node("b", 100_000, 0.9, 10, 0);
+        b.endpoint = "10.0.1.2:51820".to_string(); // same /24
+        let selected = [Some(a), None, None];
+        assert!(!is_diverse(&b, &selected));
+    }
+
+    #[test]
+    fn diversity_accepts_different_subnet() {
+        let mut a = make_node("a", 100_000, 0.9, 10, 0);
+        a.endpoint = "10.0.1.1:51820".to_string();
+        let mut b = make_node("b", 100_000, 0.9, 10, 0);
+        b.endpoint = "10.0.2.1:51820".to_string(); // different /24
+        let selected = [Some(a), None, None];
+        assert!(is_diverse(&b, &selected));
+    }
+
+    #[test]
+    fn diversity_rejects_same_operator() {
+        let mut a = make_node("a", 100_000, 0.9, 10, 0);
+        a.operator_address = "0xABC".to_string();
+        a.endpoint = "10.0.1.1:51820".to_string();
+        let mut b = make_node("b", 100_000, 0.9, 10, 0);
+        b.operator_address = "0xABC".to_string(); // same operator
+        b.endpoint = "10.0.2.1:51820".to_string(); // different subnet
+        let selected = [Some(a), None, None];
+        assert!(!is_diverse(&b, &selected));
+    }
+
+    #[test]
+    fn diversity_rejects_same_asn() {
+        let mut a = make_node("a", 100_000, 0.9, 10, 0);
+        a.asn = Some(13335);
+        a.endpoint = "10.0.1.1:51820".to_string();
+        let mut b = make_node("b", 100_000, 0.9, 10, 0);
+        b.asn = Some(13335); // same ASN
+        b.endpoint = "10.0.2.1:51820".to_string();
+        let selected = [Some(a), None, None];
+        assert!(!is_diverse(&b, &selected));
     }
 }

@@ -7,6 +7,9 @@ export interface NodeInfo {
   pricePerByte: number;
   slashCount: number;
   completionRate?: number;
+  operatorAddress?: string;
+  asn?: number;
+  region?: string;
 }
 
 export interface SessionInfo {

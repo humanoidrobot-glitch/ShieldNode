@@ -1,6 +1,6 @@
 # ShieldNode
 
-ShieldNode is a decentralized VPN built natively on Ethereum L1, where independent node operators stake ETH to run encrypted relay infrastructure and earn revenue from bandwidth served — with misbehavior punished via on-chain slashing. Traffic routes through 3-hop onion-encrypted circuits using Sphinx packets so no single node ever sees both source and destination, and session settlements use zero-knowledge proofs to pay nodes without revealing session metadata, node identities, or usage patterns on-chain. The entire cryptographic stack is being hardened against quantum computing threats ahead of [Ethereum's own PQ timeline](https://pq.ethereum.org/), starting with a hybrid X25519 + ML-KEM-768 key exchange that protects circuit routes from harvest-now-decrypt-later attacks, and ML-DSA post-quantum signatures verified inside ZK circuits where their large size carries no gas penalty. No L2, no token, no trust assumptions beyond Ethereum consensus itself — privacy enforced by math, not policy.
+ShieldNode is a decentralized VPN built natively on Ethereum L1, where independent node operators stake ETH to run encrypted relay infrastructure and earn revenue from bandwidth served — with misbehavior punished via on-chain slashing. Traffic routes through 3-hop onion-encrypted circuits using Sphinx packets so no single node ever sees both source and destination, and session settlements use zero-knowledge proofs to pay nodes without revealing session metadata, node identities, or usage patterns on-chain. The cryptographic stack is hardened against quantum computing threats ahead of [Ethereum's own PQ timeline](https://pq.ethereum.org/), with a hybrid X25519 + ML-KEM-768 key exchange protecting circuit routes from harvest-now-decrypt-later attacks, and ML-DSA post-quantum signatures verified inside ZK circuits where their large size carries no gas penalty. No L2, no token, no trust assumptions beyond Ethereum consensus itself — privacy enforced by math, not policy.
 
 ## Why Ethereum L1?
 
@@ -38,7 +38,7 @@ ShieldNode inherits Ethereum's security directly. Every on-chain operation (node
 - The **relay node** knows neither
 - The **exit node** knows the destination but not the client
 
-Each relay peels one layer of Sphinx-style encryption, sees only the next hop, and forwards. Session keys are ephemeral X25519 Diffie-Hellman, and all encryption uses ChaCha20-Poly1305.
+Each relay peels one layer of Sphinx-style encryption, sees only the next hop, and forwards. Session keys are derived from a hybrid X25519 + ML-KEM-768 key exchange (post-quantum resistant), combined via HKDF-SHA256. All tunnel encryption uses ChaCha20-Poly1305.
 
 ## Architecture
 
@@ -50,9 +50,10 @@ The node binary that independent operators run. Located in `node/`.
 |--------|---------|
 | `tunnel/wireguard.rs` | WireGuard tunnel via boringtun (userspace, cross-platform) |
 | `tunnel/circuit.rs` | Circuit lifecycle, pure `process_relay_packet` function (ZK-provable) |
+| `crypto/traits.rs` | `KeyExchange` and `Signer` trait abstractions for cryptographic agility |
 | `crypto/aead.rs` | Shared ChaCha20-Poly1305 encrypt/decrypt helpers |
 | `crypto/sphinx.rs` | Sphinx onion packet creation and layer peeling |
-| `crypto/keys.rs` | X25519 keypair management, ephemeral DH sessions |
+| `crypto/keys.rs` | X25519 + ML-KEM-768 hybrid key exchange (post-quantum) |
 | `crypto/noise.rs` | Noise NK-pattern handshake, HKDF-SHA256 key derivation |
 | `network/discovery.rs` | libp2p Kademlia DHT + Gossipsub peer discovery |
 | `network/heartbeat.rs` | Periodic on-chain heartbeat for liveness proofs |
@@ -63,8 +64,9 @@ The node binary that independent operators run. Located in `node/`.
 
 Key design decisions:
 - **No logging by design** — the node software has no mechanism to record connection metadata
-- **Relay forwarding is a pure function** — deterministic, no side effects, structured for future ZK proof generation
+- **Relay forwarding is a pure function** — deterministic, no side effects, structured for future ZK-VM proof generation
 - **Session keys are zeroized on drop** — sensitive material doesn't linger in memory
+- **Crypto trait abstractions** — `KeyExchange` and `Signer` traits allow swapping primitives (classical ↔ post-quantum) without touching tunnel or circuit logic
 
 ### Smart Contracts (Solidity)
 
@@ -82,6 +84,9 @@ Authorized challengers can propose slashing for provable logging, selective deni
 #### `Treasury.sol`
 Receives slashed stake. Withdrawals are gated by a 48-hour timelock.
 
+#### `ZKSettlement.sol`
+ZK-private alternative to SessionSettlement. Clients submit a Groth16 proof that they hold a valid dual-signed bandwidth receipt and the correct payment is owed — without revealing the session ID, node identities, or timing on-chain. The contract verifies the proof and distributes payment to commitments. Built with circom 2.2.3 + snarkjs 0.7.6, ~3.2M constraints. Plaintext settlement via SessionSettlement remains as a fallback.
+
 **Gas costs at 0.2 Gwei:**
 
 | Operation | Estimated Gas | Cost |
@@ -90,11 +95,14 @@ Receives slashed stake. Withdrawals are gated by a 48-hour timelock.
 | Heartbeat | ~50,000 | ~$0.02 |
 | Open session | ~100,000 | ~$0.04 |
 | Settle session | ~120,000 | ~$0.05 |
+| ZK settle session | ~250,000 | ~$0.10 |
 | Slash proposal | ~200,000 | ~$0.08 |
 
-### Client Application (Planned)
+### Client Application (Tauri)
 
-A Tauri (Rust + React) desktop app. Core tunnel logic in Rust, UI in TypeScript. Reads the node registry directly from L1, scores nodes by uptime/stake/latency/price, constructs 3-hop circuits, and manages session lifecycle. One toggle to connect.
+A Tauri (Rust + React) desktop app. Core tunnel logic in Rust, UI in TypeScript/React. Located in `client/`.
+
+The client reads the node registry directly from L1, scores nodes by uptime/stake/latency/price/completion-rate, constructs 3-hop circuits with diversity constraints (different ASN/subnet/region per hop), and manages session lifecycle including auto-rotation. Features include a circuit health monitor that detects and recovers from node drops, gas price monitoring with configurable ceiling, kill switch, and wallet integration (WalletConnect/injected/raw key). Supports self-hosted RPC endpoints (Reth, Geth).
 
 ## Project Structure
 
@@ -109,9 +117,10 @@ shieldnode/
 │       │   ├── wireguard.rs       # boringtun WireGuard integration
 │       │   └── circuit.rs         # Circuit management, relay packet processing
 │       ├── crypto/
+│       │   ├── traits.rs          # KeyExchange, Signer trait abstractions
 │       │   ├── aead.rs            # Shared ChaCha20-Poly1305 helpers
 │       │   ├── sphinx.rs          # Sphinx onion packet format
-│       │   ├── keys.rs            # X25519 key generation and DH
+│       │   ├── keys.rs            # X25519 + ML-KEM-768 hybrid key exchange
 │       │   └── noise.rs           # Noise NK handshake, HKDF-SHA256
 │       ├── network/
 │       │   ├── discovery.rs       # libp2p Kademlia + Gossipsub
@@ -125,6 +134,7 @@ shieldnode/
 │   ├── src/
 │   │   ├── NodeRegistry.sol
 │   │   ├── SessionSettlement.sol
+│   │   ├── ZKSettlement.sol
 │   │   ├── SlashingOracle.sol
 │   │   ├── Treasury.sol
 │   │   └── interfaces/
@@ -132,10 +142,36 @@ shieldnode/
 │   │       ├── ISessionSettlement.sol
 │   │       └── ISlashingOracle.sol
 │   ├── test/
-│   │   ├── NodeRegistry.t.sol     # 12 tests
-│   │   └── SessionSettlement.t.sol # 7 tests
+│   │   ├── NodeRegistry.t.sol
+│   │   ├── SessionSettlement.t.sol
+│   │   ├── ZKSettlement.t.sol
+│   │   └── SlashingOracle.t.sol
 │   └── script/
 │       └── Deploy.s.sol
+├── circuits/                      # ZK circuits (circom + Groth16)
+│   ├── bandwidth_receipt/
+│   │   └── circuit.circom         # Bandwidth receipt verification circuit
+│   ├── scripts/                   # compile, prove, verify
+│   └── trusted_setup/             # Groth16 ceremony artifacts
+├── client/                        # Tauri (Rust + React) desktop client
+│   ├── src-tauri/src/
+│   │   ├── main.rs
+│   │   ├── tunnel.rs              # Core tunnel management
+│   │   ├── circuit.rs             # Circuit construction, node selection, health monitor
+│   │   ├── wallet.rs              # Transaction signing
+│   │   ├── receipts.rs            # EIP-712 bandwidth receipt co-signing
+│   │   ├── zk_prove.rs            # Client-side Groth16 proof generation
+│   │   └── config.rs
+│   └── src/
+│       ├── components/            # ConnectToggle, CircuitMap, NodeBrowser, etc.
+│       ├── hooks/                 # useCircuit, useNodes, useSession, useGas
+│       └── lib/                   # contracts.ts, scoring.ts, eip712.ts
+├── docs/                          # Architecture and design docs
+│   ├── ARCHITECTURE.md
+│   ├── PROTOCOL.md
+│   ├── ECONOMICS.md
+│   ├── ZK-DESIGN.md
+│   └── THREAT-MODEL.md
 └── CLAUDE.md                      # Full spec and design decisions
 ```
 
@@ -185,9 +221,11 @@ forge build
 forge test -vv
 ```
 
-All 19 tests should pass:
+All tests should pass:
 - 12 NodeRegistry tests (registration, heartbeats, staking, slashing, pagination)
 - 7 SessionSettlement tests (open/settle/force-settle, payment splits, edge cases)
+- 11 ZKSettlement tests (deposit, proof verification, payment distribution)
+- 19 SlashingOracle tests (progressive slashing, evidence verification, bandwidth fraud)
 
 ### Deploy Contracts (Sepolia Testnet)
 
@@ -209,7 +247,17 @@ Nodes earn ETH directly from session settlements. Revenue depends on bandwidth s
 
 **Minimum costs:** 0.1 ETH stake (illiquid, not spent), ~$2.40/month in heartbeat gas, minimal hardware requirements. Exit nodes earn 2x but carry more risk (their IP is visible to destinations).
 
-**Staking is a revenue accelerator** — the client scoring algorithm weights stake size. An operator who stakes 1 ETH gets meaningfully more sessions routed to them than one at the 0.1 ETH minimum.
+**Staking is a revenue accelerator** — the client scoring algorithm weights uptime (25%), stake (25%), price (20%), slash history (15%), and session completion rate (15%). An operator who stakes 1 ETH gets meaningfully more sessions routed to them than one at the 0.1 ETH minimum.
+
+## Security Architecture
+
+ShieldNode addresses two hard problems in decentralized relay networks — collusion and logging — through layered defenses documented in detail in [ROADMAP.md](ROADMAP.md).
+
+**Anti-collusion:** circuit diversity constraints prevent multiple hops from sharing infrastructure (ASN, subnet, region). Same-operator exclusion, stake concentration heuristics, and a minimum network size guard layer on top. Circuit auto-rotation limits any single correlation window. ZK node eligibility proofs (Phase 6) will hide the node set from enumeration by state actors.
+
+**Anti-logging:** the relay binary has no logging mechanism by design. Phase 5 introduces TEE remote attestation (AMD SEV-SNP) so even a malicious operator can't access traffic inside the hardware enclave. Reproducible builds verify the attested binary matches audited source. Traffic volume analysis detects exfiltration. Phase 6 adds ZK-VM execution trace proofs (proving the software didn't log) and ephemeral compute enforcement (proving the environment can't persist logs).
+
+**Post-quantum:** the hybrid X25519 + ML-KEM-768 handshake is already implemented, protecting circuit routes from harvest-now-decrypt-later attacks. ML-DSA signatures are verified inside ZK circuits. See the [Post-Quantum Strategy](ROADMAP.md#post-quantum-strategy) section in the roadmap for the full threat model and upgrade table.
 
 ## Design Principles
 
@@ -228,11 +276,11 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **1. Single-Hop Tunnel (MVP)** | Working relay, contracts, client app | Complete |
-| **2. Multi-Hop + Onion Routing** | 3-node circuits, layered encryption | Complete |
-| **3. Staking + Slashing** | Cryptoeconomic security | Complete |
-| **4. Economic Hardening + ZK** | Market pricing, ZK-private settlement | Pricing + gas monitoring done |
-| **5. Mainnet Launch** | Audits, hardening, public deploy | Planned |
-| **6. Decentralization** | Challenge bonds, mobile, ZK eligibility | Research |
+| **2. Multi-Hop + Onion Routing** | 3-node circuits, Sphinx encryption, auto-rotation | Complete |
+| **3. Staking + Slashing** | Cryptoeconomic security, progressive slashing, scoring | Complete |
+| **4. Economic Hardening + ZK** | ZK settlement, PQ handshake, anti-griefing, anti-collusion | In progress — ZK + PQ + economics done, diversity constraints next |
+| **5. Mainnet Launch** | Audits, TEE attestation, reproducible builds, deploy | Planned |
+| **6. Decentralization** | ZK-VM proofs, challenge bonds, mobile, dummy Merkle tree | Research |
 
 ## What ShieldNode Does Not Do
 
@@ -257,6 +305,9 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 | [Oasis Network / Sapphire](https://oasisprotocol.org) | Confidential computing runtime using TEEs. Study remote attestation verification and enclave key management |
 | [Gramine](https://gramineproject.io) | Library OS for running unmodified Linux apps inside SGX enclaves. Evaluate for relay binary enclave support |
 | [AWS Nitro Enclaves](https://aws.amazon.com/ec2/nitro/nitro-enclaves/) | Confidential computing offering. Study attestation document format and NSM API as reference for enclave attestation |
+| [Signal PQXDH](https://signal.org/docs/specifications/pqxdh/) | Hybrid X25519 + ML-KEM in production. Closest precedent for ShieldNode's post-quantum handshake |
+| [PQ Ethereum](https://pq.ethereum.org/) | EF post-quantum initiative. ShieldNode's PQ timeline stays ahead of Ethereum's own |
+| [NIST FIPS 203/204](https://csrc.nist.gov/publications/fips) | ML-KEM (Kyber), ML-DSA (Dilithium) standards. FIPS-compliant implementations only |
 
 ## Contributing
 

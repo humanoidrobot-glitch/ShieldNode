@@ -48,6 +48,9 @@ impl Default for ConnectionState {
     }
 }
 
+/// Minimum number of active nodes before the client warns about collusion risk.
+const MINIMUM_NETWORK_SIZE: usize = 20;
+
 /// Contract addresses for the ShieldNode protocol on Sepolia.
 const REGISTRY_ADDRESS: &str = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11";
 const SETTLEMENT_ADDRESS: &str = "0xF32aE5324E3caCCEC4F198FEF783482A0c5eE959";
@@ -103,6 +106,15 @@ impl AppState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkHealth {
+    pub node_count: usize,
+    pub minimum_threshold: usize,
+    pub below_threshold: bool,
+    pub estimated_collusion_risk_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
     pub node_id: String,
@@ -113,6 +125,15 @@ pub struct SessionInfo {
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     let nodes = fetch_nodes(&state).await;
+
+    // Minimum network size guard: warn if <20 nodes.
+    if nodes.len() < MINIMUM_NETWORK_SIZE {
+        warn!(
+            count = nodes.len(),
+            threshold = MINIMUM_NETWORK_SIZE,
+            "network size below safety threshold — collusion risk is elevated"
+        );
+    }
 
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -484,6 +505,21 @@ async fn get_gas_price(state: State<'_, AppState>) -> Result<u64, String> {
     }
 }
 
+/// Return network health: node count, safety threshold, and estimated collusion risk.
+#[tauri::command]
+async fn get_network_health(state: State<'_, AppState>) -> Result<NetworkHealth, String> {
+    let nodes = fetch_nodes(&state).await;
+    let n = nodes.len() as f64;
+    // Probability that an attacker controlling 10% of nodes gets both entry+exit.
+    let collusion_risk = if n >= 3.0 { (0.1f64).powi(2) } else { 1.0 };
+    Ok(NetworkHealth {
+        node_count: nodes.len(),
+        minimum_threshold: MINIMUM_NETWORK_SIZE,
+        below_threshold: nodes.len() < MINIMUM_NETWORK_SIZE,
+        estimated_collusion_risk_pct: collusion_risk * 100.0,
+    })
+}
+
 /// Return the current settings (excludes private key).
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<config::SettingsPayload, String> {
@@ -742,7 +778,10 @@ pub(crate) fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
         uptime: n.uptime,
         price_per_byte: n.price_per_byte as u64,
         slash_count: n.slash_count,
-        completion_rate: 1.0, // default; enriched by fetch_nodes
+        completion_rate: 1.0,
+        operator_address: String::new(), // populated when owner is read from registry
+        asn: None,
+        region: None,
     }
 }
 
@@ -778,12 +817,12 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
         }
     };
 
-    // Evict stale reputation flags.
+    // Evict stale reputation flags and run stake concentration analysis.
     if let Ok(mut rep) = state.reputation.lock() {
         rep.evict_stale();
     }
 
-    match state.chain_reader.get_active_nodes().await {
+    let mut nodes = match state.chain_reader.get_active_nodes().await {
         Ok(on_chain) if !on_chain.is_empty() => {
             info!(count = on_chain.len(), "fetched on-chain nodes");
             on_chain
@@ -793,17 +832,9 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
                     if let Some(&rate) = completion_rates.get(&node.node_id) {
                         node.completion_rate = rate;
                     }
-                    // Apply local reputation penalty as a direct score-equivalent
-                    // deduction on completion_rate. This is separate from on-chain
-                    // completion data — penalized nodes get completion_rate zeroed.
-                    if let Ok(rep) = state.reputation.lock() {
-                        if rep.score_penalty(&node.node_id) > 0.0 {
-                            node.completion_rate = 0.0;
-                        }
-                    }
                     node
                 })
-                .collect()
+                .collect::<Vec<_>>()
         }
         Ok(_) => {
             warn!("on-chain registry empty, using mock data");
@@ -813,7 +844,22 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
             warn!(error = %e, "on-chain read failed, using mock data");
             mock_nodes()
         }
+    };
+
+    // Run stake concentration analysis and apply reputation penalties.
+    if let Ok(mut rep) = state.reputation.lock() {
+        let flagged = rep.detect_stake_clusters(&nodes);
+        if !flagged.is_empty() {
+            info!(count = flagged.len(), "stake concentration clusters detected");
+        }
+        for node in &mut nodes {
+            if rep.score_penalty(&node.node_id) > 0.0 {
+                node.completion_rate = 0.0;
+            }
+        }
     }
+
+    nodes
 }
 
 /// Decode a 0x-prefixed hex string into bytes. Returns empty vec on failure.
@@ -845,51 +891,66 @@ fn mock_nodes() -> Vec<NodeInfo> {
             node_id: "node-alpha-001".to_string(),
             public_key: vec![1u8; 32],
             endpoint: "203.0.113.10:51820".to_string(),
-            stake: ETH,              // 1 ETH
+            stake: ETH,
             uptime: 0.995,
             price_per_byte: 10,
             slash_count: 0,
             completion_rate: 1.0,
+            operator_address: "0xOp1".to_string(),
+            asn: Some(13335),
+            region: Some("EU-WEST".to_string()),
         },
         NodeInfo {
             node_id: "node-beta-002".to_string(),
             public_key: vec![2u8; 32],
             endpoint: "198.51.100.20:51820".to_string(),
-            stake: ETH * 3 / 4,      // 0.75 ETH
+            stake: ETH * 3 / 4,
             uptime: 0.980,
             price_per_byte: 15,
             slash_count: 0,
             completion_rate: 1.0,
+            operator_address: "0xOp2".to_string(),
+            asn: Some(16509),
+            region: Some("US-EAST".to_string()),
         },
         NodeInfo {
             node_id: "node-gamma-003".to_string(),
             public_key: vec![3u8; 32],
             endpoint: "192.0.2.30:51820".to_string(),
-            stake: ETH / 2,          // 0.5 ETH
+            stake: ETH / 2,
             uptime: 0.960,
             price_per_byte: 8,
             slash_count: 1,
             completion_rate: 0.7,
+            operator_address: "0xOp3".to_string(),
+            asn: Some(20473),
+            region: Some("EU-CENTRAL".to_string()),
         },
         NodeInfo {
             node_id: "node-delta-004".to_string(),
             public_key: vec![4u8; 32],
             endpoint: "198.51.100.40:51820".to_string(),
-            stake: ETH * 2,          // 2 ETH
+            stake: ETH * 2,
             uptime: 0.999,
             price_per_byte: 20,
             slash_count: 0,
             completion_rate: 1.0,
+            operator_address: "0xOp4".to_string(),
+            asn: Some(14618),
+            region: Some("ASIA-EAST".to_string()),
         },
         NodeInfo {
             node_id: "node-epsilon-005".to_string(),
             public_key: vec![5u8; 32],
             endpoint: "203.0.113.50:51820".to_string(),
-            stake: ETH / 10,         // 0.1 ETH (minimum)
+            stake: ETH / 10,
             uptime: 0.850,
             price_per_byte: 5,
             slash_count: 2,
             completion_rate: 0.4,
+            operator_address: "0xOp5".to_string(),
+            asn: Some(24940),
+            region: Some("US-WEST".to_string()),
         },
     ]
 }
@@ -910,6 +971,7 @@ pub fn run() {
             get_session,
             get_circuit,
             get_gas_price,
+            get_network_health,
             get_settings,
             update_settings,
             send_packet,

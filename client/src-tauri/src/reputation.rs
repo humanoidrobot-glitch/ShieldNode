@@ -125,6 +125,74 @@ impl ReputationCache {
     pub fn penalized_count(&self) -> usize {
         self.nodes.values().filter(|r| r.is_penalized()).count()
     }
+
+    /// Analyze a set of nodes for suspicious stake concentration patterns.
+    /// Flags clusters that share: identical stake amounts registered in a
+    /// short time window, or correlated uptime patterns.
+    /// Returns node IDs that should receive a scoring penalty.
+    pub fn detect_stake_clusters(
+        &mut self,
+        nodes: &[crate::circuit::NodeInfo],
+    ) -> Vec<String> {
+        let mut flagged = Vec::new();
+
+        // Heuristic 1: identical stakes from different operators.
+        // Group by stake amount — if 3+ nodes have the exact same stake
+        // (beyond the 0.1 ETH minimum), flag them.
+        let min_stake: u64 = 100_000_000_000_000_000; // 0.1 ETH
+        let mut stake_groups: HashMap<u64, Vec<&str>> = HashMap::new();
+        for node in nodes {
+            if node.stake > min_stake {
+                stake_groups
+                    .entry(node.stake)
+                    .or_default()
+                    .push(&node.node_id);
+            }
+        }
+        for (_, group) in &stake_groups {
+            if group.len() >= 3 {
+                for id in group {
+                    if !flagged.contains(&id.to_string()) {
+                        flagged.push(id.to_string());
+                    }
+                }
+            }
+        }
+
+        // Heuristic 2: correlated uptime (all within ±1% of each other).
+        // Nodes operated by the same entity on the same infra tend to have
+        // near-identical uptime values.
+        if nodes.len() >= 3 {
+            for i in 0..nodes.len() {
+                let mut correlated = vec![&nodes[i]];
+                for j in (i + 1)..nodes.len() {
+                    if (nodes[i].uptime - nodes[j].uptime).abs() < 0.01
+                        && nodes[i].operator_address != nodes[j].operator_address
+                    {
+                        correlated.push(&nodes[j]);
+                    }
+                }
+                if correlated.len() >= 3 {
+                    for n in &correlated {
+                        if !flagged.contains(&n.node_id) {
+                            flagged.push(n.node_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Record flags for penalized nodes.
+        for id in &flagged {
+            let rep = self
+                .nodes
+                .entry(id.clone())
+                .or_insert_with(NodeReputation::new);
+            rep.add_flag();
+        }
+
+        flagged
+    }
 }
 
 #[cfg(test)]
