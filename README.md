@@ -246,13 +246,17 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 
 | Project | Relevance |
 |---------|-----------|
-| [Nym](https://nymtech.net) | Mixnet with Sphinx packets — most relevant for onion routing layer |
+| [Nym](https://nymtech.net) | Mixnet with Sphinx packets, staking-based reputation. Study Sybil resistance via staking and traffic analysis resistance through packet timing obfuscation |
 | [Orchid](https://orchid.com) | Pioneered crypto-payment VPN; good payment model |
-| [HOPR](https://hoprnet.org) | Mixnet with staking; strong privacy theory |
+| [HOPR](https://hoprnet.org) | Mixing with cover traffic; probabilistic packet relaying to resist traffic analysis |
 | [Mullvad VPN](https://mullvad.net) | Gold standard VPN UX — target this quality |
 | [WireGuard](https://wireguard.com) | The tunnel protocol (via boringtun userspace implementation) |
 | Fuel v1 / DeGate v1 | Immutable contract model (L2Beat Stage 2) — our contract philosophy |
 | [Noir (Aztec)](https://noir-lang.org) | ZK circuit language for bandwidth receipt privacy |
+| [Oxen/Session](https://oxen.io) | Decentralized onion routing with service node staking. Study swarm-based node grouping and path selection |
+| [Oasis Network / Sapphire](https://oasisprotocol.org) | Confidential computing runtime using TEEs. Study remote attestation verification and enclave key management |
+| [Gramine](https://gramineproject.io) | Library OS for running unmodified Linux apps inside SGX enclaves. Evaluate for relay binary enclave support |
+| [AWS Nitro Enclaves](https://aws.amazon.com/ec2/nitro/nitro-enclaves/) | Confidential computing offering. Study attestation document format and NSM API as reference for enclave attestation |
 
 ## Contributing
 

@@ -90,6 +90,16 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 
 - [x] **Minimum bandwidth flag** — Add a `lowBandwidthCount` field to the client's local node reputation cache. If a session through a given node settles with <1MB transferred relative to >5 minutes duration, increment the counter. Nodes with 3+ flags in the last 24 hours get a score penalty equivalent to a minor slash. This is client-side only (no contract changes) and acts as a fast local signal before on-chain completion rate data accumulates.
 
+### Anti-Collusion: Circuit Diversity & Sybil Resistance
+
+- [ ] **Circuit diversity constraints** — Enforce in the client's circuit builder that entry, relay, and exit nodes must be on different IP subnets (/24), different autonomous systems (ASN), and different geographic regions. Query node metadata from the registry (extend `NodeRegistry` to store an optional `asnId` and `regionCode` per node, set at registration via `register()` params). If metadata is unavailable, fall back to IP-based heuristic (first two octets differ). This is the single biggest practical improvement against collusion — it eliminates the lazy attack where one operator runs all three hops on the same infrastructure. Implement in `client/src-tauri/src/circuit.rs` in the node selection path, as a hard constraint applied before scoring.
+
+- [ ] **Same-operator exclusion** — If multiple nodes share the same registrant address on-chain, the client must treat them as a single entity and never place two in the same circuit. Read `NodeRegistered` events to build an operator→nodes mapping. This doesn't catch attackers using different wallets, but it prevents accidental self-correlation by honest multi-node operators and eliminates the trivial Sybil case.
+
+- [ ] **Stake concentration heuristics** — Client-side analysis that flags clusters of nodes with suspicious registration patterns: sequential funding transactions from related wallets (funded by the same source within N blocks), identical stake amounts registered within a short time window, or correlated uptime patterns (all go offline/online together). Flagged clusters get a scoring penalty. This is probabilistic, not provable — it runs client-side where heuristic reasoning is appropriate, not on-chain where cryptographic proof would be required. Store flags in the client's local node reputation cache.
+
+- [ ] **Minimum network size guard** — The client should warn users (or refuse to connect in strict mode) if the active node count is below a safety threshold (e.g., <20 nodes). With very few nodes, the probability of an attacker controlling entry+exit on the same circuit is too high regardless of other mitigations. Display the current network size and estimated collusion risk in the UI.
+
 ### What ZK Settlement Achieves
 **Before ZK:** The chain sees wallet `0xABC` opened session #47 with nodes `[0x1, 0x2, 0x3]`, transferred 1.2 GB, settled at block 19847362.
 
@@ -98,7 +108,7 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 ### Post-Quantum Note
 The ZK receipt circuit should be designed to verify ML-DSA (Dilithium) signatures alongside ECDSA from the start. ML-DSA signatures are ~2.4 KB (40x larger than ECDSA), which would be expensive to verify on-chain directly, but inside a ZK circuit the signature size doesn't affect on-chain gas — only proof verification cost matters. This means ZK settlement is the natural home for PQ signatures: prove you have a valid PQ-signed receipt without posting the large signature on-chain.
 
-**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet. Hybrid PQ handshake operational across all circuit hops. Circuit health monitor detects and recovers from a simulated node drop within 20 seconds on testnet.
+**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet. Hybrid PQ handshake operational across all circuit hops. Circuit health monitor detects and recovers from a simulated node drop within 20 seconds on testnet. Circuit builder rejects node combinations on the same ASN or IP subnet.
 
 ---
 
@@ -120,7 +130,15 @@ Security audits, hardening, and public deployment.
 - [ ] **Anti-griefing testing** — Adversarial test suite: simulate nodes that accept circuits then drop after N seconds, nodes that throttle bandwidth to near-zero, and nodes that selectively drop traffic to specific destinations. Verify the circuit health monitor rebuilds within 20s, completion scoring deprioritizes bad nodes within 3 sessions, and the low-bandwidth flag triggers within 24 hours. Run as part of CI on every PR touching client circuit or scoring code.
 - [ ] At least 10 independently operated nodes live before public client release
 
-**Success metric:** Real users browsing through ShieldNode on Ethereum mainnet, with ZK-private settlement and post-quantum circuit handshakes.
+### Anti-Logging: Hardware & Environmental Hardening
+
+- [ ] **TEE remote attestation (AMD SEV-SNP)** — Require (or strongly incentivize via scoring bonus) node operators to run the relay binary inside an AMD SEV-SNP enclave (or Intel SGX/TDX). The enclave produces a remote attestation: a hardware-signed certificate proving "this specific binary is running inside a genuine enclave, and the host OS cannot read its memory." Even if the operator runs tcpdump, installs a rootkit, or modifies the kernel, they cannot access plaintext traffic inside the enclave. Implementation: at registration time, the node submits its attestation report. The client verifies the attestation before circuit selection — checking (1) valid hardware signature from AMD/Intel, (2) binary hash matches the reproducible build of the audited open-source ShieldNode relay. Nodes with valid TEE attestation get a significant scoring bonus (e.g., 2x weight on the trust component). Entry node position (most sensitive — sees client IP) should prefer TEE-attested nodes. Trust assumption shifts from "trust the node operator" to "trust AMD/Intel's hardware security" — a dramatically better model. Available today on commodity cloud: AWS Nitro Enclaves, Azure Confidential VMs, GCP Confidential Computing. Also available on bare metal with SEV-SNP capable CPUs
+
+- [ ] **Reproducible builds pipeline** — Set up deterministic, reproducible builds for the relay node binary so anyone can compile from source and get the exact same binary hash. This is required for TEE attestation to be meaningful — the attestation proves "this code is running in an enclave" but the client needs to verify "and this code is the honest, audited binary." Build pipeline: pinned Rust toolchain version, locked dependency tree via `Cargo.lock`, Docker-based build environment with fixed base image hash, CI job that produces the reproducible binary and publishes its hash. The published hash is what clients check against in the TEE attestation report
+
+- [ ] **Traffic volume analysis** — Entry and exit nodes in a circuit measure total bytes the relay node receives and sends. If the relay is forwarding honestly, bytes_in ≈ bytes_out (minus Sphinx layer overhead). If the relay is exfiltrating captured data to a logging server, bytes_out > bytes_in by a measurable margin. Implement as a check during session settlement: if the exit node's observed bytes from the relay diverge from the entry node's sent bytes by more than a threshold (e.g., >15% accounting for protocol overhead), flag the relay node. This is a weak signal individually but additive with other layers. Catches the obvious case of real-time log exfiltration. Does not catch sophisticated exfiltration (steganography, batched upload during off-hours, covert timing channels)
+
+**Success metric:** Real users browsing through ShieldNode on Ethereum mainnet, with ZK-private settlement and post-quantum circuit handshakes. At least 3 TEE-attested nodes operational on mainnet with client-verified attestation.
 
 ---
 
@@ -138,6 +156,116 @@ Remove all remaining centralization points and scale the network.
 - [ ] **PQ Sphinx packet format** — Upgrade the Sphinx onion routing layer itself to use PQ primitives for the per-hop DH operations. The hybrid handshake (Phase 4) protects circuit *construction*, but Sphinx's internal layered encryption also uses X25519. Full PQ Sphinx replaces all elliptic curve operations in the packet format with PQ equivalents. Research dependency: efficient PQ group operations suitable for Sphinx's SURB (Single Use Reply Block) construction. Monitor Nym's PQ Sphinx research for prior art
 - [ ] **ML-DSA receipt signing as default** — Once Ethereum's execution layer supports PQ signature verification via precompiles (EF roadmap fork J*), switch bandwidth receipt signing from ECDSA to ML-DSA as the default, with ECDSA as fallback. The ZK circuit already supports both (added Phase 4). The plaintext settlement path will need a new `PQSessionSettlement.sol` that verifies ML-DSA on-chain via the precompile
 - [ ] **Track EF PQ key registry (fork I*)** — When Ethereum adds a PQ key registry at the consensus layer, evaluate whether ShieldNode's NodeRegistry should mirror this pattern — allowing node operators to register PQ public keys that are anchored in the same infrastructure validators use
+- [ ] **Community watchlists** — Opt-in, non-binding public lists of suspected colluding node clusters that clients can subscribe to. Similar to Tor's consensus flagging but decentralized and advisory rather than authoritative. Maintained by community contributors, signed with known identities. Client can enable/disable in Settings. Does not interact with the slashing oracle — probabilistic evidence is appropriate for client-side avoidance but not for on-chain stake destruction
+- [ ] **Research: decentralized correlation detection** — Investigate whether clients can collaboratively report circuit performance anomalies (without leaking their own traffic data) to build a decentralized view of suspicious node behavior. ZK proofs could allow clients to prove "I experienced correlated failures through nodes X and Y" without revealing their identity or traffic. This is an open research problem — document findings in `docs/THREAT-MODEL.md` regardless of whether a practical solution emerges
+- [ ] **ZK-VM proof of correct forwarding (replaces trusted challengers for selective denial)** — Instead of trusted challenger attestations, nodes prove they correctly forwarded packets using a ZK-VM (RISC Zero or SP1). How it works: the node commits to a Merkle root of all packets received during a time window (e.g., 10 minutes). A challenger picks N random packets from the commitment. The node produces a ZK-VM proof that it executed `process_relay_packet()` on each selected packet and produced the correct output (next-hop forwarded packet). If the node can't produce the proof, it either didn't forward the packet or forwarded it incorrectly — that's provable, not attestation-based. Random sampling catches a node dropping X% of traffic with probability scaling with sample size (100 samples catches 5% drop rate with near certainty). This eliminates the trusted challenger for selective denial entirely. Dependency: ZK-VM proving costs must be benchmarked — current RISC Zero performance is on the edge of feasibility for simple computations like the relay function. The `process_relay_packet()` function is already a pure function with no side effects specifically to enable this
+- [ ] **ZK-VM execution trace proof for logging detection (partial replacement of trusted challengers)** — Extends the ZK-VM forwarding proof to cover the full execution trace, not just input/output. The ZK-VM proves that during execution of the relay function, the only output was the forwarded packet — no side-channel writes, no additional memory allocations, no network calls other than the forward. This proves the *node software itself* didn't log. Documented limitation: this cannot prove the operator isn't running a separate process (tcpdump, modified kernel module, packet sniffer) capturing traffic outside the node binary. The ZK-VM proves what happened inside its sandbox, not what's happening at the OS level. Still a meaningful improvement: eliminates the scenario where operators run modified node software (the majority of realistic logging threats), and is stronger than what any other decentralized system currently offers. State-level adversaries compromising the host OS remain outside the proof's scope — document this transparently in `docs/THREAT-MODEL.md`
+- [ ] **Dummy commitment Merkle tree (bootstrapping network size privacy)** — Deploy the initial NodeRegistry with a fixed-size Merkle tree (e.g., 512 slots). At launch with few real nodes, remaining slots contain dummy commitments indistinguishable from real ones. As real nodes register, they replace dummy slots. Requires simulated heartbeats for dummy slots at realistic intervals (~$0.02/tx, ~$32/day for 400 dummies at 4x/day — manageable during grant-funded bootstrapping, decreases as real nodes replace dummies). Dummy salt generation must use a VDF or public commit-reveal scheme so even the deployer can't later prove which commitments were dummies. Once real node count crosses a threshold (e.g., 256), fork to a new NodeRegistry contract without dummy logic and migrate real stakes. This migration uses the same immutable-contract upgrade pattern already documented. Design the fork trigger as either a `realNodeCount` threshold or a time-based sunset (e.g., 12 months post-launch). Note: even with dummies, an attacker can observe total registration events and stake locked in the contract — the dummies hide the *real* node count within the fixed tree size but don't hide the tree size itself. At 512 slots with 20 real nodes, the attacker knows "somewhere between 1 and 512 nodes" which is far better than knowing "exactly 20"
+- [ ] **Ephemeral compute enforcement** — Node relay software runs in ephemeral containers destroyed and recreated on a fixed schedule (e.g., every hour). The environment has no persistent storage — read-only filesystem, no volume mounts, memory wiped on teardown. The node produces an attestation (TEE-backed or ZK-VM-backed) that it's running in an environment matching a specific configuration hash (no writable storage, no extra network interfaces beyond tunnel endpoints). Combined with ZK-VM execution trace proof: the software didn't log, and the environment couldn't persist logs. Does not prevent real-time streaming of captured packets to an external server during the container's lifetime, but prevents retrospective log accumulation. The traffic volume analysis (Phase 5) covers the real-time exfiltration gap
+- [ ] **Research: secure coprocessor for relay function** — Investigate whether the relay forwarding function could run on dedicated hardware (secure element, HSM-like device) with no general-purpose OS, no filesystem, no logging capability by design. Similar to a hardware wallet but for packet forwarding — physically no mechanism to extract packet data because the hardware lacks storage or I/O paths that would allow it. This is the strongest possible anti-logging guarantee but requires custom hardware. Not practical for general operators, but could be offered as a premium "verified hardware node" tier. Study Oasis Network's Sapphire runtime and similar confidential computing hardware for prior art. Document findings in `docs/THREAT-MODEL.md`
+
+---
+
+## Anti-Collusion Design & Known Limitations
+
+The hardest unsolved problem in decentralized relay networks is preventing a single entity from controlling multiple nodes in the same circuit and correlating entry/exit traffic. Financial stake makes Sybil attacks expensive but not impossible for well-funded adversaries. Tor addresses this with centralized directory authorities that act on probabilistic signals — ShieldNode cannot do this because on-chain slashing requires cryptographic proof, not statistical suspicion.
+
+### What ShieldNode does
+
+**Economic deterrence**: running N colluding nodes at competitive stake (0.5-1 ETH each) costs $1K-2K per node. Controlling enough of the network to reliably land both entry and exit positions requires significant capital at risk of slashing.
+
+**Client-controlled circuit selection**: the client independently selects all three hops. An attacker controlling K of N total nodes has roughly (K/N)² probability of controlling both entry and exit on any given circuit. At 10/100 nodes: ~1%. At 10/500: ~0.04%. Network growth is the strongest defense.
+
+**Circuit diversity constraints (Phase 4)**: entry, relay, and exit must be on different ASNs, IP subnets, and geographic regions. Eliminates the attack variant where one operator uses the same or adjacent infrastructure for multiple nodes.
+
+**Same-operator exclusion (Phase 4)**: nodes sharing an on-chain registrant are never placed in the same circuit.
+
+**Stake concentration heuristics (Phase 4)**: client-side probabilistic detection of suspicious node clusters based on registration patterns, funding sources, and correlated behavior.
+
+**Circuit auto-rotation (Phase 2, complete)**: circuits rebuild periodically through different nodes, limiting the window of any single successful correlation attack.
+
+### What ShieldNode does NOT fully solve
+
+**Sophisticated Sybil with diverse infrastructure**: an attacker using different wallets, different hosting providers, different IP ranges, and staggered registration timing is very difficult to detect — either on-chain or client-side. No decentralized system has fully solved this.
+
+**Provable collusion detection**: the gap between what's statistically suspicious and what's cryptographically provable on-chain is fundamental. The slashing oracle cannot act on "these nodes look correlated" — it needs proof of logging, censorship, or fraud. This means collusion that doesn't produce detectable misbehavior (passive traffic correlation) cannot be slashed.
+
+**OS-level surveillance**: ZK-VM proofs (Phase 6) can prove the node software behaved honestly, but cannot prove the operator isn't running a separate capture process outside the node binary. This is a fundamental limitation of software-level proofs — they prove what happened inside the sandbox, not what's happening on the host. TEE attestation (Phase 5) closes this gap by isolating traffic inside a hardware enclave the operator cannot access. Multi-hop architecture provides additional mitigation — compromising one node's host OS is insufficient without also compromising the other two hops.
+
+**Global network view**: without a trusted entity that sees all traffic patterns (like Tor's directory authorities), detecting correlated behavior across the network requires either a decentralized reputation system or collaborative client-side reporting — both are research-level problems. ZK anonymous client reporting (Phase 6 research) is the most promising direction.
+
+### Mitigation roadmap
+
+| Phase | Mitigation | Type |
+|-------|-----------|------|
+| 2 (done) | Circuit auto-rotation | Limits correlation window |
+| 3 (done) | Stake-weighted selection, sqrt scaling | Economic deterrence |
+| 4 | Circuit diversity constraints (ASN/subnet/region) | Hard constraint |
+| 4 | Same-operator exclusion | Hard constraint |
+| 4 | Stake concentration heuristics | Client-side probabilistic |
+| 4 | Minimum network size guard | UX safety |
+| 5 | TEE remote attestation (SEV-SNP) | Hardware-enforced isolation |
+| 5 | Reproducible builds | Completes TEE attestation chain |
+| 5 | Traffic volume analysis | Exfiltration detection |
+| 5 | Dummy commitment Merkle tree (bootstrapping) | Hides real network size during early growth |
+| 6 | ZK node eligibility (commitment-based registry) | Hides node set from enumeration |
+| 6 | ZK-VM proof of correct forwarding | Replaces trusted challenger for selective denial |
+| 6 | ZK-VM execution trace proof | Partial replacement of trusted challenger for logging |
+| 6 | Ephemeral compute enforcement | Prevents log persistence |
+| 6 | Community watchlists (opt-in suspicious cluster lists) | Social/probabilistic |
+| 6+ | Research: decentralized correlation detection | Open problem |
+| 6+ | Research: secure coprocessor hardware | Strongest possible anti-logging |
+| Post-threshold | Fork to remove dummy commitments | Cleanup once anonymity set is sufficient |
+
+### Prior art to study
+
+- **Tor**: directory authorities + consensus weight system. Centralized trust model for relay selection. Extensive research on Sybil detection heuristics
+- **Nym**: mixnet with Sphinx packets, staking-based reputation. Study their approach to mix node selection, Sybil resistance via staking, and traffic analysis resistance through packet timing obfuscation
+- **Oxen/Session**: decentralized onion routing with service node staking. Study their swarm-based node grouping and path selection as an alternative approach to circuit diversity
+- **HOPR**: mixing with cover traffic. Probabilistic packet relaying to resist traffic analysis
+
+### Honest assessment
+
+A sufficiently funded state-level adversary operating nodes across diverse infrastructure, using independent wallets and staggered registration, cannot be fully prevented by any known decentralized mechanism. ShieldNode's defenses make this attack expensive and probabilistically unlikely, but not impossible. This is a shared limitation with every decentralized relay network. The strongest long-term defense is network growth — the larger the honest node set, the lower the probability of adversarial circuit capture.
+
+---
+
+## Anti-Logging Architecture
+
+Preventing node operators from logging user traffic is the hardest security guarantee to provide in a decentralized relay network. Cryptography can prove what happened inside a computation but cannot prove what didn't happen on hardware you don't control. ShieldNode addresses this through layered defenses where each layer catches what the others miss.
+
+### Defense layers
+
+| Layer | What it proves | What it misses | Phase |
+|-------|---------------|----------------|-------|
+| No-log software design | Node binary has no logging mechanism | Operator can modify binary or run separate capture | 1 (done) |
+| TEE attestation (SEV-SNP) | Host OS cannot read enclave memory; binary matches audited source | Hardware manufacturer backdoors, side-channel attacks | 5 |
+| Reproducible builds | Attested binary is the honest open-source code | Nothing — completes the attestation chain | 5 |
+| Traffic volume analysis | Relay isn't sending more data than expected (exfiltration) | Sophisticated covert channels, batched exfiltration | 5 |
+| ZK-VM execution trace | Node software didn't log during execution | OS-level capture outside the ZK-VM sandbox | 6 |
+| Ephemeral compute | Environment cannot persist logs across restarts | Real-time exfiltration during container lifetime | 6 |
+| Secure coprocessor (research) | Hardware physically cannot store or exfiltrate data | Requires custom hardware, impractical for most operators | Research |
+
+### Trust model progression
+
+**Phase 1-4 (current):** Trust the node operator not to log. Enforced by: software design (no logging mechanism), economic incentives (staked ETH at risk), and trusted challenger attestations.
+
+**Phase 5 (TEE):** Trust shifts from node operator to hardware manufacturer (AMD/Intel). The operator is removed from the trust equation — even a malicious operator cannot access traffic inside the enclave. TEE-attested nodes are preferred in circuit selection, especially for the entry position.
+
+**Phase 6 (layered):** ZK-VM proves software honesty. TEE proves hardware isolation. Ephemeral compute proves no persistence. Traffic analysis detects exfiltration. Each layer is independently insufficient but collectively they cover each other's blind spots.
+
+**Long-term (research):** Purpose-built secure coprocessor hardware eliminates the host OS from the architecture entirely for operators who want the strongest guarantee.
+
+### Known limitation
+
+No combination of software, cryptographic, or hardware techniques can provide a mathematical proof that an arbitrary remote machine isn't logging. TEE + ZK-VM + ephemeral compute gets close — the remaining attack surface is hardware-level side channels against the TEE, which require physical access to the machine and sophisticated lab equipment. For ShieldNode's threat model, this is sufficient: the multi-hop architecture means an attacker must compromise the TEE on both entry and exit nodes in the same circuit to correlate traffic, and hardware side-channel attacks don't scale to attacking many nodes simultaneously.
+
+### TEE implementation notes
+
+- Prefer AMD SEV-SNP over Intel SGX. SGX has had multiple side-channel breaks (Spectre, Foreshadow, ÆPIC Leak, Plundervolt). SEV-SNP is newer with a stronger security track record so far
+- The relay binary must be compiled as a single static binary that runs inside the enclave with minimal dependencies. No dynamic linking, no shell access, no debugging interfaces
+- Attestation verification can happen client-side (the client checks the attestation report against AMD's root of trust certificate chain) or on-chain (store attestation hashes in the NodeRegistry for public verifiability). Client-side is simpler; on-chain is more transparent. Implement client-side first, add on-chain attestation hashes as a NodeRegistry field in Phase 6
+- TEE nodes should be a tier, not a requirement. Requiring TEE would exclude operators running on non-TEE hardware (Raspberry Pis, older servers, some VPS providers). Instead, TEE attestation provides a scoring bonus and entry-node preference. The network benefits from both TEE-attested high-trust nodes and non-TEE commodity nodes for breadth
 
 ---
 
