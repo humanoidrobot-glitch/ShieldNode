@@ -11,7 +11,7 @@
 #
 # The resulting hash should match across identical source + toolchain versions.
 
-FROM rust:1.85.0-bookworm AS builder
+FROM rust:1.91.0-bookworm AS builder
 
 # Pin system dependencies for determinism.
 RUN apt-get update && apt-get install -y --no-install-recommends \
