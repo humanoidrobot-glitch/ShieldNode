@@ -32,9 +32,17 @@ const RATCHET_INFO: &[u8] = b"shieldnode-ratchet-v1";
 ///
 /// Wraps ChaCha20-Poly1305, replacing the session key on a schedule.
 /// Previous keys are zeroized on drop and on ratchet step.
+///
+/// Lifetime is bounded to a single session — not intended for persistence
+/// across node restarts. A fresh handshake creates a new Ratchet.
 pub struct Ratchet {
     /// Current encryption key (32 bytes).
     current_key: [u8; 32],
+    /// Previous epoch's encryption key (retained for one-epoch lookback
+    /// during ratchet transitions — zeroized on next step).
+    prev_key: Option<[u8; 32]>,
+    /// Previous epoch number (for lookback).
+    prev_epoch: Option<u64>,
     /// Chain key used to derive the next session key.
     chain_key: [u8; 32],
     /// Current epoch number (increments on each ratchet step).
@@ -57,6 +65,8 @@ impl Ratchet {
 
         Self {
             current_key,
+            prev_key: None,
+            prev_epoch: None,
             chain_key,
             epoch: 0,
             bytes_this_epoch: 0,
@@ -78,7 +88,15 @@ impl Ratchet {
 
     /// Advance to the next epoch. Zeroizes the old key.
     pub fn ratchet_step(&mut self) {
-        let mut old_key = self.current_key;
+        // Zeroize the previous lookback key (two steps ago).
+        if let Some(mut pk) = self.prev_key.take() {
+            pk.zeroize();
+        }
+
+        // Retain current key as one-epoch lookback for in-flight packets.
+        self.prev_key = Some(self.current_key);
+        self.prev_epoch = Some(self.epoch);
+
         let mut old_chain = self.chain_key;
 
         self.epoch += 1;
@@ -90,8 +108,6 @@ impl Ratchet {
         self.epoch_start = Instant::now();
         self.nonce_counter = 0;
 
-        // Zeroize old key material.
-        old_key.zeroize();
         old_chain.zeroize();
     }
 
@@ -127,15 +143,21 @@ impl Ratchet {
         nonce_index: u64,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, String> {
-        if epoch != self.epoch {
+        let key = if epoch == self.epoch {
+            &self.current_key
+        } else if self.prev_epoch == Some(epoch) {
+            self.prev_key
+                .as_ref()
+                .ok_or_else(|| "previous epoch key not available".to_string())?
+        } else {
             return Err(format!(
-                "epoch mismatch: expected {}, got {epoch}",
-                self.epoch
+                "epoch {epoch} out of range (current={}, prev={:?})",
+                self.epoch, self.prev_epoch
             ));
-        }
+        };
 
         let nonce = aead::nonce_from_index(nonce_index);
-        aead::decrypt_with_nonce(&self.current_key, &nonce, ciphertext)
+        aead::decrypt_with_nonce(key, &nonce, ciphertext)
             .map_err(|e| format!("ratchet decrypt failed: {e}"))
     }
 
@@ -152,6 +174,9 @@ impl Drop for Ratchet {
     fn drop(&mut self) {
         self.current_key.zeroize();
         self.chain_key.zeroize();
+        if let Some(mut pk) = self.prev_key.take() {
+            pk.zeroize();
+        }
     }
 }
 
@@ -159,20 +184,22 @@ impl Drop for Ratchet {
 
 /// Derive a (chain_key, encryption_key) pair from input key material.
 ///
-/// Uses HKDF-SHA256 with the epoch as salt context.
-fn derive_keys(ikm: &[u8; 32], epoch: u64) -> ([u8; 32], [u8; 32]) {
-    let salt = epoch.to_be_bytes();
-    let hk = Hkdf::<Sha256>::new(Some(&salt), ikm);
+/// Single HKDF-SHA256 expanded to 64 bytes, split into two 32-byte keys.
+/// Follows Signal's symmetric ratchet pattern: both outputs from one HKDF,
+/// differentiated by position (first 32 = chain, second 32 = encryption).
+fn derive_keys(ikm: &[u8; 32], _epoch: u64) -> ([u8; 32], [u8; 32]) {
+    let hk = Hkdf::<Sha256>::new(None, ikm);
+
+    let mut okm = [0u8; 64];
+    hk.expand(RATCHET_INFO, &mut okm)
+        .expect("64 bytes is valid HKDF-SHA256 output");
 
     let mut chain_key = [0u8; 32];
-    hk.expand(RATCHET_INFO, &mut chain_key)
-        .expect("32 bytes is valid HKDF output");
-
-    // Derive encryption key from chain key with a different info string.
-    let hk2 = Hkdf::<Sha256>::new(Some(&salt), &chain_key);
     let mut enc_key = [0u8; 32];
-    hk2.expand(b"shieldnode-ratchet-enc", &mut enc_key)
-        .expect("32 bytes is valid HKDF output");
+    chain_key.copy_from_slice(&okm[..32]);
+    enc_key.copy_from_slice(&okm[32..]);
+
+    okm.zeroize();
 
     (chain_key, enc_key)
 }
@@ -310,13 +337,26 @@ mod tests {
     }
 
     #[test]
-    fn epoch_mismatch_fails_decrypt() {
+    fn one_epoch_lookback_works() {
         let mut ratchet = Ratchet::new([0x01; 32]);
-        let (_, ct) = ratchet.encrypt(b"data").unwrap();
+        let (epoch0, ct) = ratchet.encrypt(b"data from epoch 0").unwrap();
+        assert_eq!(epoch0, 0);
 
         ratchet.ratchet_step(); // advance to epoch 1
 
-        // Try to decrypt epoch 0 data with epoch 1 key.
+        // Previous epoch (0) is available via lookback.
+        let pt = ratchet.decrypt(0, 0, &ct).unwrap();
+        assert_eq!(pt, b"data from epoch 0");
+    }
+
+    #[test]
+    fn two_epoch_gap_fails_decrypt() {
+        let mut ratchet = Ratchet::new([0x01; 32]);
+        let (_, ct) = ratchet.encrypt(b"data").unwrap();
+
+        ratchet.ratchet_step(); // epoch 1
+        ratchet.ratchet_step(); // epoch 2 — epoch 0 lookback is gone
+
         assert!(ratchet.decrypt(0, 0, &ct).is_err());
     }
 
