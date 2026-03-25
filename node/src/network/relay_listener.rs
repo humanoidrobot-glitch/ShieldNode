@@ -20,8 +20,9 @@ use super::relay::{RelayService, SessionState};
 const MIN_PACKET_SIZE: usize = 8 + 1;
 
 /// Minimum size for a relay data packet (session_id != 0):
-/// 8-byte session_id + at least 36 bytes for a serialized SphinxPacket.
-const MIN_DATA_PACKET_SIZE: usize = 8 + 36;
+/// 8-byte session_id + at least 68 bytes for a serialized SphinxPacket
+/// (32 next_hop + 32 mac + 4 payload_len).
+const MIN_DATA_PACKET_SIZE: usize = 8 + 68;
 
 /// Default relay port used when the next-hop encoding has port == 0.
 const DEFAULT_RELAY_PORT: u16 = 51821;

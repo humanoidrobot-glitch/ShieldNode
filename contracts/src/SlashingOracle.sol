@@ -5,6 +5,7 @@ import {ISlashingOracle}  from "./interfaces/ISlashingOracle.sol";
 import {INodeRegistry}    from "./interfaces/INodeRegistry.sol";
 import {NodeRegistry}     from "./NodeRegistry.sol";
 import {SessionSettlement} from "./SessionSettlement.sol";
+import {EIP712Utils}       from "./lib/EIP712Utils.sol";
 
 /// @title SlashingOracle
 /// @notice Manages slash proposals with on-chain evidence verification,
@@ -41,9 +42,7 @@ contract SlashingOracle is ISlashingOracle {
 
     // ── EIP-712 (mirrors SessionSettlement) ──────────────────────
 
-    bytes32 public constant RECEIPT_TYPEHASH = keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    );
+    bytes32 public constant RECEIPT_TYPEHASH = EIP712Utils.RECEIPT_TYPEHASH;
 
     /// @notice EIP-712 domain separator (computed in constructor to match
     ///         the SessionSettlement contract on the same chain).
@@ -288,12 +287,12 @@ contract SlashingOracle is ISlashingOracle {
         uint256 cumBytes2, uint256 ts2, bytes memory cSig2, bytes memory nSig2
     ) internal view {
         bytes32 digest1 = _receiptDigest(sessionId, cumBytes1, ts1);
-        address client1 = _recoverSigner(digest1, cSig1);
-        address node1   = _recoverSigner(digest1, nSig1);
+        address client1 = EIP712Utils.recoverSigner(digest1, cSig1);
+        address node1   = EIP712Utils.recoverSigner(digest1, nSig1);
 
         bytes32 digest2 = _receiptDigest(sessionId, cumBytes2, ts2);
-        address client2 = _recoverSigner(digest2, cSig2);
-        address node2   = _recoverSigner(digest2, nSig2);
+        address client2 = EIP712Utils.recoverSigner(digest2, cSig2);
+        address node2   = EIP712Utils.recoverSigner(digest2, nSig2);
 
         if (client1 != client2) revert InvalidEvidence("client signers differ");
         if (node1 != node2)     revert InvalidEvidence("node signers differ");
@@ -344,7 +343,7 @@ contract SlashingOracle is ISlashingOracle {
             abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
         );
 
-        address signer = _recoverSigner(digest, challengerSig);
+        address signer = EIP712Utils.recoverSigner(digest, challengerSig);
         if (signer != expectedChallenger) {
             revert InvalidEvidence("attestation signer mismatch");
         }
@@ -360,30 +359,9 @@ contract SlashingOracle is ISlashingOracle {
         uint256 cumulativeBytes,
         uint256 timestamp
     ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(RECEIPT_TYPEHASH, sessionId, cumulativeBytes, timestamp)
-        );
-        return keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
-        );
+        bytes32 structHash = EIP712Utils.receiptStructHash(sessionId, cumulativeBytes, timestamp);
+        return EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
     }
 
-    /// @dev Recover the signer of a 65-byte ECDSA signature.
-    function _recoverSigner(
-        bytes32 digest,
-        bytes memory sig
-    ) internal pure returns (address) {
-        if (sig.length != 65) revert InvalidEvidence("bad sig length");
-        bytes32 r;
-        bytes32 s_;
-        uint8 v;
-        assembly {
-            r  := mload(add(sig, 32))
-            s_ := mload(add(sig, 64))
-            v  := byte(0, mload(add(sig, 96)))
-        }
-        address signer = ecrecover(digest, v, r, s_);
-        if (signer == address(0)) revert InvalidEvidence("invalid signature");
-        return signer;
-    }
+    // _recoverSigner moved to EIP712Utils library.
 }

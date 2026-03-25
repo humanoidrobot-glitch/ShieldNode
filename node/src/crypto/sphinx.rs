@@ -1,6 +1,10 @@
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use thiserror::Error;
 
 use super::aead;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -14,6 +18,8 @@ pub enum SphinxError {
     DecryptionFailed(String),
     #[error("malformed header")]
     MalformedHeader,
+    #[error("MAC verification failed")]
+    MacVerificationFailed,
 }
 
 // ── header + packet ────────────────────────────────────────────────────
@@ -23,7 +29,7 @@ pub enum SphinxError {
 pub struct SphinxHeader {
     pub next_hop: [u8; 32],
     pub routing_info: Vec<u8>,
-    /// Binding tag derived from the payload (placeholder for proper HMAC).
+    /// HMAC-SHA256 over (next_hop || payload), keyed by the session key.
     pub mac: [u8; 32],
 }
 
@@ -59,7 +65,7 @@ impl SphinxPacket {
             next_hop = *pub_key;
         }
 
-        let mac = binding_tag(&current_payload);
+        let mac = compute_mac(&route[0].1, &next_hop, &current_payload);
 
         Ok(Self {
             header: SphinxHeader {
@@ -73,13 +79,17 @@ impl SphinxPacket {
 
     /// Peel one onion layer using `session_key` for this hop.
     ///
-    /// Returns `(next_hop_public_key, inner_packet)`.  If `next_hop` is
-    /// all zeros, this node is the final destination.
+    /// Verifies the HMAC before decrypting. Returns `(next_hop_public_key,
+    /// inner_packet)`. If `next_hop` is all zeros, this node is the final
+    /// destination.
     pub fn peel_layer(
         &self,
         session_key: &[u8; 32],
         hop_index: u64,
     ) -> Result<([u8; 32], SphinxPacket), SphinxError> {
+        // Verify MAC before decrypting.
+        verify_mac(session_key, &self.header.next_hop, &self.payload, &self.header.mac)?;
+
         let decrypted = aead::decrypt(session_key, hop_index, &self.payload)
             .map_err(|e| SphinxError::DecryptionFailed(e.to_string()))?;
 
@@ -91,11 +101,15 @@ impl SphinxPacket {
         next_hop.copy_from_slice(&decrypted[..32]);
         let inner_payload = decrypted[32..].to_vec();
 
+        // Compute MAC for the inner packet using the same session key.
+        // The next hop will verify with its own session key.
+        let inner_mac = compute_mac(session_key, &next_hop, &inner_payload);
+
         let inner_packet = SphinxPacket {
             header: SphinxHeader {
                 next_hop,
                 routing_info: Vec::new(),
-                mac: binding_tag(&inner_payload),
+                mac: inner_mac,
             },
             payload: inner_payload,
         };
@@ -105,11 +119,13 @@ impl SphinxPacket {
 
     // ── serialisation ──────────────────────────────────────────────────
 
-    /// Serialize this packet to bytes: `[32-byte next_hop][4-byte payload_len (BE)][payload]`.
+    /// Serialize this packet to bytes:
+    /// `[32-byte next_hop][32-byte mac][4-byte payload_len (BE)][payload]`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let payload_len = self.payload.len() as u32;
-        let mut buf = Vec::with_capacity(32 + 4 + self.payload.len());
+        let mut buf = Vec::with_capacity(32 + 32 + 4 + self.payload.len());
         buf.extend_from_slice(&self.header.next_hop);
+        buf.extend_from_slice(&self.header.mac);
         buf.extend_from_slice(&payload_len.to_be_bytes());
         buf.extend_from_slice(&self.payload);
         buf
@@ -117,23 +133,26 @@ impl SphinxPacket {
 
     /// Deserialize a packet from bytes produced by [`to_bytes`].
     pub fn from_bytes(data: &[u8]) -> Result<Self, SphinxError> {
-        if data.len() < 36 {
+        // 32 (next_hop) + 32 (mac) + 4 (len) = 68 minimum
+        if data.len() < 68 {
             return Err(SphinxError::MalformedHeader);
         }
 
         let mut next_hop = [0u8; 32];
         next_hop.copy_from_slice(&data[..32]);
 
+        let mut mac = [0u8; 32];
+        mac.copy_from_slice(&data[32..64]);
+
         let payload_len = u32::from_be_bytes(
-            data[32..36].try_into().map_err(|_| SphinxError::MalformedHeader)?
+            data[64..68].try_into().map_err(|_| SphinxError::MalformedHeader)?
         ) as usize;
 
-        if data.len() < 36 + payload_len {
+        if data.len() < 68 + payload_len {
             return Err(SphinxError::MalformedHeader);
         }
 
-        let payload = data[36..36 + payload_len].to_vec();
-        let mac = binding_tag(&payload);
+        let payload = data[68..68 + payload_len].to_vec();
 
         Ok(Self {
             header: SphinxHeader {
@@ -146,11 +165,31 @@ impl SphinxPacket {
     }
 }
 
-/// Placeholder binding tag: first 32 bytes of payload.
-/// A production system should use HMAC-SHA256.
-fn binding_tag(payload: &[u8]) -> [u8; 32] {
-    let mut m = [0u8; 32];
-    let len = payload.len().min(32);
-    m[..len].copy_from_slice(&payload[..len]);
-    m
+/// Compute HMAC-SHA256 over (next_hop || payload) using session_key.
+fn compute_mac(session_key: &[u8; 32], next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+    let mut hmac = HmacSha256::new_from_slice(session_key)
+        .expect("HMAC accepts any key length");
+    hmac.update(next_hop);
+    hmac.update(payload);
+    let result = hmac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
+/// Verify HMAC-SHA256 over (next_hop || payload).
+fn verify_mac(
+    session_key: &[u8; 32],
+    next_hop: &[u8; 32],
+    payload: &[u8],
+    expected: &[u8; 32],
+) -> Result<(), SphinxError> {
+    let computed = compute_mac(session_key, next_hop, payload);
+    // Constant-time comparison via HMAC verify.
+    let mut hmac = HmacSha256::new_from_slice(session_key)
+        .expect("HMAC accepts any key length");
+    hmac.update(next_hop);
+    hmac.update(payload);
+    hmac.verify_slice(expected)
+        .map_err(|_| SphinxError::MacVerificationFailed)
 }

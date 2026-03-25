@@ -5229,6 +5229,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "k256",
  "libp2p",
  "ml-kem",

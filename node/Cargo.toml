@@ -37,6 +37,7 @@ thiserror = "2"
 anyhow = "1"
 rand = "0.8"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa"] }
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }

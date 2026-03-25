@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ISessionSettlement} from "./interfaces/ISessionSettlement.sol";
 import {INodeRegistry}      from "./interfaces/INodeRegistry.sol";
 import {NodeRegistry}       from "./NodeRegistry.sol";
+import {EIP712Utils}        from "./lib/EIP712Utils.sol";
 
 /// @title SessionSettlement
 /// @notice Opens, cooperatively settles, and force-settles 3-hop VPN sessions.
@@ -29,9 +30,7 @@ contract SessionSettlement is ISessionSettlement {
     //  EIP-712
     // ──────────────────────────────────────────────────────────────
 
-    bytes32 public constant RECEIPT_TYPEHASH = keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    );
+    bytes32 public constant RECEIPT_TYPEHASH = EIP712Utils.RECEIPT_TYPEHASH;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
 
@@ -128,18 +127,16 @@ contract SessionSettlement is ISessionSettlement {
 
         require(rSessionId == sessionId, "Session: id mismatch");
 
-        bytes32 structHash = keccak256(
-            abi.encode(RECEIPT_TYPEHASH, rSessionId, cumulativeBytes, timestamp)
-        );
-        bytes32 digest = _hashTypedData(structHash);
+        bytes32 structHash = EIP712Utils.receiptStructHash(rSessionId, cumulativeBytes, timestamp);
+        bytes32 digest = EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
 
         // Verify client signature.
-        address clientSigner = _recoverSigner(digest, clientSig);
+        address clientSigner = EIP712Utils.recoverSigner(digest, clientSig);
         require(clientSigner == s.client, "Session: bad client sig");
 
         // Verify node signature (exit node signs on behalf of the circuit).
         INodeRegistry.NodeInfo memory exitNode = nodeRegistry.getNode(s.nodeIds[2]);
-        address nodeSigner = _recoverSigner(digest, nodeSig);
+        address nodeSigner = EIP712Utils.recoverSigner(digest, nodeSig);
         require(nodeSigner == exitNode.owner, "Session: bad node sig");
 
         _settle(sessionId, s, cumulativeBytes);
@@ -183,13 +180,11 @@ contract SessionSettlement is ISessionSettlement {
 
         require(rSessionId == sessionId, "Session: id mismatch");
 
-        bytes32 structHash = keccak256(
-            abi.encode(RECEIPT_TYPEHASH, rSessionId, cumulativeBytes, timestamp)
-        );
-        bytes32 digest = _hashTypedData(structHash);
+        bytes32 structHash = EIP712Utils.receiptStructHash(rSessionId, cumulativeBytes, timestamp);
+        bytes32 digest = EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
 
         // Verify the signer is an owner of one of the session nodes.
-        address signer = _recoverSigner(digest, nodeSig);
+        address signer = EIP712Utils.recoverSigner(digest, nodeSig);
         bool validSigner;
         for (uint256 i; i < 3; ++i) {
             INodeRegistry.NodeInfo memory info = nodeRegistry.getNode(s.nodeIds[i]);
@@ -284,27 +279,5 @@ contract SessionSettlement is ISessionSettlement {
         return total > s.deposit ? s.deposit : total;
     }
 
-    /// @dev EIP-712 hash.
-    function _hashTypedData(bytes32 structHash) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-    }
-
-    /// @dev Recover the signer of an ECDSA signature.
-    function _recoverSigner(
-        bytes32 digest,
-        bytes memory sig
-    ) internal pure returns (address) {
-        require(sig.length == 65, "Session: bad sig length");
-        bytes32 r;
-        bytes32 s_;
-        uint8 v;
-        assembly {
-            r  := mload(add(sig, 32))
-            s_ := mload(add(sig, 64))
-            v  := byte(0, mload(add(sig, 96)))
-        }
-        address signer = ecrecover(digest, v, r, s_);
-        require(signer != address(0), "Session: invalid sig");
-        return signer;
-    }
+    // _hashTypedData and _recoverSigner moved to EIP712Utils library.
 }

@@ -112,12 +112,8 @@ Three separate hex-to-bytes32 functions exist:
 ### ~~Next-hop address encoding lacks bidirectional codec~~ — RESOLVED
 Resolved — `hop_codec` module now exists in both node (`node/src/network/hop_codec.rs`) and client (`client/src-tauri/src/hop_codec.rs`) with `encode_next_hop`/`decode_next_hop`/`endpoint_to_next_hop` functions.
 
-### Sphinx MAC is a placeholder
-The `mac` field in `SphinxHeader` uses a weak binding tag (first 32 bytes of payload) instead of HMAC-SHA256. Packet tampering is not detected.
-
-**Why deferred:** Placeholder since initial scaffold. Does not affect correctness in a trusted test environment.
-
-**When to fix:** Before Phase 5 mainnet launch. Implement HMAC-SHA256 over the full header.
+### ~~Sphinx MAC is a placeholder~~ — RESOLVED
+Resolved: HMAC-SHA256 over (next_hop || payload) keyed by session key. MAC included in wire format. Constant-time verification via `hmac` crate.
 
 ---
 
@@ -158,12 +154,8 @@ The function accepts 10 individual parameters due to stack-too-deep constraints.
 
 **When to fix:** When `via_ir` can be removed (e.g., if Solidity compiler improves stack handling) or during mainnet audit prep.
 
-### `_recoverSigner` duplicated between SlashingOracle and SessionSettlement
-Both contracts implement identical ECDSA signature recovery (assembly-based `r`/`s`/`v` extraction + `ecrecover`). The only difference is the error type (custom error vs require string).
-
-**Why deferred:** Creating a shared Solidity library requires choosing one error convention and updating both consumers. Part of the broader "shared types" migration.
-
-**When to fix:** Before mainnet deployment. Extract into a `library EIP712Utils`.
+### ~~`_recoverSigner` duplicated between SlashingOracle and SessionSettlement~~ — RESOLVED
+Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`, `receiptStructHash`, and `hashTypedData`. Both contracts import and use the shared library.
 
 ### ~~Missing test: slash proposal for non-existent node~~ — RESOLVED
 Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't check registry), execution reverts at `registry.slash` with "node not found". Documented as expected behavior.
@@ -232,12 +224,8 @@ Resolved: EIP-712 digest is now computed entirely in-circuit via two keccak256 c
 
 **When to fix:** Phase 5, alongside the mainnet security audit. Add timelock + multisig at minimum.
 
-### RECEIPT_TYPEHASH defined in three places
-The EIP-712 `BandwidthReceipt` typehash is independently defined in `SessionSettlement.sol`, `SessionSettlement.t.sol`, and referenced by the circuit. Any change to the receipt structure requires updating all three (plus the circuit).
-
-**Why deferred:** The typehash is a stable protocol constant unlikely to change. Extracting to a shared library saves ~2 lines per consumer.
-
-**When to fix:** Before mainnet. Extract to a shared `SettlementConstants` library or interface.
+### ~~RECEIPT_TYPEHASH defined in three places~~ — RESOLVED
+Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both `SessionSettlement` and `SlashingOracle` reference `EIP712Utils.RECEIPT_TYPEHASH`. Test files still have a local copy for test isolation.
 
 ---
 
