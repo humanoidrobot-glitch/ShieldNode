@@ -115,6 +115,13 @@ Resolved — `hop_codec` module now exists in both node (`node/src/network/hop_c
 ### ~~Sphinx MAC is a placeholder~~ — RESOLVED
 Resolved: HMAC-SHA256 over (next_hop || payload) keyed by session key. MAC included in wire format. Constant-time verification via `hmac` crate.
 
+### compute_mac duplicated between node and client sphinx.rs
+`compute_mac()` is identical in `node/src/crypto/sphinx.rs` and `client/src-tauri/src/sphinx.rs`. Same function, same HMAC construction, same output pattern. Part of the broader shared crate duplication.
+
+**Why deferred:** No shared crate exists. Both crates need the function independently.
+
+**When to fix:** With the shared crate migration. Extract to `packages/shieldnode-crypto`.
+
 ---
 
 ## Frontend
@@ -159,6 +166,13 @@ Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`,
 
 ### ~~Missing test: slash proposal for non-existent node~~ — RESOLVED
 Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't check registry), execution reverts at `registry.slash` with "node not found". Documented as expected behavior.
+
+### EIP712Utils.recoverSigner uses require string instead of custom error
+`EIP712Utils.recoverSigner` uses `require(sig.length == 65, "EIP712: bad sig length")`. The `SlashingOracle` previously used `revert InvalidEvidence("bad sig length")` — a custom error that is cheaper in gas and pattern-matchable by off-chain tools. The shared library chose `require` strings for simplicity since both contracts had different error conventions.
+
+**Why deferred:** No test catches the error type difference. Gas impact is negligible for a failure path.
+
+**When to fix:** During mainnet audit prep. Add a custom `EIP712Error` to the library if auditors flag it.
 
 ### Attestation domain uses settlement address as verifyingContract
 `DOMAIN_SEPARATOR` uses the SessionSettlement address as `verifyingContract` for both receipt signatures (correct) and attestation signatures (semantically wrong — attestations are oracle-native). Wallets will show the settlement address when signing attestations, which is confusing. Low real-world impact since `SlashAttestation` has a distinct typehash.
@@ -225,7 +239,7 @@ Resolved: EIP-712 digest is now computed entirely in-circuit via two keccak256 c
 **When to fix:** Phase 5, alongside the mainnet security audit. Add timelock + multisig at minimum.
 
 ### ~~RECEIPT_TYPEHASH defined in three places~~ — RESOLVED
-Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both `SessionSettlement` and `SlashingOracle` reference `EIP712Utils.RECEIPT_TYPEHASH`. Test files still have a local copy for test isolation.
+Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both contracts and test files import `EIP712Utils.RECEIPT_TYPEHASH`.
 
 ---
 
