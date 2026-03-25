@@ -10,6 +10,7 @@
 //! - "low": 10 packets/second baseline (~12.8 KB/s, ~1.1 GB/day)
 //! - "high": 50 packets/second baseline (~64 KB/s, ~5.5 GB/day)
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -91,23 +92,20 @@ impl CoverState {
             return 0;
         }
 
-        let elapsed = self.window_start.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64().max(0.01);
-
-        let current_pps = self.packets_this_window as f64 / elapsed_secs;
-        let target = target_pps as f64;
-
-        // Reset window every second.
-        if elapsed >= Duration::from_secs(1) {
+        // Reset window every second before computing rate.
+        if self.window_start.elapsed() >= Duration::from_secs(1) {
             self.packets_this_window = 0;
             self.window_start = Instant::now();
         }
 
+        let elapsed_secs = self.window_start.elapsed().as_secs_f64().max(0.01);
+        let current_pps = self.packets_this_window as f64 / elapsed_secs;
+        let target = target_pps as f64;
+
         if current_pps >= target {
-            return 0; // Real traffic already fills the rate.
+            return 0;
         }
 
-        // How many packets needed to bring rate up to target in this window.
         let deficit = (target - current_pps) * elapsed_secs;
         let needed = deficit.ceil() as u32;
 
@@ -116,7 +114,7 @@ impl CoverState {
         let jitter: f64 = rng.gen_range(0.8..1.2);
         let jittered = (needed as f64 * jitter) as u32;
 
-        jittered.min(target_pps) // never inject more than 1 second's worth at once
+        jittered.min(target_pps)
     }
 
     fn record_cover_sent(&mut self, count: u32) {
@@ -152,7 +150,7 @@ pub async fn cover_traffic_loop(
     cancel: CancellationToken,
     level: CoverLevel,
     circuit: Arc<Mutex<Option<CircuitState>>>,
-    real_packet_counter: Arc<Mutex<u64>>,
+    real_packet_counter: Arc<AtomicU64>,
 ) {
     if level == CoverLevel::Off {
         info!("cover traffic disabled");
@@ -161,11 +159,13 @@ pub async fn cover_traffic_loop(
 
     let target_pps = level.target_pps();
     let daily_est = level.daily_bytes();
-    info!(
+    // TODO: actual Sphinx-wrapped packet send depends on full TUN integration.
+    // Currently counts cover packets for rate tracking but does not transmit.
+    warn!(
         level = ?level,
         target_pps,
         daily_overhead_mb = daily_est / (1024 * 1024),
-        "cover traffic started"
+        "cover traffic accounting started (packet send not yet wired)"
     );
 
     let mut state = CoverState::new();
@@ -180,11 +180,7 @@ pub async fn cover_traffic_loop(
             _ = tokio::time::sleep(SAMPLE_INTERVAL) => {}
         }
 
-        // Count real packets since last check.
-        let current_real = {
-            let counter = real_packet_counter.lock().unwrap_or_else(|e| e.into_inner());
-            *counter
-        };
+        let current_real = real_packet_counter.load(Ordering::Relaxed);
         let real_delta = (current_real - last_real_count) as u32;
         last_real_count = current_real;
         state.record_real_packets(real_delta);

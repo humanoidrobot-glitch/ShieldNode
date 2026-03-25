@@ -71,7 +71,7 @@ pub struct AppState {
     /// Cancel token for the cover traffic generator.
     pub cover_cancel: Mutex<Option<CancellationToken>>,
     /// Real packet counter (shared with cover traffic generator).
-    pub real_packet_counter: Arc<Mutex<u64>>,
+    pub real_packet_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
     pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
 }
@@ -95,7 +95,7 @@ impl Default for AppState {
                 std::time::Instant::now() - std::time::Duration::from_secs(600),
             ))),
             cover_cancel: Mutex::new(None),
-            real_packet_counter: Arc::new(Mutex::new(0)),
+            real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
@@ -269,23 +269,25 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         info!("circuit health monitor started");
     }
 
-    // Spawn cover traffic generator.
+    // Spawn cover traffic generator (only if not Off).
     {
         let cover_level = {
             let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
             cover_traffic::CoverLevel::from_str(&cfg.cover_traffic)
         };
-        let cancel = CancellationToken::new();
-        {
-            let mut cc = state.cover_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
-            *cc = Some(cancel.clone());
+        if cover_level != cover_traffic::CoverLevel::Off {
+            let cancel = CancellationToken::new();
+            {
+                let mut cc = state.cover_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+                *cc = Some(cancel.clone());
+            }
+            tokio::spawn(cover_traffic::cover_traffic_loop(
+                cancel,
+                cover_level,
+                Arc::clone(&state.circuit),
+                Arc::clone(&state.real_packet_counter),
+            ));
         }
-        tokio::spawn(cover_traffic::cover_traffic_loop(
-            cancel,
-            cover_level,
-            Arc::clone(&state.circuit),
-            Arc::clone(&state.real_packet_counter),
-        ));
     }
 
     // Spawn circuit auto-rotation background task if enabled and multi-hop.
