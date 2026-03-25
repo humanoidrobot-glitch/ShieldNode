@@ -263,3 +263,42 @@ The Rust backend returns gas price as `u64` in Gwei. The frontend displays it di
 **Why deferred:** Cosmetic issue. Sepolia gas is effectively free.
 
 **When to fix:** Phase 4, when gas price awareness becomes a real UX feature for mainnet users. Return as `f64` or use wei with frontend conversion.
+
+---
+
+## Anti-Collusion (Phase 4)
+
+### Strict mode for minimum network size guard
+The `connect()` function warns when active nodes < 20 but always proceeds. The ROADMAP specifies "refuse to connect in strict mode." Strict mode needs a `strict_mode: bool` field in `ClientConfig` / `SettingsPayload`, a UI toggle in Settings, and `connect()` returning `Err(...)` when `nodes.len() < MINIMUM_NETWORK_SIZE && strict_mode`.
+
+**Why deferred:** Requires config schema change + UI work. The warning log is sufficient during development.
+
+**When to fix:** Before Phase 5 mainnet launch. Users on a small network should have the option to refuse connection.
+
+### Node list not cached in AppState
+`fetch_nodes()` calls `get_active_nodes()` via RPC on every invocation. Both `get_nodes` (UI) and `get_network_health` issue full RPC calls. If the UI polls frequently, this is wasteful.
+
+**Why deferred:** Node list changes slowly (heartbeats every 6 hours). Current call frequency is low (on connect, on rotation).
+
+**When to fix:** When UI polling is added for network health display. Cache node list in `AppState` with 30-60s TTL, similar to the completion rates cache.
+
+### IPv6 subnet diversity not enforced
+`subnet_24()` in `circuit.rs` only handles IPv4 dotted-quad endpoints. IPv6 endpoints (e.g., `[2001:db8::1]:51820`) return `None` from `subnet_24()`, silently skipping subnet diversity for IPv6 nodes. Two IPv6 nodes on the same /48 would not be detected.
+
+**Why deferred:** No IPv6 nodes exist on the current testnet. The fallback is safe — `None` comparisons never match, so IPv6 nodes pass diversity unchecked rather than being incorrectly blocked.
+
+**When to fix:** When IPv6 nodes appear on the network. Add a `subnet_48()` helper for IPv6 and handle bracket notation in endpoint parsing.
+
+### No integration test for select_circuit_with_pins with diversity
+The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No test calls `select_circuit_with_pins` with a node pool that has known subnet/ASN collisions and verifies the returned circuit respects them. The `weighted_selection_favors_high_stake` test inadvertently runs under the diversity fallback path because all mock nodes share `127.0.0.1`.
+
+**Why deferred:** Unit tests for `is_diverse` cover the constraint logic. Integration test requires mock nodes with distinct endpoints.
+
+**When to fix:** Phase 5 anti-griefing test suite. Add nodes with varied endpoints to verify end-to-end diversity enforcement.
+
+### rebuild_circuit duplicated between health_monitor and rotation_loop
+`health_monitor.rs::rebuild_circuit()` and `lib.rs::rotation_loop()` perform nearly identical 7-step rebuild sequences: fetch nodes → select circuit → build circuit → register sessions → reconnect tunnel → swap state → update connection. ~50 lines of duplicated logic.
+
+**Why deferred:** Both callers have slightly different error handling and context. Extracting a shared helper requires passing 5+ `Arc<Mutex>` params.
+
+**When to fix:** When either path is extended (e.g., adding completion rate enrichment to rebuilds). Extract a `rebuild_circuit_internal()` helper callable from both.
