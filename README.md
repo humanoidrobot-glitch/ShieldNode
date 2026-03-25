@@ -305,7 +305,9 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 | [Oasis Network / Sapphire](https://oasisprotocol.org) | Confidential computing runtime using TEEs. Study remote attestation verification and enclave key management |
 | [Gramine](https://gramineproject.io) | Library OS for running unmodified Linux apps inside SGX enclaves. Evaluate for relay binary enclave support |
 | [AWS Nitro Enclaves](https://aws.amazon.com/ec2/nitro/nitro-enclaves/) | Confidential computing offering. Study attestation document format and NSM API as reference for enclave attestation |
-| [Signal PQXDH](https://signal.org/docs/specifications/pqxdh/) | Hybrid X25519 + ML-KEM in production. Closest precedent for ShieldNode's post-quantum handshake |
+| [Signal PQXDH](https://signal.org/docs/specifications/pqxdh/) | Hybrid X25519 + ML-KEM in production (PQ handshake precedent). Double Ratchet mechanism is prior art for ShieldNode's micro-ratcheting session keys |
+| [TARANET](https://arxiv.org/abs/1907.05943) | Traffic-analysis resistant anonymity at the network layer. Study constant-rate flowlet design and packet splitting for traffic normalization |
+| [Aqua](https://freehaven.net/anonbib/cache/Aqua:PETS2009.pdf) | Anonymous communication for bandwidth-intensive apps. Study approach to balancing traffic analysis resistance with throughput — most relevant since both are bandwidth-sensitive unlike messaging-focused mixnets |
 | [PQ Ethereum](https://pq.ethereum.org/) | EF post-quantum initiative. ShieldNode's PQ timeline stays ahead of Ethereum's own |
 | [NIST FIPS 203/204](https://csrc.nist.gov/publications/fips) | ML-KEM (Kyber), ML-DSA (Dilithium) standards. FIPS-compliant implementations only |
 

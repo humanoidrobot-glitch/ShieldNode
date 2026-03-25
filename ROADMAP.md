@@ -100,6 +100,10 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 
 - [x] **Minimum network size guard** — The client should warn users (or refuse to connect in strict mode) if the active node count is below a safety threshold (e.g., <20 nodes). With very few nodes, the probability of an attacker controlling entry+exit on the same circuit is too high regardless of other mitigations. Display the current network size and estimated collusion risk in the UI.
 
+### Traffic Analysis Resistance: Making Captured Data Useless
+
+- [ ] **Fixed-size packet normalization** — Enforce a uniform outer packet size for all tunnel traffic (e.g., 1280 bytes, matching common MTU). Pad undersized packets with random bytes, fragment oversized packets into multiple fixed-size chunks. Sphinx already normalizes the inner onion layer, but the WireGuard encapsulation can leak size information at the wire level. Extend normalization to the outer UDP packet so every packet on the network is identical in size. This eliminates packet-size fingerprinting — an observer capturing traffic sees a stream of identically-sized ciphertext blobs. Implement in `node/src/tunnel/wireguard.rs` at the send/receive boundary. Fragmentation adds a reassembly buffer on the receiving side — use a sequence number in the fixed-size header to reconstruct original packets. Performance impact: minimal for packets near MTU, some overhead for very small packets (padding waste) and very large packets (fragmentation latency)
+
 ### What ZK Settlement Achieves
 **Before ZK:** The chain sees wallet `0xABC` opened session #47 with nodes `[0x1, 0x2, 0x3]`, transferred 1.2 GB, settled at block 19847362.
 
@@ -108,7 +112,7 @@ Make the economics self-sustaining and add privacy to on-chain settlements.
 ### Post-Quantum Note
 The ZK receipt circuit should be designed to verify ML-DSA (Dilithium) signatures alongside ECDSA from the start. ML-DSA signatures are ~2.4 KB (40x larger than ECDSA), which would be expensive to verify on-chain directly, but inside a ZK circuit the signature size doesn't affect on-chain gas — only proof verification cost matters. This means ZK settlement is the natural home for PQ signatures: prove you have a valid PQ-signed receipt without posting the large signature on-chain.
 
-**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet. Hybrid PQ handshake operational across all circuit hops. Circuit health monitor detects and recovers from a simulated node drop within 20 seconds on testnet. Circuit builder rejects node combinations on the same ASN or IP subnet.
+**Success metric:** The economic loop works end-to-end. At least one session settles via ZK proof on testnet. Hybrid PQ handshake operational across all circuit hops. Circuit health monitor detects and recovers from a simulated node drop within 20 seconds on testnet. Circuit builder rejects node combinations on the same ASN or IP subnet. All tunnel traffic normalized to fixed-size packets — no packet size variation observable on the wire.
 
 ---
 
@@ -138,6 +142,14 @@ Security audits, hardening, and public deployment.
 
 - [ ] **Traffic volume analysis** — Entry and exit nodes in a circuit measure total bytes the relay node receives and sends. If the relay is forwarding honestly, bytes_in ≈ bytes_out (minus Sphinx layer overhead). If the relay is exfiltrating captured data to a logging server, bytes_out > bytes_in by a measurable margin. Implement as a check during session settlement: if the exit node's observed bytes from the relay diverge from the entry node's sent bytes by more than a threshold (e.g., >15% accounting for protocol overhead), flag the relay node. This is a weak signal individually but additive with other layers. Catches the obvious case of real-time log exfiltration. Does not catch sophisticated exfiltration (steganography, batched upload during off-hours, covert timing channels)
 
+### Traffic Analysis Resistance: Forward Secrecy & Cover Traffic
+
+- [ ] **Micro-ratcheting session keys** — Rekey the symmetric session key every 30 seconds or every 10 MB of data (whichever comes first), using a Double Ratchet-inspired mechanism. Each ratchet step derives a new ChaCha20-Poly1305 key from the current key + a fresh ephemeral DH exchange (hybrid X25519 + ML-KEM, matching the circuit handshake). Previous keys are immediately zeroized. If an attacker captures ciphertext and somehow later obtains one session key (hardware fault, future cryptanalytic break), they get at most 30 seconds of traffic — all previous and subsequent ratchet windows remain secure. This is the same principle as Signal's Double Ratchet but applied to tunnel traffic rather than messages. Implement in `node/src/crypto/` as a `Ratchet` struct that wraps the `SymmetricCipher` trait. Both client and relay must synchronize ratchet state — use an in-band ratchet-step message (a single fixed-size Sphinx packet with a control flag) to signal the new key epoch. Performance impact: one additional DH + HKDF computation every 30 seconds — negligible (microseconds on modern hardware)
+
+- [ ] **Adaptive cover traffic** — Client generates cover traffic during low-activity periods to maintain a baseline packet rate that prevents timing-based activity detection. When real traffic is flowing, cover traffic is suppressed (real traffic already fills the rate). When real traffic drops below a threshold (e.g., <10 packets/second), cover traffic fills the gap with dummy Sphinx packets indistinguishable from real traffic at the relay level. The cover rate is configurable: "off" (no cover traffic — lowest bandwidth cost), "low" (maintain 10 pps baseline — moderate protection), "high" (maintain 50 pps baseline — strong protection, higher bandwidth). Default: "low". Cover packets are generated by the client, routed through the full 3-hop circuit, and silently dropped by the exit node (which recognizes them via a flag in the Sphinx header that only the exit can read after peeling all layers). An operator logging all traffic through their relay cannot distinguish cover from real — both are fixed-size, encrypted, and follow the same routing path. Bandwidth cost at "low" setting: ~10 pps × 1280 bytes = ~12.8 KB/s = ~1.1 GB/day. At "high": ~64 KB/s = ~5.5 GB/day. Users on metered connections should use "off" or "low". Implement in `client/src-tauri/src/tunnel.rs` as a background tokio task that monitors outbound packet rate and injects cover packets when needed
+
+- [ ] **Inter-node link padding** — Constant-rate encrypted padding between adjacent relay nodes, independent of user traffic. Each pair of connected nodes maintains a baseline packet rate between them (e.g., 50 pps) regardless of how many sessions are active. When real session traffic is below the baseline, padding fills the gap. When real traffic exceeds the baseline, the rate scales up (but all links scale up together so the increase doesn't correlate to a specific session). This prevents a network-level observer from determining which links carry real traffic and which are idle. More expensive than client-side cover traffic (every link, not just active circuits) but provides stronger protection against global passive adversaries. Implement in `node/src/network/relay.rs` as a link-level padding manager. Bandwidth cost: ~50 pps × 1280 bytes × number of peer links. For a node with 10 peers: ~640 KB/s = ~55 GB/day. This is meaningful — only enable for nodes with high-bandwidth connections. Make it opt-in via node config with clear documentation of bandwidth implications
+
 **Success metric:** Real users browsing through ShieldNode on Ethereum mainnet, with ZK-private settlement and post-quantum circuit handshakes. At least 3 TEE-attested nodes operational on mainnet with client-verified attestation.
 
 ---
@@ -163,6 +175,8 @@ Remove all remaining centralization points and scale the network.
 - [ ] **Dummy commitment Merkle tree (bootstrapping network size privacy)** — Deploy the initial NodeRegistry with a fixed-size Merkle tree (e.g., 512 slots). At launch with few real nodes, remaining slots contain dummy commitments indistinguishable from real ones. As real nodes register, they replace dummy slots. Requires simulated heartbeats for dummy slots at realistic intervals (~$0.02/tx, ~$32/day for 400 dummies at 4x/day — manageable during grant-funded bootstrapping, decreases as real nodes replace dummies). Dummy salt generation must use a VDF or public commit-reveal scheme so even the deployer can't later prove which commitments were dummies. Once real node count crosses a threshold (e.g., 256), fork to a new NodeRegistry contract without dummy logic and migrate real stakes. This migration uses the same immutable-contract upgrade pattern already documented. Design the fork trigger as either a `realNodeCount` threshold or a time-based sunset (e.g., 12 months post-launch). Note: even with dummies, an attacker can observe total registration events and stake locked in the contract — the dummies hide the *real* node count within the fixed tree size but don't hide the tree size itself. At 512 slots with 20 real nodes, the attacker knows "somewhere between 1 and 512 nodes" which is far better than knowing "exactly 20"
 - [ ] **Ephemeral compute enforcement** — Node relay software runs in ephemeral containers destroyed and recreated on a fixed schedule (e.g., every hour). The environment has no persistent storage — read-only filesystem, no volume mounts, memory wiped on teardown. The node produces an attestation (TEE-backed or ZK-VM-backed) that it's running in an environment matching a specific configuration hash (no writable storage, no extra network interfaces beyond tunnel endpoints). Combined with ZK-VM execution trace proof: the software didn't log, and the environment couldn't persist logs. Does not prevent real-time streaming of captured packets to an external server during the container's lifetime, but prevents retrospective log accumulation. The traffic volume analysis (Phase 5) covers the real-time exfiltration gap
 - [ ] **Research: secure coprocessor for relay function** — Investigate whether the relay forwarding function could run on dedicated hardware (secure element, HSM-like device) with no general-purpose OS, no filesystem, no logging capability by design. Similar to a hardware wallet but for packet forwarding — physically no mechanism to extract packet data because the hardware lacks storage or I/O paths that would allow it. This is the strongest possible anti-logging guarantee but requires custom hardware. Not practical for general operators, but could be offered as a premium "verified hardware node" tier. Study Oasis Network's Sapphire runtime and similar confidential computing hardware for prior art. Document findings in `docs/THREAT-MODEL.md`
+- [ ] **Optional packet batching and reordering** — Relay nodes collect packets for a configurable time window (default 50ms), shuffle the order within the batch, and forward as a group. This breaks timing correlation between input and output packets at each hop — an observer cannot match an incoming packet to an outgoing packet based on arrival/departure timing because the ordering is randomized within each batch window. Adds 25-75ms latency (half the batch window on average). Opt-in because the latency cost is significant for interactive applications (gaming, video calls). Users who prioritize privacy over latency enable it in client Settings — the client negotiates batch preference with each relay during circuit construction via a Sphinx header flag. Users who need low latency leave it off and rely on fixed-size normalization + cover traffic for protection. The batch window is configurable per-node (operators set their preferred window in config.toml). Implement in `node/src/network/relay.rs` as a per-hop batch buffer that flushes every N milliseconds
+- [ ] **Research: traffic morphing** — Investigate whether client-side traffic shaping can make ShieldNode traffic patterns resemble a different traffic type (e.g., shape VPN traffic to look like video streaming or cloud backup). This is an active research area with mixed results — academic work shows it raises the cost of fingerprinting but rarely eliminates it. Document findings in `docs/THREAT-MODEL.md`. Relevant prior art: BuFLO, CS-BuFLO, Tamaraw, FRONT defenses against website fingerprinting
 
 ---
 
@@ -266,6 +280,53 @@ No combination of software, cryptographic, or hardware techniques can provide a 
 - The relay binary must be compiled as a single static binary that runs inside the enclave with minimal dependencies. No dynamic linking, no shell access, no debugging interfaces
 - Attestation verification can happen client-side (the client checks the attestation report against AMD's root of trust certificate chain) or on-chain (store attestation hashes in the NodeRegistry for public verifiability). Client-side is simpler; on-chain is more transparent. Implement client-side first, add on-chain attestation hashes as a NodeRegistry field in Phase 6
 - TEE nodes should be a tier, not a requirement. Requiring TEE would exclude operators running on non-TEE hardware (Raspberry Pis, older servers, some VPS providers). Instead, TEE attestation provides a scoring bonus and entry-node preference. The network benefits from both TEE-attested high-trust nodes and non-TEE commodity nodes for breadth
+
+---
+
+## Traffic Analysis Resistance
+
+Even with content fully encrypted, metadata leaks from packet timing, sizes, and volume patterns can enable traffic correlation attacks. ShieldNode's approach: make captured data structurally useless through layered defenses that eliminate each metadata signal independently.
+
+### What an operator can capture vs. what it's worth
+
+| Captured data | Current status | Mitigation | Phase | Result after mitigation |
+|--------------|----------------|------------|-------|----------------------|
+| Packet payloads | Encrypted (Sphinx + ChaCha20) | Already useless | 1 (done) | Ciphertext, undecryptable without ephemeral keys |
+| Packet sizes | Variable, leaks traffic type | Fixed-size normalization | 4 | All packets identical size — no fingerprinting |
+| Packet timing | Correlatable between hops | Cover traffic + batching | 5-6 | Timing obscured by padding and shuffle |
+| Activity patterns | Visible (traffic vs silence) | Adaptive cover traffic | 5 | Constant baseline rate, active indistinguishable from idle |
+| Session duration | Visible (circuit start/end) | Circuit auto-rotation (done) + cover traffic | 2+5 | Short-lived circuits with uniform traffic profiles |
+| Session keys | Ephemeral, zeroized on drop | Micro-ratcheting (30s windows) | 5 | Key compromise exposes ≤30s of traffic |
+| Next-hop IPs | Necessarily known by relay | Circuit diversity constraints | 4 | Knowing adjacent hops reveals only public node IPs, not client or destination |
+| Inter-link traffic volume | Observable per link | Link padding | 5 | All links carry constant-rate traffic regardless of real load |
+
+### Defense tiers
+
+**Tier 1 — Content protection (done):** Sphinx onion encryption + ChaCha20-Poly1305 + hybrid PQ handshake. Captured payloads are ciphertext. This is already built and operational.
+
+**Tier 2 — Size normalization (Phase 4):** Fixed-size packets eliminate size-based fingerprinting. Low overhead, no latency cost. Should be enabled by default for all traffic.
+
+**Tier 3 — Temporal protection (Phase 5):** Micro-ratcheting limits key compromise exposure to 30-second windows. Adaptive cover traffic prevents activity detection. Inter-node link padding prevents link-level traffic analysis. These have bandwidth costs but make timing correlation significantly harder.
+
+**Tier 4 — Reordering (Phase 6, opt-in):** Packet batching and shuffle at each hop breaks per-packet timing correlation. Adds latency (25-75ms). Best for users with strong privacy requirements who can tolerate the delay.
+
+### Cover traffic design notes
+
+- Cover packets must be cryptographically indistinguishable from real packets. They use the same Sphinx format, same fixed size, same encryption. The only difference is a flag in the innermost Sphinx layer (readable only by the exit node after peeling all layers) that tells the exit to discard rather than forward
+- Cover traffic rate should adapt to the user's real traffic pattern, not be purely constant. A naive constant rate during active browsing followed by the same constant rate during sleep is distinguishable from a user who only has constant-rate traffic. The client should vary the cover rate stochastically around the baseline to prevent pattern detection
+- Cover traffic has a real bandwidth cost that users should understand and control. Display estimated daily bandwidth overhead in Settings based on the selected cover level. Default "low" costs ~1.1 GB/day — significant for mobile/metered connections, negligible for home broadband
+- Exit nodes must drop cover packets silently with no observable side effect (no different timing, no response, no error). The exit's handling of cover vs real packets must be constant-time to prevent a timing side channel
+
+### Micro-ratcheting design notes
+
+- The ratchet follows Signal's Double Ratchet pattern adapted for tunnel traffic: symmetric key chain ratcheted with each time/data window, DH ratchet stepped with fresh ephemeral keys periodically (every 5 minutes or every 100 MB)
+- Both client and relay maintain synchronized ratchet state. A ratchet-step control message (fixed-size Sphinx packet with a control flag) signals the new epoch. If state desynchronizes (e.g., packet loss causes one side to advance), a resync mechanism uses the DH ratchet to re-derive a shared state
+- Previous ratchet keys must be zeroized immediately — use Rust's `zeroize` crate on the key material. The `Ratchet` struct should implement `Drop` with zeroization. This is already the pattern used for session keys (Phase 1)
+- The ratchet mechanism must be constant-time: the ratchet-step computation should take the same amount of time regardless of which epoch it's advancing to, to prevent timing side channels
+
+### Honest assessment
+
+Full constant-rate traffic (Nym's approach) provides the strongest theoretical protection but costs 95%+ bandwidth overhead — impractical for a VPN carrying real-time traffic. ShieldNode's adaptive approach trades theoretical perfection for practical deployability: fixed-size packets + adaptive cover + optional batching provides strong protection against passive observers and significantly raises the cost of active traffic analysis, while keeping bandwidth overhead manageable (1-6 GB/day depending on settings). A global passive adversary with long-term traffic captures and unlimited compute can still potentially correlate flows through statistical analysis of the adaptive cover pattern, but the cost of this analysis is orders of magnitude higher than against an unpadded system.
 
 ---
 
