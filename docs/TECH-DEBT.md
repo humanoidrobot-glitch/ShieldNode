@@ -370,3 +370,21 @@ Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN,
 **Why deferred:** Messages currently travel on different channels (Sphinx payload vs raw relay socket). No functional conflict.
 
 **When to fix:** When adding more control message types (cover traffic flags, batching negotiation). Define a `ControlMessageType` enum or a canonical framing header used by all control messages.
+
+---
+
+## Cover Traffic (Phase 5)
+
+### cover_traffic config field is stringly-typed
+`ClientConfig.cover_traffic` and `SettingsPayload.cover_traffic` are `String` ("off"/"low"/"high"). `CoverLevel` is a proper Rust enum but conversion happens only at the point of use via `CoverLevel::from_str()`, which silently maps invalid values to `Off`. Invalid config values like typos survive serialization and disk persistence without error.
+
+**Why deferred:** Switching to `CoverLevel` as the config type requires `#[serde(rename_all = "lowercase")]` on the enum, a config migration for existing saved files, and updating the TypeScript `<select>` value handling.
+
+**When to fix:** Next config schema cleanup. Derive `Serialize`/`Deserialize` on `CoverLevel` directly and store the enum. Implement `FromStr` trait (with `Result` return) instead of the current infallible `from_str` method that shadows the trait name.
+
+### COVER_MARKER (0xCC) relies on implicit payload format assumption
+Cover packets are identified by the exit node via `payload[0] == 0xCC` after peeling all Sphinx layers. This works because IPv4 headers start with `0x45` (version 4, IHL 5) so real tunnel traffic won't collide. However, the assumption is undocumented and fragile — non-IP payloads, custom protocols, or future Sphinx payload formats could start with `0xCC`.
+
+**Why deferred:** False-positive rate is near-zero for IPv4/IPv6 tunnel traffic. A proper fix requires a structured Sphinx inner header with a reserved `packet_type` field (similar to Nym's approach), which changes the Sphinx payload format.
+
+**When to fix:** When redesigning the Sphinx payload format (e.g., for Phase 6 batching negotiation flags). Add a 1-byte packet type prefix to all Sphinx inner payloads: `0x00` = data, `0x01` = cover, `0x02` = ratchet-step, etc.
