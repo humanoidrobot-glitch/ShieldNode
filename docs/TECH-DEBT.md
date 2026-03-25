@@ -320,3 +320,35 @@ The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. Th
 **Why deferred:** Hardware signature verification libraries are platform-specific and add significant dependency complexity. The structural framework is in place; the crypto verification is the last step.
 
 **When to fix:** Before mainnet TEE scoring has real economic impact. Integrate `sev` crate for AMD SEV-SNP verification, or use a remote verification service.
+
+---
+
+## Challenge-Response Protocol (Phase 5)
+
+### Challenge response content not validated
+`ChallengeManager.respondToChallenge()` only verifies the EIP-712 signer matches the node operator. It does NOT validate the `responseHash` content — a node can sign any hash and pass. For `BandwidthVerification` the node should prove forwarding; for `PacketIntegrity` the response should match `challengeData`. Currently all challenge types accept any signed response.
+
+**Why deferred:** v1 is a signer-only liveness gate — proving the node operator is online and has key access. Content verification requires type-specific validation logic (e.g., ZK-VM proof for packet forwarding) which is Phase 6 work.
+
+**When to fix:** Phase 6 when ZK-VM proof of correct forwarding is implemented. Add type-specific validation dispatching in `respondToChallenge()`.
+
+### expireChallenge does not auto-propose slash
+`expireChallenge()` marks a challenge as `Expired` and emits `ChallengeExpired`, but does not automatically call `SlashingOracle.proposeSlash()`. The challenger must manually file a slash proposal using the expiration as evidence. If the challenger goes offline, unresponsive nodes face no penalty.
+
+**Why deferred:** Intentional decoupling — challenge lifecycle and slashing are separate concerns. Auto-slash would create tight coupling between ChallengeManager and SlashingOracle's evidence encoding format.
+
+**When to fix:** Add a `SlashReason.ChallengeUnresponded` to the SlashingOracle, or allow ChallengeManager to call `proposeSlash()` directly with a pre-encoded evidence blob. Consider adding a bot that watches `ChallengeExpired` events and auto-files slash proposals.
+
+### compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)
+Both `node/src/network/challenge.rs` and `node/src/network/receipts.rs` implement identical `compute_domain_separator()` functions (~18 lines each). Same ABI encoding pattern with the same domain name, version, and layout.
+
+**Why deferred:** Part of the broader shared module extraction. Both files are in the same crate so extraction is straightforward but low priority.
+
+**When to fix:** Extract to a shared `node/src/network/eip712.rs` utility module. Both callers import from there.
+
+### Solidity DOMAIN_SEPARATOR construction duplicated across 4 contracts
+`SessionSettlement`, `ZKSettlement`, `SlashingOracle`, and `ChallengeManager` all construct their EIP-712 DOMAIN_SEPARATOR with identical code (~8 lines each). Each uses a different `verifyingContract` (their own address), so the values differ, but the construction pattern is copy-pasted.
+
+**Why deferred:** Each contract genuinely needs a different DOMAIN_SEPARATOR (different `verifyingContract`). A shared `computeDomainSeparator()` in `EIP712Utils` would save ~5 lines per contract but adds a function call in the constructor. Low ROI.
+
+**When to fix:** Optional cleanup during audit prep. Add `EIP712Utils.computeDomainSeparator(string name, string version)` and have each constructor call it.
