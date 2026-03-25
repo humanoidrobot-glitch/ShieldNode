@@ -5,6 +5,7 @@ pub mod hybrid;
 pub mod keys;
 pub mod mlkem;
 pub mod noise;
+pub mod ratchet;
 pub mod sphinx;
 pub mod traits;
 pub mod x25519_kem;
