@@ -69,17 +69,12 @@ pub async fn settle_session(
             settle_zk(wallet_cfg, session_id).await
         }
         SettlementMode::Auto => {
-            // Try ZK first if artifacts exist.
-            let artifacts = default_artifacts();
-            if zk_prove::artifacts_exist(&artifacts) {
-                match settle_zk(wallet_cfg, session_id).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        warn!(error = %e, "ZK settlement failed, falling back to plaintext");
-                    }
+            // Try ZK first, fall back to plaintext on any failure.
+            match settle_zk(wallet_cfg, session_id).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    info!(error = %e, "ZK settlement unavailable, using plaintext");
                 }
-            } else {
-                info!("ZK circuit artifacts not found, using plaintext settlement");
             }
 
             // Fallback to plaintext.
@@ -103,21 +98,10 @@ async fn settle_zk(
         return Err("ZK circuit artifacts not found".to_string());
     }
 
-    // TODO: Build the full witness from session data (receipt, signatures,
-    // Merkle proof, addresses, etc.) and generate the proof via
-    // zk_prove::generate_proof(). Then submit to ZKSettlement.settleWithProof.
-    //
-    // This requires:
-    // 1. The dual-signed receipt (already obtained in disconnect flow)
-    // 2. Node Merkle proof from the registry root
-    // 3. Poseidon commitment computation for each payment address
-    // 4. The ZKSettlement contract address for the on-chain call
-    //
-    // For now, return an error indicating the proof pipeline is not yet
-    // fully wired (artifacts exist but witness construction is incomplete).
-
-    info!(session_id, "ZK settlement: artifacts found, proof pipeline ready");
-    Err("ZK proof witness construction not yet fully wired — use plaintext fallback".to_string())
+    // TODO: Build the full witness from session data and generate proof via
+    // zk_prove::generate_proof(). Submit to ZKSettlement.settleWithProof.
+    // Requires: dual-signed receipt, node Merkle proof, Poseidon commitments.
+    Err("ZK proof witness construction not yet wired".to_string())
 }
 
 #[cfg(test)]

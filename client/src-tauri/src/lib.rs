@@ -368,11 +368,18 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         "preparing EIP-712 bandwidth receipt for settlement"
     );
 
-    // 3. Parse the client's private key and sign the EIP-712 digest.
-    let (wallet_cfg, chain_id) = {
+    // 3. Read all config values in a single lock acquisition (avoids deadlock
+    //    from wallet_config() re-locking, and reads settlement_mode atomically).
+    let (wallet_cfg, chain_id, settlement_mode) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        let wc = state.wallet_config()?;
-        (wc, cfg.chain_id)
+        let wc = WalletConfig {
+            rpc_url: cfg.rpc_url.clone(),
+            chain_id: cfg.chain_id,
+            private_key: cfg.operator_private_key.clone(),
+            settlement_address: SETTLEMENT_ADDRESS.to_string(),
+        };
+        let mode = settlement::SettlementMode::from_str(&cfg.settlement_mode);
+        (wc, cfg.chain_id, mode)
     };
 
     let signer = wallet_cfg.parse_signer()?;
@@ -424,10 +431,6 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // 7. Settle via configured mode (ZK or plaintext).
-    let settlement_mode = {
-        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        settlement::SettlementMode::from_str(&cfg.settlement_mode)
-    };
     let result = settlement::settle_session(
         settlement_mode,
         &wallet_cfg,
