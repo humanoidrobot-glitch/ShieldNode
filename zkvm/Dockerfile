@@ -1,29 +1,21 @@
 # RISC Zero development environment for building and proving.
 #
-# Usage:
-#   docker build -t shieldnode-zkvm zkvm/
-#   docker run --rm -v $(pwd)/zkvm:/workspace shieldnode-zkvm cargo build
-#   docker run --rm -v $(pwd)/zkvm:/workspace shieldnode-zkvm cargo run --bin shieldnode-zkvm-host
+# Uses rzup (official installer) to get pre-built binaries instead of
+# compiling cargo-risczero from source (which requires nightly features).
 
 FROM rust:1.85-bookworm
 
-# Install RISC Zero toolchain.
-RUN cargo install cargo-risczero --locked && \
-    cargo risczero install
+# Install system deps.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies for guest compilation (riscv target).
-RUN rustup target add riscv32im-unknown-none-elf 2>/dev/null || true
+# Install RISC Zero via rzup (downloads pre-built binaries).
+RUN curl -L https://risczero.com/install | bash && \
+    /root/.risc0/bin/rzup install
+
+ENV PATH="/root/.risc0/bin:${PATH}"
 
 WORKDIR /workspace
-
-# Pre-fetch common crates to speed up builds.
-COPY Cargo.toml ./
-COPY guest/Cargo.toml guest/
-COPY host/Cargo.toml host/
-RUN mkdir -p guest/src host/src && \
-    echo '#![no_main]\n#![no_std]\nrisc0_zkvm::guest::entry!(main);\nfn main() {}' > guest/src/main.rs && \
-    echo 'fn main() {}' > host/src/main.rs && \
-    cargo build 2>/dev/null || true && \
-    rm -rf guest/src host/src
 
 ENTRYPOINT ["cargo"]
