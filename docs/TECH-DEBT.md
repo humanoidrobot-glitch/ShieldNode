@@ -463,3 +463,14 @@ CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth r
 **Why deferred:** Deployment-time operational concern, not a code change. The contract correctly accepts any salt — the security depends on how the salt is generated, not on the contract logic.
 
 **When to fix:** At mainnet deployment. Generate salt via a VDF (verifiable delay function) or a multi-party commit-reveal ceremony. Document the salt generation procedure in the operator deployment guide.
+
+---
+
+## ZK Circuits — Shared Templates
+
+### Merkle proof template duplicated across circuits
+The Merkle proof verification pattern (Num2Bits index decomposition → Mux1 selector → Poseidon(2) hasher → XOR trick for sibling) is duplicated byte-for-byte in `circuits/bandwidth_receipt/circuit.circom` and `circuits/node_eligibility/circuit.circom`. Any change to the traversal logic must be made in both places.
+
+**Why deferred:** Only two circuits use it. Extracting to a shared `lib/merkle.circom` template requires restructuring the circuit include paths and testing both consumers against the shared code.
+
+**When to fix:** When adding a third circuit that needs Merkle verification, or during audit prep. Create `circuits/lib/merkle.circom` with a `MerkleVerify(DEPTH)` template and include from both circuits.
