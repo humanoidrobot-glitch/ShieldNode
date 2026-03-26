@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-risc0-zkvm = "1"
+risc0-zkvm = "5.0.0-rc.1"
 chacha20poly1305 = "0.10"
 sha2 = "0.10"
