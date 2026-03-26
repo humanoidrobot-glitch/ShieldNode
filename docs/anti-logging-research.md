@@ -331,9 +331,35 @@ ZK-VM proofs verify what happened *inside the sandbox*. They cannot prove that t
 
 This defense is most effective against honest-but-curious operators running unmodified software, and against lazy malicious operators who would modify the relay binary rather than set up OS-level capture. Sophisticated adversaries with root access are better addressed by the TEE layer.
 
-### 8.4 Current Feasibility
+### 8.4 Current Feasibility — Benchmarked
 
-ZK-VM proving costs are on the edge of practicality for ShieldNode's relay function. Current RISC Zero benchmarks achieve proof generation in seconds for simple computations. The relay function — an X25519 DH computation, HKDF key derivation, ChaCha20-Poly1305 decryption, and UDP forwarding — is well within the complexity class that current ZK-VMs can handle, but per-packet proving is infeasible at thousands of packets per second. The random sampling approach (prove N random packets from a window) makes this practical: the node doesn't prove every packet, only a random sample sufficient to detect misbehavior with high statistical confidence.
+ZK-VM proving is **practical today** for ShieldNode's relay function using RISC Zero v5.
+
+**Benchmark results** (single relay packet, ChaCha20-Poly1305 decrypt + routing + SHA-256):
+
+| Metric | Value |
+|--------|-------|
+| zkVM cycles | 131,072 (1 segment) |
+| Execute only (no proof) | 31ms |
+| Proof generation (CPU) | 17.6s |
+| Proof generation (GPU, RTX 2080 Ti) | 833ms |
+| Receipt verification | 9.2ms |
+| On-chain Groth16 verification | ~250K gas (~$0.10 at 0.2 Gwei) |
+
+**Per-packet proving remains infeasible** at line rate (thousands of packets/second). But the random sampling approach is now confirmed practical: a challenged node with GPU can generate a proof in <1s per sampled packet. For a challenge window of 100 random packets, total proving time is ~83s (parallelizable across GPU cores) or ~1.4s if batched into a single multi-packet proof.
+
+**What was built:**
+- Guest program (`zkvm/guest/src/main.rs`): mode 0 (forwarding proof) and mode 1 (full execution trace with `TraceMetadata`)
+- Host program (`zkvm/host/src/main.rs`): execute-only and full prove modes with journal verification
+- Methods crate (`zkvm/methods/`): `risc0-build` cross-compilation for riscv32im target
+- Docker environments: CPU (`Dockerfile`) and CUDA GPU (`Dockerfile.cuda`)
+- On-chain verifiers: `RelayProofVerifier.sol` (forwarding) and `ExecutionTraceVerifier.sol` (execution trace with commit count check)
+
+**Key architectural decisions:**
+- Guest is `#![no_std]` with all deps `default-features = false` to avoid `std`/`panic_handler` conflict
+- Guest excluded from workspace (`exclude = ["guest"]`) to prevent `prove` feature unification
+- Per-session KEM amortization via `PqSessionKeys` means the guest only needs symmetric crypto (no KEM in the proving circuit)
+- The `process_relay_packet()` pure function is shared between the production node binary and the zkVM guest — same code, proven correct
 
 ---
 

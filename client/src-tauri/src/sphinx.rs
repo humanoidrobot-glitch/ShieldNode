@@ -122,28 +122,20 @@ impl PqSphinxPacket {
         let mut current_blob = plaintext.to_vec();
 
         for (i, hop) in session.hops.iter().enumerate().rev() {
-            let is_innermost = i == session.hops.len() - 1;
-
-            if is_innermost {
-                current_blob = aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &current_blob)
-                    .map_err(|e| format!("PQ encrypt failed at hop {i}: {e}"))?;
-            } else {
+            let layer_plaintext = if i < session.hops.len() - 1 {
                 let inner = &session.hops[i + 1];
-                let inner_mac = pq_compute_mac(
-                    &inner.layer_key,
+                pq_serialize(
                     &inner.next_hop,
                     &inner.kem_ciphertext,
+                    &pq_compute_mac(&inner.layer_key, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
                     &current_blob,
-                );
-                let inner_serialized = pq_serialize(
-                    &inner.next_hop,
-                    &inner.kem_ciphertext,
-                    &inner_mac,
-                    &current_blob,
-                );
-                current_blob = aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &inner_serialized)
-                    .map_err(|e| format!("PQ encrypt failed at hop {i}: {e}"))?;
-            }
+                )
+            } else {
+                current_blob
+            };
+
+            current_blob = aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &layer_plaintext)
+                .map_err(|e| format!("PQ encrypt failed at hop {i}: {e}"))?;
         }
 
         let hop0 = &session.hops[0];
@@ -179,9 +171,7 @@ fn pq_derive_layer_key(shared_secret: &[u8]) -> [u8; 32] {
 }
 
 fn pq_nonce(hop_index: usize) -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    nonce[..8].copy_from_slice(&(hop_index as u64).to_le_bytes());
-    nonce
+    aead::nonce_from_index(hop_index as u64)
 }
 
 fn pq_compute_mac(

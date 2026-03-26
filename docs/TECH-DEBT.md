@@ -474,3 +474,21 @@ The Merkle proof verification pattern (Num2Bits index decomposition → Mux1 sel
 **Why deferred:** Only two circuits use it. Extracting to a shared `lib/merkle.circom` template requires restructuring the circuit include paths and testing both consumers against the shared code.
 
 **When to fix:** When adding a third circuit that needs Merkle verification, or during audit prep. Create `circuits/lib/merkle.circom` with a `MerkleVerify(DEPTH)` template and include from both circuits.
+
+---
+
+## PQ Sphinx (Phase 6)
+
+### PQ Sphinx code duplicated between node and client
+`PqSphinxPacket`, `PqSessionKeys`, `PqHopKeys`, `pq_derive_layer_key()`, `pq_compute_mac()`, and `pq_serialize()` are duplicated between `node/src/crypto/sphinx.rs` and `client/src-tauri/src/sphinx.rs`. The client implements creation + serialization only; the node adds peel/deserialization. All shared functions are byte-for-byte identical.
+
+**Why deferred:** No shared crate exists. Part of the broader "shared crate for node + client types" migration (see Architecture section). The duplication is the same pattern as the classic Sphinx and EIP-712 receipt logic.
+
+**When to fix:** With the shared crate migration. Extract `PqSessionKeys`, `PqHopKeys`, `pq_derive_layer_key()`, `pq_compute_mac()`, `pq_serialize()`, and `PqSphinxPacket::create()`/`to_bytes()` into `packages/shieldnode-crypto` or similar shared crate. Node adds peel/deserialize as an extension.
+
+### Client PQ Sphinx uses String errors instead of typed errors
+`PqSessionKeys::new()` and `PqSphinxPacket::create()` in the client return `Result<T, String>`. The node equivalents use typed `SphinxError` with `KemFailed`, `EncryptionFailed`, etc. Callers cannot distinguish error types for recovery or display.
+
+**Why deferred:** The entire client Sphinx module (classic and PQ) uses `String` errors, matching the client's `kex.rs` `KeyExchange` trait which also returns `String`. Fixing PQ alone would create inconsistency within the client crate.
+
+**When to fix:** When adding a client-side `SphinxError` enum. Do classic and PQ together. Alternatively, resolves naturally with the shared crate migration if the node's `SphinxError` is used directly.

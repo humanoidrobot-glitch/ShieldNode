@@ -279,28 +279,23 @@ impl PqSphinxPacket {
         let mut current_blob = plaintext.to_vec();
 
         for (i, hop) in session.hops.iter().enumerate().rev() {
-            let is_innermost = i == session.hops.len() - 1;
-
-            if is_innermost {
-                // Exit layer: just encrypt the plaintext.
-                current_blob =
-                    aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &current_blob)
-                        .map_err(|e| SphinxError::EncryptionFailed(e.to_string()))?;
-            } else {
-                // Middle/entry layer: wrap the inner PQ packet as the blob.
-                // The inner packet is: [version][next_hop][ct][mac][len][blob]
+            // Non-exit layers prepend the next hop's serialized header so
+            // the recipient can forward. Exit layer encrypts plaintext directly.
+            let layer_plaintext = if i < session.hops.len() - 1 {
                 let inner = &session.hops[i + 1];
-                let inner_serialized = pq_serialize(
+                pq_serialize(
                     &inner.next_hop,
                     &inner.kem_ciphertext,
                     &pq_compute_mac(&inner.layer_key, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
                     &current_blob,
-                );
+                )
+            } else {
+                current_blob
+            };
 
-                current_blob =
-                    aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &inner_serialized)
-                        .map_err(|e| SphinxError::EncryptionFailed(e.to_string()))?;
-            }
+            current_blob =
+                aead::encrypt_with_nonce(&hop.layer_key, &pq_nonce(i), &layer_plaintext)
+                    .map_err(|e| SphinxError::EncryptionFailed(e.to_string()))?;
         }
 
         let hop0 = &session.hops[0];
@@ -437,11 +432,10 @@ fn pq_derive_layer_key(shared_secret: &[u8]) -> [u8; 32] {
     key
 }
 
-/// Deterministic 12-byte nonce from hop index.
+/// Deterministic 12-byte nonce from hop index. Delegates to the shared
+/// nonce builder in aead to avoid duplicating the LE-padded layout.
 fn pq_nonce(hop_index: usize) -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    nonce[..8].copy_from_slice(&(hop_index as u64).to_le_bytes());
-    nonce
+    aead::nonce_from_index(hop_index as u64)
 }
 
 /// Compute HMAC-SHA256 over (next_hop || kem_ciphertext || encrypted_blob).
