@@ -1,0 +1,37 @@
+# RISC Zero GPU-accelerated proving environment.
+#
+# Builds on NVIDIA CUDA devel image with Rust + RISC Zero toolchain.
+# Run with: docker run --gpus all ...
+#
+# Build:  docker build -t shieldnode-zkvm-cuda -f Dockerfile.cuda .
+# Prove:  docker run --rm --gpus all -v "$PWD:/workspace" shieldnode-zkvm-cuda \
+#           run --release --features cuda --bin shieldnode-zkvm-host -- prove
+
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+# Avoid interactive prompts during package installation.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system deps + Rust prerequisites.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config libssl-dev ca-certificates git \
+    protobuf-compiler libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.88.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install rustfmt (needed by risc0-circuit-rv32im-sys for cxx bindings).
+RUN rustup component add rustfmt
+
+# Install RISC Zero via rzup (downloads pre-built binaries).
+RUN curl -L https://risczero.com/install | bash && \
+    /root/.risc0/bin/rzup install
+
+ENV PATH="/root/.risc0/bin:${PATH}"
+
+WORKDIR /workspace
+
+ENTRYPOINT ["cargo"]

@@ -3,6 +3,9 @@ name = "shieldnode-zkvm-host"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+cuda = ["risc0-zkvm/cuda"]
+
 [dependencies]
 risc0-zkvm = { version = "5.0.0-rc.1", features = ["prove"] }
 shieldnode-zkvm-methods = { path = "../methods" }
