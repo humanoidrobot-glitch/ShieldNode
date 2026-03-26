@@ -3,7 +3,7 @@
 # Uses rzup (official installer) to get pre-built binaries instead of
 # compiling cargo-risczero from source (which requires nightly features).
 
-FROM rust:1.85-bookworm
+FROM rust:1.88-bookworm
 
 # Install system deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
