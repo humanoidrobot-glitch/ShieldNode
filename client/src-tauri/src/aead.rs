@@ -21,3 +21,14 @@ pub fn encrypt(
     let nonce = Nonce::from(nonce_from_index(nonce_val));
     cipher.encrypt(&nonce, plaintext)
 }
+
+/// Encrypt using a raw 12-byte nonce.
+pub fn encrypt_with_nonce(
+    key: &[u8; 32],
+    nonce_bytes: &[u8; 12],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.encrypt(nonce, plaintext)
+}
