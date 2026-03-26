@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod batch_reorder;
 pub mod chain;
 pub mod challenge;
 pub mod discovery;

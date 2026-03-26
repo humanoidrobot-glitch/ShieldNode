@@ -79,6 +79,14 @@ pub struct NodeConfig {
     /// Link padding target rate in packets per second per peer link.
     #[serde(default = "default_link_padding_pps")]
     pub link_padding_pps: u32,
+
+    /// Enable packet batching and reordering (adds latency, breaks timing).
+    #[serde(default)]
+    pub batch_reorder_enabled: bool,
+
+    /// Batch window in milliseconds (packets collected then shuffled and sent).
+    #[serde(default = "default_batch_window_ms")]
+    pub batch_window_ms: u64,
 }
 
 // ── serde default helpers ──────────────────────────────────────────────
@@ -122,6 +130,9 @@ fn default_tun_netmask() -> u8 {
 fn default_link_padding_pps() -> u32 {
     50
 }
+fn default_batch_window_ms() -> u64 {
+    50
+}
 
 // ── impl ───────────────────────────────────────────────────────────────
 
@@ -146,6 +157,8 @@ impl Default for NodeConfig {
             tun_netmask: default_tun_netmask(),
             link_padding_enabled: false,
             link_padding_pps: default_link_padding_pps(),
+            batch_reorder_enabled: false,
+            batch_window_ms: default_batch_window_ms(),
         }
     }
 }
