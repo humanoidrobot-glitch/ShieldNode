@@ -1,0 +1,9 @@
+[package]
+name = "shieldnode-zkvm-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+risc0-zkvm = { version = "1", default-features = false, features = ["guest"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"

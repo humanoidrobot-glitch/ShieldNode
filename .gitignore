@@ -21,6 +21,10 @@ circuits/build/
 circuits/trusted_setup/*.ptau
 circuits/trusted_setup/*.zkey
 
+# ZK-VM (RISC Zero build artifacts)
+zkvm/target/
+zkvm/methods/
+
 # Environment
 .env
 .env.*
