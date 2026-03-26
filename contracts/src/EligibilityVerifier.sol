@@ -9,7 +9,7 @@ interface IEligibilityProofVerifier {
         uint256[2] calldata _pA,
         uint256[2][2] calldata _pB,
         uint256[2] calldata _pC,
-        uint256[5] calldata _pubSignals
+        uint256[6] calldata _pubSignals
     ) external view returns (bool);
 }
 
@@ -33,7 +33,8 @@ contract EligibilityVerifier {
     uint256 private constant SIG_MIN_STAKE        = 1;
     uint256 private constant SIG_MAX_SLASH_COUNT  = 2;
     uint256 private constant SIG_MIN_UPTIME       = 3;
-    uint256 private constant SIG_NULLIFIER        = 4;
+    uint256 private constant SIG_EPOCH            = 4;
+    uint256 private constant SIG_NULLIFIER        = 5;
 
     /// @notice Default eligibility thresholds.
     uint256 public constant DEFAULT_MIN_STAKE = 0.1 ether;
@@ -113,7 +114,7 @@ contract EligibilityVerifier {
         uint256[2] calldata proof_a,
         uint256[2][2] calldata proof_b,
         uint256[2] calldata proof_c,
-        uint256[5] calldata pubSignals
+        uint256[6] calldata pubSignals
     ) external {
         // Verify registry root matches.
         if (pubSignals[SIG_REGISTRY_ROOT] != registryRoot) {

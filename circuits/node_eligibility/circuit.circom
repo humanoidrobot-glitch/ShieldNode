@@ -28,7 +28,8 @@ template NodeEligibility(MERKLE_DEPTH) {
     signal input minStake;             // Minimum stake threshold (wei)
     signal input maxSlashCount;        // Maximum allowed slash count
     signal input minUptimeScaled;      // Minimum uptime × 1000 (e.g., 950 = 95%)
-    signal input nullifier;            // Prevents double-use of the same proof
+    signal input epoch;                // Current epoch (time window for nullifier)
+    signal input nullifier;            // Must equal Poseidon(nodeSecret, epoch)
 
     // ── Private inputs ────────────────────────────────────────────
     signal input nodeStake;            // Node's actual stake (wei)
@@ -76,7 +77,7 @@ template NodeEligibility(MERKLE_DEPTH) {
     merkleHash[MERKLE_DEPTH] === registryRoot;
 
     // ── 3. Verify stake >= minStake ───────────────────────────────
-    component stakeCheck = GreaterEqThan(128);
+    component stakeCheck = GreaterEqThan(80);
     stakeCheck.in[0] <== nodeStake;
     stakeCheck.in[1] <== minStake;
     stakeCheck.out === 1;
@@ -93,13 +94,16 @@ template NodeEligibility(MERKLE_DEPTH) {
     uptimeCheck.in[1] <== minUptimeScaled;
     uptimeCheck.out === 1;
 
-    // ── 6. Compute nullifier binding ──────────────────────────────
-    // The nullifier is a public input that prevents the same node from
-    // submitting multiple proofs in the same epoch. It's computed as:
-    // nullifier = Poseidon(nodeSecret, epoch)
-    // The circuit verifies that the provided nullifier matches.
-    // For this version, the nullifier is passed directly as a public
-    // input — the epoch-based computation is done off-circuit by the node.
+    // ── 6. Verify nullifier binding ────────────────────────────────
+    // nullifier = Poseidon(nodeSecret, epoch) — computed in-circuit
+    // and constrained against the public input. This prevents a node
+    // from submitting multiple proofs in the same epoch: the nullifier
+    // is deterministic for a given (secret, epoch) pair, and the
+    // contract tracks used nullifiers.
+    component nullifierHash = Poseidon(2);
+    nullifierHash.inputs[0] <== nodeSecret;
+    nullifierHash.inputs[1] <== epoch;
+    nullifier === nullifierHash.out;
 }
 
 // Instantiate with Merkle depth 9 (matching CommitmentTree's 512 slots).
@@ -108,5 +112,6 @@ component main {public [
     minStake,
     maxSlashCount,
     minUptimeScaled,
+    epoch,
     nullifier
 ]} = NodeEligibility(9);

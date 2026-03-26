@@ -11,7 +11,7 @@ contract MockEligibilityVerifier is IEligibilityProofVerifier {
         uint256[2] calldata,
         uint256[2][2] calldata,
         uint256[2] calldata,
-        uint256[5] calldata
+        uint256[6] calldata
     ) external view override returns (bool) {
         return shouldPass;
     }
@@ -36,12 +36,13 @@ contract EligibilityVerifierTest is Test {
         c = [uint256(0), 0];
     }
 
-    function _validSignals(uint256 nullifier) internal view returns (uint256[5] memory) {
+    function _validSignals(uint256 nullifier) internal view returns (uint256[6] memory) {
         return [
             ev.registryRoot(),
             ev.DEFAULT_MIN_STAKE(),
             ev.DEFAULT_MAX_SLASHES(),
             ev.DEFAULT_MIN_UPTIME(),
+            uint256(1),  // epoch
             nullifier
         ];
     }
@@ -50,7 +51,7 @@ contract EligibilityVerifierTest is Test {
 
     function test_verify_valid_eligibility() public {
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
-        uint256[5] memory signals = _validSignals(42);
+        uint256[6] memory signals = _validSignals(42);
 
         ev.verifyEligibility(a, b, c, signals);
 
@@ -61,7 +62,7 @@ contract EligibilityVerifierTest is Test {
 
     function test_nullifier_reuse_reverts() public {
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
-        uint256[5] memory signals = _validSignals(99);
+        uint256[6] memory signals = _validSignals(99);
 
         ev.verifyEligibility(a, b, c, signals);
 
@@ -82,12 +83,13 @@ contract EligibilityVerifierTest is Test {
         EligibilityVerifier freshEv = new EligibilityVerifier(address(freshMock));
         freshEv.updateRegistryRoot(12345);
 
-        uint256[5] memory signals = [
+        uint256[6] memory signals = [
             uint256(12345),
             freshEv.DEFAULT_MIN_STAKE(),
             freshEv.DEFAULT_MAX_SLASHES(),
             freshEv.DEFAULT_MIN_UPTIME(),
-            uint256(1)
+            uint256(1),  // epoch
+            uint256(1)   // nullifier
         ];
 
         vm.expectRevert(EligibilityVerifier.InvalidProof.selector);
@@ -98,7 +100,7 @@ contract EligibilityVerifierTest is Test {
 
     function test_wrong_root_reverts() public {
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
-        uint256[5] memory signals = _validSignals(1);
+        uint256[6] memory signals = _validSignals(1);
         signals[0] = 99999; // wrong root
 
         vm.expectRevert(EligibilityVerifier.RegistryRootMismatch.selector);
@@ -109,7 +111,7 @@ contract EligibilityVerifierTest is Test {
 
     function test_wrong_min_stake_reverts() public {
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
-        uint256[5] memory signals = _validSignals(1);
+        uint256[6] memory signals = _validSignals(1);
         signals[1] = 1 ether; // different from DEFAULT_MIN_STAKE
 
         vm.expectRevert(abi.encodeWithSelector(
