@@ -19,9 +19,6 @@ use rand::seq::SliceRandom;
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 
-/// Default batch window in milliseconds.
-const DEFAULT_BATCH_WINDOW_MS: u64 = 50;
-
 /// Maximum packets per batch (safety cap to bound memory).
 const MAX_BATCH_SIZE: usize = 1000;
 
@@ -29,7 +26,6 @@ const MAX_BATCH_SIZE: usize = 1000;
 struct QueuedPacket {
     data: Vec<u8>,
     destination: SocketAddr,
-    queued_at: Instant,
 }
 
 /// Per-hop batch buffer that collects, shuffles, and flushes packets.
@@ -55,14 +51,10 @@ impl BatchBuffer {
     /// Queue a packet for the current batch.
     pub fn enqueue(&mut self, data: Vec<u8>, destination: SocketAddr) {
         if self.queue.len() >= MAX_BATCH_SIZE {
-            // Drop oldest if at capacity (backpressure).
             self.queue.pop_front();
+            warn!("batch queue full, dropping oldest packet");
         }
-        self.queue.push_back(QueuedPacket {
-            data,
-            destination,
-            queued_at: Instant::now(),
-        });
+        self.queue.push_back(QueuedPacket { data, destination });
     }
 
     /// Check if the current batch window has elapsed and a flush is due.
@@ -150,18 +142,14 @@ pub async fn batch_flush_loop(
 
         tokio::time::sleep(poll_interval).await;
 
-        let should_flush = {
-            let buf = buffer.lock().await;
-            buf.should_flush()
-        };
-
-        if !should_flush {
-            continue;
-        }
-
+        // Single lock: check and flush in one acquisition.
         let packets = {
             let mut buf = buffer.lock().await;
-            buf.flush()
+            if buf.should_flush() {
+                buf.flush()
+            } else {
+                continue;
+            }
         };
 
         for (data, dest) in &packets {
