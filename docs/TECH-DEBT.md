@@ -438,3 +438,28 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 **Why deferred:** The ZK witness construction isn't wired yet. Once it is, the function signature will need to accept either a plaintext receipt or a ZK witness, not a raw `Vec<u8>`.
 
 **When to fix:** When wiring the full ZK witness construction. Refactor to accept an enum `SettlementData { Plaintext(Vec<u8>), ZkWitness(ReceiptWitness) }` or split into two distinct functions.
+
+---
+
+## CommitmentTree (Phase 6)
+
+### Full-array SLOAD on every insert/remove (~600K gas per mutation)
+`_computeRoot()` copies all 512 leaves from storage to memory (`bytes32[512] memory layer = leaves`) on every call — 512 SLOADs at ~100 gas each = ~51K gas before hashing begins. Total insert cost exceeds 600K gas (vs. ~150K documented for NodeRegistry.register). `getMerkleProof()` repeats the same full copy.
+
+**Why deferred:** Gas is acceptable at 0.2 Gwei (~$0.24 per insert). The correct fix — storing internal nodes and doing O(log n) path updates — is a significant rewrite of the tree structure (1023 storage slots for a full binary tree, update logic for 9 levels on each mutation).
+
+**When to fix:** If the tree is deployed to mainnet and insert frequency makes gas cost meaningful. Switch to a stored-internal-node tree where mutations update O(log n) nodes and proofs read O(log n) slots.
+
+### keccak256 internal nodes incompatible with ZK circuit
+CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth receipt circuit uses Poseidon for its registryRoot Merkle proof. These roots will not match — the ZK circuit cannot verify membership against this tree's root. Documented in the contract with a migration note.
+
+**Why deferred:** Poseidon is not available as a Solidity precompile. Implementing Poseidon in Solidity is possible but gas-expensive (~50K gas per hash vs ~30 for keccak256). A Poseidon library contract or a precompile-based approach is the correct path.
+
+**When to fix:** Phase 6 when deploying the ZK-compatible tree. Deploy a Poseidon version alongside, migrate real commitments, update ZKSettlement.registryRoot. Consider using a Poseidon Solidity library (e.g., circomlibjs's Solidity Poseidon) or wait for an EVM Poseidon precompile.
+
+### Deployer-known salt compromises dummy indistinguishability
+`initialize(bytes32 salt)` uses a deployer-provided salt. The deployer can later compute `keccak256("dummy", i, salt)` for any index and determine whether a commitment is real or dummy. The contract comments recommend VDF or commit-reveal for production salt generation, but there is no enforcement.
+
+**Why deferred:** Deployment-time operational concern, not a code change. The contract correctly accepts any salt — the security depends on how the salt is generated, not on the contract logic.
+
+**When to fix:** At mainnet deployment. Generate salt via a VDF (verifiable delay function) or a multi-party commit-reveal ceremony. Document the salt generation procedure in the operator deployment guide.
