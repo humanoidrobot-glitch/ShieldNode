@@ -59,9 +59,6 @@ contract CommitmentTree {
     /// @notice Mapping from commitment → leaf index (for lookup/removal).
     mapping(bytes32 => uint256) public commitmentIndex;
 
-    /// @notice Next available slot for real node insertion.
-    uint256 private _nextRealSlot;
-
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -92,6 +89,12 @@ contract CommitmentTree {
 
     constructor() {
         owner = msg.sender;
+    }
+
+    /// @notice Transfer ownership (e.g., to NodeRegistry after deployment).
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "CommitmentTree: zero owner");
+        owner = newOwner;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -218,18 +221,19 @@ contract CommitmentTree {
     // ──────────────────────────────────────────────────────────────
 
     function _findDummySlot() internal view returns (uint256) {
-        for (uint256 i = _nextRealSlot; i < TREE_SIZE; ++i) {
-            if (!isReal[i]) return i;
-        }
-        // Wrap around.
-        for (uint256 i; i < _nextRealSlot; ++i) {
+        for (uint256 i; i < TREE_SIZE; ++i) {
             if (!isReal[i]) return i;
         }
         return TREE_SIZE; // full
     }
 
     /// @notice Compute the Merkle root from all leaves using keccak256.
-    ///         In production, this would use Poseidon for ZK compatibility.
+    ///         MIGRATION NOTE: For ZK compatibility (ZKSettlement circuit
+    ///         verification), internal nodes must use Poseidon hashing.
+    ///         This requires redeploying the tree contract. The root stored
+    ///         here will NOT match the circuit's Poseidon Merkle root.
+    ///         Plan: deploy Poseidon version alongside this during Phase 6,
+    ///         migrate real commitments, and update ZKSettlement.registryRoot.
     function _computeRoot() internal view returns (bytes32) {
         bytes32[512] memory layer = leaves;
         uint256 layerLen = TREE_SIZE;
