@@ -104,23 +104,27 @@ fn main() {
 
     // 4. If full trace mode, commit the trace metadata.
     if mode == 1 {
-        // Build I/O hash: SHA-256(all_inputs || all_outputs).
-        let mut io_data = Vec::new();
-        io_data.push(mode);
-        io_data.extend_from_slice(&encrypted_payload);
-        io_data.extend_from_slice(&session_key);
-        io_data.extend_from_slice(&nonce_bytes);
-        io_data.extend_from_slice(&next_hop);
-        io_data.extend_from_slice(&payload_hash);
-        io_data.extend_from_slice(&input_hash);
-        trace.finalize_io_hash(&io_data, &[]);
+        // Compute I/O hash with a running hasher (no Vec allocation).
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&[mode]);
+        hasher.update(&encrypted_payload);
+        hasher.update(&session_key);
+        hasher.update(&nonce_bytes);
+        hasher.update(&next_hop);
+        hasher.update(&payload_hash);
+        hasher.update(&input_hash);
+        let io_result = hasher.finalize();
+        trace.io_hash.copy_from_slice(&io_result);
 
         let trace_bytes = trace.to_bytes();
         trace.record_output(trace_bytes.len() as u64);
         env::commit_slice(&trace_bytes);
     }
 
-    // CRITICAL: no further env::commit calls after this point.
-    // The verifier checks that commit_count == 4 (mode 1) or 3 (mode 0).
-    // Any additional commit would indicate the guest is leaking data.
+    // NOTE: The real security guarantee comes from the image ID — the
+    // verifier checks that this specific guest binary (identified by its
+    // ELF hash) produced the proof. The commit_count in TraceMetadata is
+    // a defense-in-depth check, not the primary invariant. A different
+    // guest binary would have a different image ID and be rejected.
 }

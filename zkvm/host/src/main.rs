@@ -48,7 +48,8 @@ fn main() {
     println!("Expected next_hop: {:02x?}", &next_hop[..4]);
 
     // ── Step 2: Prepare the zkVM environment ─────────────────────
-    let env = ExecutorEnv::builder()
+    // Demonstrates the witness format — not used until guest ELF is compiled.
+    let _env = ExecutorEnv::builder()
         .write(&encrypted)
         .unwrap()
         .write(&session_key)
