@@ -3,7 +3,9 @@ name = "shieldnode-zkvm-guest"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 risc0-zkvm = { version = "5.0.0-rc.1", default-features = false }
-chacha20poly1305 = "0.10"
-sha2 = "0.10"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }

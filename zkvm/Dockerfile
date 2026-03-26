@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Install rustfmt (needed by risc0-circuit-rv32im-sys for cxx bindings).
+RUN rustup component add rustfmt
+
 # Install RISC Zero via rzup (downloads pre-built binaries).
 RUN curl -L https://risczero.com/install | bash && \
     /root/.risc0/bin/rzup install
