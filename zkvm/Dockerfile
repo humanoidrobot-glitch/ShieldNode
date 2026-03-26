@@ -8,7 +8,7 @@
 FROM rust:1.85-bookworm
 
 # Install RISC Zero toolchain.
-RUN cargo install cargo-risczero && \
+RUN cargo install cargo-risczero --locked && \
     cargo risczero install
 
 # Install dependencies for guest compilation (riscv target).
