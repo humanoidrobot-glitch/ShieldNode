@@ -1,14 +1,16 @@
-//! ZK-VM guest program: proves correct relay packet forwarding.
+//! ZK-VM guest program: proves correct relay packet forwarding AND
+//! execution trace integrity (no side-channel outputs).
 //!
-//! Runs inside RISC Zero's zkVM. Reads private inputs (encrypted packet,
-//! session key, nonce), executes ChaCha20-Poly1305 decryption, extracts
-//! the next_hop and inner payload, and commits the result as a public output.
+//! Two proof modes:
+//! - Mode 0 (forwarding only): proves correct decryption and routing
+//! - Mode 1 (full trace): proves forwarding + no extra outputs occurred
 //!
-//! The proof attests: "given these inputs, the relay function produced
-//! this exact output — nothing else happened."
+//! The full trace mode commits additional metadata: total I/O bytes,
+//! commit count, and a hash binding all inputs to all outputs. The
+//! verifier checks that the commit count matches exactly what the
+//! honest relay function should produce (4 commits), proving no
+//! hidden data was leaked via the journal.
 
-// RISC Zero guest programs use a special no_std environment.
-// When building for the zkVM target, std is not available.
 #![no_main]
 #![no_std]
 
@@ -21,10 +23,11 @@ use chacha20poly1305::{
 };
 use risc0_zkvm::guest::env;
 
-/// The relay forwarding function — identical to node/src/tunnel/circuit.rs
-/// process_relay_packet(), reproduced here for zkVM compilation.
-///
-/// Pure function: decrypt one Sphinx layer, extract next_hop, return payload.
+mod trace;
+use trace::TraceMetadata;
+
+/// Pure relay forwarding function — identical logic to
+/// node/src/tunnel/circuit.rs process_relay_packet().
 fn process_relay_packet(
     encrypted_payload: &[u8],
     session_key: &[u8; 32],
@@ -48,13 +51,33 @@ fn process_relay_packet(
     Ok((next_hop, inner_payload))
 }
 
+fn sha2_hash(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
 risc0_zkvm::guest::entry!(main);
 
 fn main() {
-    // Read private inputs from the host.
+    // Read proof mode: 0 = forwarding only, 1 = full execution trace.
+    let mode: u8 = env::read();
+
+    // Read private inputs.
     let encrypted_payload: Vec<u8> = env::read();
     let session_key: [u8; 32] = env::read();
     let nonce_bytes: [u8; 12] = env::read();
+
+    // Initialize trace accounting.
+    let mut trace = TraceMetadata::new();
+    trace.record_input(1); // mode byte
+    trace.record_input(encrypted_payload.len() as u64);
+    trace.record_input(32); // session key
+    trace.record_input(12); // nonce
 
     // Execute the relay function.
     let (next_hop, inner_payload) = process_relay_packet(
@@ -64,29 +87,40 @@ fn main() {
     )
     .expect("relay packet processing failed inside zkVM");
 
-    // Commit public outputs: the next_hop and a hash of the inner payload.
-    // The inner payload itself is not committed (it's private to the circuit).
-    // The next_hop proves the relay routed correctly.
-    // The payload hash proves the content was not modified.
+    // Commit public outputs.
+    // 1. next_hop — proves correct routing.
     env::commit(&next_hop);
+    trace.record_output(32);
 
-    // Commit hash of inner payload (not the payload itself — privacy).
+    // 2. payload_hash — proves content integrity without revealing payload.
     let payload_hash = sha2_hash(&inner_payload);
     env::commit(&payload_hash);
+    trace.record_output(32);
 
-    // Commit hash of the encrypted input (so the challenger can verify
-    // the proof was generated for the specific packet they challenged).
+    // 3. input_hash — ties proof to the specific challenged packet.
     let input_hash = sha2_hash(&encrypted_payload);
     env::commit(&input_hash);
-}
+    trace.record_output(32);
 
-/// Simple SHA-256 hash for commitment (the zkVM has native SHA-256 support).
-fn sha2_hash(data: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
+    // 4. If full trace mode, commit the trace metadata.
+    if mode == 1 {
+        // Build I/O hash: SHA-256(all_inputs || all_outputs).
+        let mut io_data = Vec::new();
+        io_data.push(mode);
+        io_data.extend_from_slice(&encrypted_payload);
+        io_data.extend_from_slice(&session_key);
+        io_data.extend_from_slice(&nonce_bytes);
+        io_data.extend_from_slice(&next_hop);
+        io_data.extend_from_slice(&payload_hash);
+        io_data.extend_from_slice(&input_hash);
+        trace.finalize_io_hash(&io_data, &[]);
+
+        let trace_bytes = trace.to_bytes();
+        trace.record_output(trace_bytes.len() as u64);
+        env::commit_slice(&trace_bytes);
+    }
+
+    // CRITICAL: no further env::commit calls after this point.
+    // The verifier checks that commit_count == 4 (mode 1) or 3 (mode 0).
+    // Any additional commit would indicate the guest is leaking data.
 }
