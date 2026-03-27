@@ -274,7 +274,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     {
         let cover_level = {
             let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-            cover_traffic::CoverLevel::from_str(&cfg.cover_traffic)
+            cfg.cover_traffic
         };
         if cover_level != cover_traffic::CoverLevel::Off {
             let cancel = CancellationToken::new();
@@ -378,7 +378,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
             private_key: cfg.operator_private_key.clone(),
             settlement_address: SETTLEMENT_ADDRESS.to_string(),
         };
-        let mode = settlement::SettlementMode::from_str(&cfg.settlement_mode);
+        let mode = cfg.settlement_mode;
         (wc, cfg.chain_id, mode)
     };
 

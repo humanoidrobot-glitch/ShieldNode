@@ -2,6 +2,7 @@ pub mod aead;
 pub mod chacha20;
 pub mod ecdsa;
 pub mod hybrid;
+pub mod kdf;
 pub mod keys;
 pub mod mlkem;
 pub mod noise;

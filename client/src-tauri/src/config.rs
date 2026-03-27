@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::cover_traffic::CoverLevel;
+use crate::settlement::SettlementMode;
+
 /// Client-side configuration for the ShieldNode VPN client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
@@ -25,11 +28,11 @@ pub struct ClientConfig {
     /// Refuse to connect if active node count is below the safety threshold.
     pub strict_network_size: bool,
 
-    /// Cover traffic level: "off", "low" (10 pps), "high" (50 pps).
-    pub cover_traffic: String,
+    /// Cover traffic level.
+    pub cover_traffic: CoverLevel,
 
-    /// Settlement mode: "zk" (privacy-preserving), "plaintext" (legacy), "auto" (ZK if available).
-    pub settlement_mode: String,
+    /// Settlement mode.
+    pub settlement_mode: SettlementMode,
 
     /// Node IDs the user prefers to connect through.
     pub preferred_nodes: Vec<String>,
@@ -50,8 +53,8 @@ impl Default for ClientConfig {
             kill_switch: true,
             gas_price_ceiling_gwei: 5.0,
             strict_network_size: false,
-            cover_traffic: "low".to_string(),
-            settlement_mode: "auto".to_string(),
+            cover_traffic: CoverLevel::Low,
+            settlement_mode: SettlementMode::Auto,
             preferred_nodes: Vec::new(),
             operator_private_key: None,
         }
@@ -68,8 +71,8 @@ pub struct SettingsPayload {
     pub kill_switch: bool,
     pub gas_price_ceiling_gwei: f64,
     pub strict_network_size: bool,
-    pub cover_traffic: String,
-    pub settlement_mode: String,
+    pub cover_traffic: CoverLevel,
+    pub settlement_mode: SettlementMode,
     pub preferred_nodes: Vec<String>,
 }
 
@@ -83,8 +86,8 @@ impl From<&ClientConfig> for SettingsPayload {
             kill_switch: cfg.kill_switch,
             gas_price_ceiling_gwei: cfg.gas_price_ceiling_gwei,
             strict_network_size: cfg.strict_network_size,
-            cover_traffic: cfg.cover_traffic.clone(),
-            settlement_mode: cfg.settlement_mode.clone(),
+            cover_traffic: cfg.cover_traffic,
+            settlement_mode: cfg.settlement_mode,
             preferred_nodes: cfg.preferred_nodes.clone(),
         }
     }
@@ -100,8 +103,8 @@ impl ClientConfig {
         self.kill_switch = s.kill_switch;
         self.gas_price_ceiling_gwei = s.gas_price_ceiling_gwei;
         self.strict_network_size = s.strict_network_size;
-        self.cover_traffic = s.cover_traffic.clone();
-        self.settlement_mode = s.settlement_mode.clone();
+        self.cover_traffic = s.cover_traffic;
+        self.settlement_mode = s.settlement_mode;
         self.preferred_nodes = s.preferred_nodes.clone();
     }
 

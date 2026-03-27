@@ -28,23 +28,22 @@ pub const COVER_MARKER: u8 = 0xCC;
 /// Sampling interval: check outbound rate every 100ms.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Cover traffic configuration parsed from config string.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Cover traffic level.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CoverLevel {
     Off,
     Low,  // 10 pps
     High, // 50 pps
 }
 
-impl CoverLevel {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "low" => Self::Low,
-            "high" => Self::High,
-            _ => Self::Off,
-        }
+impl Default for CoverLevel {
+    fn default() -> Self {
+        Self::Off
     }
+}
 
+impl CoverLevel {
     /// Target packets per second for this level.
     pub fn target_pps(self) -> u32 {
         match self {
@@ -220,12 +219,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cover_level_parsing() {
-        assert_eq!(CoverLevel::from_str("off"), CoverLevel::Off);
-        assert_eq!(CoverLevel::from_str("low"), CoverLevel::Low);
-        assert_eq!(CoverLevel::from_str("high"), CoverLevel::High);
-        assert_eq!(CoverLevel::from_str("LOW"), CoverLevel::Low);
-        assert_eq!(CoverLevel::from_str("unknown"), CoverLevel::Off);
+    fn cover_level_serde_roundtrip() {
+        let json = serde_json::to_string(&CoverLevel::Low).unwrap();
+        assert_eq!(json, "\"low\"");
+        let parsed: CoverLevel = serde_json::from_str("\"high\"").unwrap();
+        assert_eq!(parsed, CoverLevel::High);
+        let parsed: CoverLevel = serde_json::from_str("\"off\"").unwrap();
+        assert_eq!(parsed, CoverLevel::Off);
     }
 
     #[test]

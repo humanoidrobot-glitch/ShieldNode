@@ -191,12 +191,8 @@ Resolved: `update_settings` now uses `app.path().app_config_dir()` via Tauri's `
 
 **When to fix:** With the shared crate migration (see Architecture section). Highest-priority candidate alongside EIP-712 receipt logic.
 
-### Dual backward-compat accessors on NodeKeyPair
-`node/src/crypto/keys.rs` exposes parallel accessor pairs: `public_key()` / `public_key_kem()`, `secret()` / `secret_kem()`. The raw dalek-typed accessors exist for callers that haven't migrated to trait types.
-
-**Why deferred:** `main.rs` and `noise.rs` still use the dalek types in some paths.
-
-**When to fix:** When all callers are migrated to trait-based types, remove the raw dalek accessors.
+### ~~Dual backward-compat accessors on NodeKeyPair~~ — RESOLVED
+Resolved: Removed `public_key()` and `secret()` raw dalek accessors. All callers in `main.rs` migrated to `public_key_bytes()` and `secret_kem().to_bytes()`.
 
 ### SymmetricCipher trait re-keys per call
 `ChaCha20Poly1305Cipher` creates a new cipher instance on every `encrypt`/`decrypt`. The trait is stateless by design (`fn encrypt(key, nonce, plaintext)`).
@@ -292,12 +288,8 @@ The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No te
 
 **When to fix:** When TEE nodes are ready to deploy. Extend `NodeRegistry.register()` with an optional `attestationHash` parameter, or add a client-side attestation fetch via the DHT.
 
-### TEE_ENTRY_BONUS is dead code
-`TEE_ENTRY_BONUS` (10.0) is defined in `node/src/network/attestation.rs` but never referenced anywhere. The client's `score_node` applies the general TEE bonus (20.0) but does not apply position-specific preference — the same score is used for all three hop positions. Entry nodes (most sensitive — see client IP) should preferentially be TEE-attested.
-
-**Why deferred:** Position-aware scoring requires changing `select_circuit_with_pins` to pass the hop position to `score_node`, or applying a post-selection bonus/filter for the entry slot. Moderate refactor.
-
-**When to fix:** When TEE nodes exist on the network. Add a position parameter to scoring or a post-selection filter that rerolls the entry slot if a TEE candidate is available.
+### ~~TEE_ENTRY_BONUS is dead code~~ — RESOLVED
+Resolved: Removed `TEE_ENTRY_BONUS` constant from `attestation.rs`. Position-aware TEE scoring is deferred until TEE nodes exist on the network.
 
 ### Client hardcodes TEE scoring bonus
 The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. The node crate defines `TEE_SCORE_BONUS = 20.0` in `attestation.rs`. These are currently equal but can silently diverge since the client crate has no dependency on the node crate.
@@ -341,12 +333,8 @@ Resolved: Added `EIP712Utils.computeDomainSeparator(address)` to the shared libr
 
 ## Crypto — Ratcheting (Phase 5)
 
-### HKDF-SHA256 helper duplicated across 3 crypto files
-`ratchet.rs::derive_keys`, `noise.rs::derive_session_key`, and `hybrid.rs::combine_shared_secrets` all instantiate `Hkdf::<Sha256>` with the same pattern (new → expand → expect). A shared `fn hkdf_sha256(ikm, salt, info) -> [u8; 32]` would eliminate this.
-
-**Why deferred:** Each call site has slightly different parameters (salt, info, output size). Extracting a shared helper requires a flexible signature (optional salt, variable output length).
-
-**When to fix:** Extract to `node/src/crypto/kdf.rs` or add to an existing shared module. Low priority — the pattern is correct in all three sites.
+### ~~HKDF-SHA256 helper duplicated across 3 crypto files~~ — RESOLVED
+Resolved: Extracted `hkdf_sha256::<N>(salt, ikm, info)` to `node/src/crypto/kdf.rs` with const-generic output size. All three callers (`ratchet.rs`, `noise.rs`, `hybrid.rs`) updated.
 
 ### No shared control message type registry
 Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN, `0x03` RECEIPT_SIGN). Ratchet uses a 4-byte ASCII magic (`RATC`). These are independent ad-hoc schemes with no shared enum or framing layer. If messages ever share a transport, collisions are possible.
@@ -359,12 +347,8 @@ Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN,
 
 ## Cover Traffic (Phase 5)
 
-### cover_traffic config field is stringly-typed
-`ClientConfig.cover_traffic` and `SettingsPayload.cover_traffic` are `String` ("off"/"low"/"high"). `CoverLevel` is a proper Rust enum but conversion happens only at the point of use via `CoverLevel::from_str()`, which silently maps invalid values to `Off`. Invalid config values like typos survive serialization and disk persistence without error.
-
-**Why deferred:** Switching to `CoverLevel` as the config type requires `#[serde(rename_all = "lowercase")]` on the enum, a config migration for existing saved files, and updating the TypeScript `<select>` value handling.
-
-**When to fix:** Next config schema cleanup. Derive `Serialize`/`Deserialize` on `CoverLevel` directly and store the enum. Implement `FromStr` trait (with `Result` return) instead of the current infallible `from_str` method that shadows the trait name.
+### ~~cover_traffic config field is stringly-typed~~ — RESOLVED
+Resolved: `CoverLevel` now derives `Serialize`/`Deserialize` with `#[serde(rename_all = "lowercase")]`. `ClientConfig` and `SettingsPayload` use `CoverLevel` directly. Manual `from_str()` removed.
 
 ### COVER_MARKER (0xCC) relies on implicit payload format assumption
 Cover packets are identified by the exit node via `payload[0] == 0xCC` after peeling all Sphinx layers. This works because IPv4 headers start with `0x45` (version 4, IHL 5) so real tunnel traffic won't collide. However, the assumption is undocumented and fragile — non-IP payloads, custom protocols, or future Sphinx payload formats could start with `0xCC`.
@@ -402,12 +386,8 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 ## ZK Settlement (Phase 5)
 
-### settlement_mode is stringly-typed (same pattern as cover_traffic)
-`ClientConfig.settlement_mode` is a `String` parsed via `SettlementMode::from_str()` which silently defaults to `Auto` on invalid input. Same issue as `cover_traffic`. Both shadow `std::str::FromStr` without implementing the trait.
-
-**Why deferred:** Same fix needed for both fields — derive `Serialize`/`Deserialize` on the enums, implement `FromStr` with `Result` return. Needs config migration for existing saved files.
-
-**When to fix:** Next config schema cleanup. Do both `CoverLevel` and `SettlementMode` together.
+### ~~settlement_mode is stringly-typed (same pattern as cover_traffic)~~ — RESOLVED
+Resolved: `SettlementMode` now derives `Serialize`/`Deserialize` with `#[serde(rename_all = "lowercase")]`. `ClientConfig` and `SettingsPayload` use `SettlementMode` directly. Manual `from_str()` removed.
 
 ### ZK circuit artifact paths are hardcoded relative paths
 `default_artifacts()` in `settlement.rs` uses paths like `circuits/build/circuit.r1cs` relative to the working directory. This has the same unreliability as the old `current_dir()` config persistence bug. Should use `app_data_dir()` from Tauri or make paths configurable via `ClientConfig`.

@@ -12,9 +12,7 @@
 //! Overhead per hop: ~2.3 KB (1184 + 1088 + 32 = 2304 bytes for the
 //! compound ciphertext). For a 3-hop circuit: ~6.9 KB total, once per session.
 
-use hkdf::Hkdf;
-use sha2::Sha256;
-
+use super::kdf::hkdf_sha256;
 use super::mlkem::{self, MlKem768Kem};
 use super::traits::{CryptoError, KeyExchange};
 use super::x25519_kem::{self, X25519Kem};
@@ -78,11 +76,7 @@ fn combine_shared_secrets(x25519_ss: &[u8], mlkem_ss: &[u8]) -> [u8; 32] {
     ikm.extend_from_slice(x25519_ss);
     ikm.extend_from_slice(mlkem_ss);
 
-    let hk = Hkdf::<Sha256>::new(Some(b"shieldnode-hybrid-kex"), &ikm);
-    let mut okm = [0u8; 32];
-    hk.expand(b"session-key", &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    okm
+    hkdf_sha256::<32>(Some(b"shieldnode-hybrid-kex"), &ikm, b"session-key")
 }
 
 // ── KeyExchange impl ──────────────────────────────────────────────────

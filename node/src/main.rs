@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
             NodeKeyPair::load_or_generate(key_path).context("generating node key")?;
         info!(
             path = %key_path.display(),
-            public_key = %hex::encode(keypair.public_key().as_bytes()),
+            public_key = %hex::encode(keypair.public_key_bytes()),
             "node key ready"
         );
         return Ok(());
@@ -130,19 +130,19 @@ async fn main() -> Result<()> {
     if was_generated {
         info!(
             path = %key_path.display(),
-            public_key = %hex::encode(keypair.public_key().as_bytes()),
+            public_key = %hex::encode(keypair.public_key_bytes()),
             "generated new node key"
         );
     } else {
         info!(
             path = %key_path.display(),
-            public_key = %hex::encode(keypair.public_key().as_bytes()),
+            public_key = %hex::encode(keypair.public_key_bytes()),
             "loaded existing node key"
         );
     }
 
-    let private_key_bytes = keypair.secret().to_bytes();
-    let public_key_bytes: [u8; 32] = *keypair.public_key().as_bytes();
+    let private_key_bytes = keypair.secret_kem().to_bytes();
+    let public_key_bytes: [u8; 32] = keypair.public_key_bytes();
 
     // Use the public key as the node_id (a simple, unique 32-byte identifier).
     let node_id = public_key_bytes;
@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
         metrics_port = cfg.metrics_port,
         libp2p_port = cfg.libp2p_port,
         exit_mode = cfg.exit_mode,
-        public_key = %hex::encode(keypair.public_key().as_bytes()),
+        public_key = %hex::encode(keypair.public_key_bytes()),
         "ShieldNode starting"
     );
 

@@ -49,12 +49,6 @@ impl NodeKeyPair {
         })
     }
 
-    /// The public half of this keypair (as the raw dalek type for
-    /// backward compatibility).
-    pub fn public_key(&self) -> PublicKey {
-        *self.public.as_dalek()
-    }
-
     /// The public half as the trait-based type.
     pub fn public_key_kem(&self) -> &X25519PublicKey {
         &self.public
@@ -63,12 +57,6 @@ impl NodeKeyPair {
     /// The 32-byte public key bytes.
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.public.to_bytes()
-    }
-
-    /// Borrow the static secret (as the raw dalek type for backward
-    /// compatibility).
-    pub fn secret(&self) -> &x25519_dalek::StaticSecret {
-        self.secret.as_dalek()
     }
 
     /// Borrow the static secret as the trait-based type.

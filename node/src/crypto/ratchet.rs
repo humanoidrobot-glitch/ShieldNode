@@ -13,11 +13,10 @@
 
 use std::time::{Duration, Instant};
 
-use hkdf::Hkdf;
-use sha2::Sha256;
 use zeroize::Zeroize;
 
 use super::aead;
+use super::kdf::hkdf_sha256;
 
 /// Rekey interval: 30 seconds.
 const REKEY_INTERVAL: Duration = Duration::from_secs(30);
@@ -188,11 +187,7 @@ impl Drop for Ratchet {
 /// Follows Signal's symmetric ratchet pattern: both outputs from one HKDF,
 /// differentiated by position (first 32 = chain, second 32 = encryption).
 fn derive_keys(ikm: &[u8; 32], _epoch: u64) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
-
-    let mut okm = [0u8; 64];
-    hk.expand(RATCHET_INFO, &mut okm)
-        .expect("64 bytes is valid HKDF-SHA256 output");
+    let mut okm = hkdf_sha256::<64>(None, ikm, RATCHET_INFO);
 
     let mut chain_key = [0u8; 32];
     let mut enc_key = [0u8; 32];

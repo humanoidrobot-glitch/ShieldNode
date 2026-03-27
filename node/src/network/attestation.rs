@@ -77,10 +77,6 @@ const MAX_ATTESTATION_AGE: u64 = 24 * 60 * 60;
 /// Scoring bonus for TEE-attested nodes (added to base score).
 pub const TEE_SCORE_BONUS: f64 = 20.0;
 
-/// Additional bonus when a TEE node is in the entry position
-/// (most sensitive — sees client IP).
-pub const TEE_ENTRY_BONUS: f64 = 10.0;
-
 /// Verify an attestation report against an expected binary hash.
 ///
 /// In production, this would verify the hardware-specific signature chain:
