@@ -167,19 +167,11 @@ Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`,
 ### ~~Missing test: slash proposal for non-existent node~~ — RESOLVED
 Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't check registry), execution reverts at `registry.slash` with "node not found". Documented as expected behavior.
 
-### EIP712Utils.recoverSigner uses require string instead of custom error
-`EIP712Utils.recoverSigner` uses `require(sig.length == 65, "EIP712: bad sig length")`. The `SlashingOracle` previously used `revert InvalidEvidence("bad sig length")` — a custom error that is cheaper in gas and pattern-matchable by off-chain tools. The shared library chose `require` strings for simplicity since both contracts had different error conventions.
+### ~~EIP712Utils.recoverSigner uses require string instead of custom error~~ — RESOLVED
+Resolved: Replaced `require` strings with `BadSignatureLength(uint256)` and `InvalidSignature()` custom errors in `EIP712Utils`.
 
-**Why deferred:** No test catches the error type difference. Gas impact is negligible for a failure path.
-
-**When to fix:** During mainnet audit prep. Add a custom `EIP712Error` to the library if auditors flag it.
-
-### Attestation domain uses settlement address as verifyingContract
-`DOMAIN_SEPARATOR` uses the SessionSettlement address as `verifyingContract` for both receipt signatures (correct) and attestation signatures (semantically wrong — attestations are oracle-native). Wallets will show the settlement address when signing attestations, which is confusing. Low real-world impact since `SlashAttestation` has a distinct typehash.
-
-**Why deferred:** Adding a second domain separator doubles complexity. The distinct typehash prevents cross-type confusion.
-
-**When to fix:** Phase 6 when decentralising the challenge system. Attestations should use their own domain with `address(this)`.
+### ~~Attestation domain uses settlement address as verifyingContract~~ — RESOLVED
+Resolved: `SlashingOracle` now has a separate `ATTESTATION_DOMAIN_SEPARATOR` using `address(this)` as `verifyingContract`. Receipt verification still uses the `DOMAIN_SEPARATOR` from `SessionSettlement`. `_verifyChallengerAttestation` uses the attestation-specific domain.
 
 ---
 
@@ -339,19 +331,11 @@ The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. Th
 
 **When to fix:** Add a `SlashReason.ChallengeUnresponded` to the SlashingOracle, or allow ChallengeManager to call `proposeSlash()` directly with a pre-encoded evidence blob. Consider adding a bot that watches `ChallengeExpired` events and auto-files slash proposals.
 
-### compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)
-Both `node/src/network/challenge.rs` and `node/src/network/receipts.rs` implement identical `compute_domain_separator()` functions (~18 lines each). Same ABI encoding pattern with the same domain name, version, and layout.
+### ~~compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)~~ — RESOLVED
+Resolved: Extracted to `node/src/network/eip712.rs`. Both `challenge.rs` and `receipts.rs` re-export `compute_domain_separator` from the shared module.
 
-**Why deferred:** Part of the broader shared module extraction. Both files are in the same crate so extraction is straightforward but low priority.
-
-**When to fix:** Extract to a shared `node/src/network/eip712.rs` utility module. Both callers import from there.
-
-### Solidity DOMAIN_SEPARATOR construction duplicated across 4 contracts
-`SessionSettlement`, `ZKSettlement`, `SlashingOracle`, and `ChallengeManager` all construct their EIP-712 DOMAIN_SEPARATOR with identical code (~8 lines each). Each uses a different `verifyingContract` (their own address), so the values differ, but the construction pattern is copy-pasted.
-
-**Why deferred:** Each contract genuinely needs a different DOMAIN_SEPARATOR (different `verifyingContract`). A shared `computeDomainSeparator()` in `EIP712Utils` would save ~5 lines per contract but adds a function call in the constructor. Low ROI.
-
-**When to fix:** Optional cleanup during audit prep. Add `EIP712Utils.computeDomainSeparator(string name, string version)` and have each constructor call it.
+### ~~Solidity DOMAIN_SEPARATOR construction duplicated across 4 contracts~~ — RESOLVED
+Resolved: Added `EIP712Utils.computeDomainSeparator(address)` to the shared library. `SessionSettlement`, `ZKSettlement`, and `ChallengeManager` constructors now call it. `SlashingOracle` reads from `SessionSettlement` (unchanged).
 
 ---
 
@@ -443,12 +427,8 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 ## CommitmentTree (Phase 6)
 
-### Full-array SLOAD on every insert/remove (~600K gas per mutation)
-`_computeRoot()` copies all 512 leaves from storage to memory (`bytes32[512] memory layer = leaves`) on every call — 512 SLOADs at ~100 gas each = ~51K gas before hashing begins. Total insert cost exceeds 600K gas (vs. ~150K documented for NodeRegistry.register). `getMerkleProof()` repeats the same full copy.
-
-**Why deferred:** Gas is acceptable at 0.2 Gwei (~$0.24 per insert). The correct fix — storing internal nodes and doing O(log n) path updates — is a significant rewrite of the tree structure (1023 storage slots for a full binary tree, update logic for 9 levels on each mutation).
-
-**When to fix:** If the tree is deployed to mainnet and insert frequency makes gas cost meaningful. Switch to a stored-internal-node tree where mutations update O(log n) nodes and proofs read O(log n) slots.
+### ~~Full-array SLOAD on every insert/remove (~600K gas per mutation)~~ — RESOLVED
+Resolved: `CommitmentTree` now stores the full binary tree (1024-slot array, 1-indexed). `_updatePath()` walks from the mutated leaf to the root, updating only 9 internal nodes. `getMerkleProof()` reads siblings directly from storage — no recomputation. Gas per mutation reduced from ~600K to ~O(log n) path updates.
 
 ### keccak256 internal nodes incompatible with ZK circuit
 CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth receipt circuit uses Poseidon for its registryRoot Merkle proof. These roots will not match — the ZK circuit cannot verify membership against this tree's root. Documented in the contract with a migration note.

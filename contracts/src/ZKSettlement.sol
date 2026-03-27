@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {EIP712Utils} from "./lib/EIP712Utils.sol";
+
 /// @title IGroth16Verifier
 /// @notice Interface for the auto-generated Groth16 verifier from snarkjs.
 ///         The actual contract is exported by `snarkjs zkey export solidityverifier`
@@ -103,17 +105,7 @@ contract ZKSettlement {
         verifier = IGroth16Verifier(_verifier);
         owner = msg.sender;
 
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
-                keccak256("ShieldNode"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
+        DOMAIN_SEPARATOR = EIP712Utils.computeDomainSeparator(address(this));
     }
 
     // ──────────────────────────────────────────────────────────────

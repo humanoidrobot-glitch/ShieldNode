@@ -54,6 +54,11 @@ contract SlashingOracle is ISlashingOracle {
         "SlashAttestation(bytes32 nodeId,uint256 timestamp,bytes32 descriptionHash)"
     );
 
+    /// @notice Separate EIP-712 domain for attestations.
+    ///         Uses address(this) as verifyingContract instead of the
+    ///         settlement address, so wallets display the correct context.
+    bytes32 public immutable ATTESTATION_DOMAIN_SEPARATOR;
+
     // ──────────────────────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────────────────────
@@ -145,6 +150,10 @@ contract SlashingOracle is ISlashingOracle {
         // Read the EIP-712 domain directly from SessionSettlement so receipt
         // signatures produced for settlement are also valid here.
         DOMAIN_SEPARATOR = SessionSettlement(_settlement).DOMAIN_SEPARATOR();
+
+        // Attestations use this contract's own domain so wallets display
+        // the correct verifyingContract when challengers sign attestations.
+        ATTESTATION_DOMAIN_SEPARATOR = EIP712Utils.computeDomainSeparator(address(this));
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -336,11 +345,13 @@ contract SlashingOracle is ISlashingOracle {
         }
 
         // Verify the challenger's signature over the attestation.
+        // Uses ATTESTATION_DOMAIN_SEPARATOR (this contract's own domain)
+        // rather than the receipt DOMAIN_SEPARATOR (SessionSettlement's domain).
         bytes32 structHash = keccak256(
             abi.encode(ATTESTATION_TYPEHASH, attestedNodeId, timestamp, descriptionHash)
         );
         bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
+            abi.encodePacked("\x19\x01", ATTESTATION_DOMAIN_SEPARATOR, structHash)
         );
 
         address signer = EIP712Utils.recoverSigner(digest, challengerSig);

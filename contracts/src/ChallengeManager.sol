@@ -128,17 +128,7 @@ contract ChallengeManager {
         registry = NodeRegistry(_registry);
         oracle = SlashingOracle(_oracle);
 
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256(
-                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                ),
-                keccak256("ShieldNode"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
+        DOMAIN_SEPARATOR = EIP712Utils.computeDomainSeparator(address(this));
     }
 
     // ──────────────────────────────────────────────────────────────

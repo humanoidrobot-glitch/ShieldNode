@@ -3,6 +3,7 @@ pub mod batch_reorder;
 pub mod chain;
 pub mod challenge;
 pub mod discovery;
+pub mod eip712;
 pub mod heartbeat;
 pub mod hop_codec;
 pub mod link_padding;

@@ -13,6 +13,10 @@ pragma solidity ^0.8.24;
 ///
 ///         When real node count crosses FORK_THRESHOLD, the tree can be
 ///         migrated to a new contract without dummy logic.
+///
+///         Internal nodes are stored on-chain so insert/remove only update
+///         the O(log n) path from the mutated leaf to the root, instead of
+///         recomputing the entire tree.
 contract CommitmentTree {
     // ──────────────────────────────────────────────────────────────
     //  Constants
@@ -34,11 +38,11 @@ contract CommitmentTree {
 
     address public owner;
 
-    /// @notice The commitment leaves. Index 0..TREE_SIZE-1.
-    ///         Zero means empty (will be filled with dummy on first root compute).
-    bytes32[512] public leaves;
+    /// @notice 1-indexed binary tree: nodes[1] = root, leaves at [512..1023].
+    ///         Index 0 is unused. Total storage: 1023 slots.
+    bytes32[1024] internal nodes;
 
-    /// @notice Whether each leaf is a real node (true) or dummy (false).
+    /// @notice Whether each leaf slot is a real node (true) or dummy (false).
     bool[512] public isReal;
 
     /// @notice Total real node commitments in the tree.
@@ -47,7 +51,7 @@ contract CommitmentTree {
     /// @notice Total dummy commitments in the tree.
     uint256 public dummyCount;
 
-    /// @notice Current Merkle root (recomputed on insert/remove).
+    /// @notice Current Merkle root.
     bytes32 public root;
 
     /// @notice Whether the tree has been initialized with dummies.
@@ -56,7 +60,7 @@ contract CommitmentTree {
     /// @notice Whether the fork threshold has been reached.
     bool public forkReady;
 
-    /// @notice Mapping from commitment → leaf index (for lookup/removal).
+    /// @notice Mapping from commitment → leaf index (0-based, for external API).
     mapping(bytes32 => uint256) public commitmentIndex;
 
     // ──────────────────────────────────────────────────────────────
@@ -101,7 +105,8 @@ contract CommitmentTree {
     //  Initialize with dummies
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Fill all empty slots with dummy commitments.
+    /// @notice Fill all empty slots with dummy commitments and build the
+    ///         full internal node tree.
     ///         Dummy commitments are keccak256(abi.encode("dummy", index, salt))
     ///         where salt is provided by the deployer. In production, salt
     ///         should come from a VDF or commit-reveal scheme so even the
@@ -110,15 +115,20 @@ contract CommitmentTree {
     function initialize(bytes32 salt) external onlyOwner {
         if (initialized) revert AlreadyInitialized();
 
+        // Fill leaves (1-indexed at TREE_SIZE .. 2*TREE_SIZE-1).
         for (uint256 i; i < TREE_SIZE; ++i) {
-            if (leaves[i] == bytes32(0)) {
-                leaves[i] = keccak256(abi.encode("dummy", i, salt));
-                dummyCount++;
-            }
+            bytes32 leaf = keccak256(abi.encode("dummy", i, salt));
+            nodes[TREE_SIZE + i] = leaf;
+            dummyCount++;
+        }
+
+        // Build internal nodes bottom-up.
+        for (uint256 idx = TREE_SIZE - 1; idx >= 1; --idx) {
+            nodes[idx] = keccak256(abi.encodePacked(nodes[2 * idx], nodes[2 * idx + 1]));
         }
 
         initialized = true;
-        root = _computeRoot();
+        root = nodes[1];
 
         emit TreeInitialized(dummyCount, root);
     }
@@ -136,7 +146,8 @@ contract CommitmentTree {
         uint256 slot = _findDummySlot();
         if (slot >= TREE_SIZE) revert TreeFull();
 
-        leaves[slot] = commitment;
+        // Update the leaf and propagate to root.
+        nodes[TREE_SIZE + slot] = commitment;
         isReal[slot] = true;
         commitmentIndex[commitment] = slot;
         realCount++;
@@ -145,7 +156,7 @@ contract CommitmentTree {
             dummyCount--;
         }
 
-        root = _computeRoot();
+        _updatePath(TREE_SIZE + slot);
 
         emit RealNodeInserted(commitment, slot);
 
@@ -164,16 +175,16 @@ contract CommitmentTree {
     /// @param salt Salt for the replacement dummy.
     function removeReal(bytes32 commitment, bytes32 salt) external onlyOwner {
         uint256 slot = commitmentIndex[commitment];
-        if (!isReal[slot] || leaves[slot] != commitment) revert CommitmentNotFound();
+        if (!isReal[slot] || nodes[TREE_SIZE + slot] != commitment) revert CommitmentNotFound();
 
-        // Replace with a new dummy.
-        leaves[slot] = keccak256(abi.encode("dummy-replace", slot, salt));
+        // Replace with a new dummy and propagate to root.
+        nodes[TREE_SIZE + slot] = keccak256(abi.encode("dummy-replace", slot, salt));
         isReal[slot] = false;
         delete commitmentIndex[commitment];
         realCount--;
         dummyCount++;
 
-        root = _computeRoot();
+        _updatePath(TREE_SIZE + slot);
 
         emit RealNodeRemoved(commitment, slot);
     }
@@ -182,37 +193,33 @@ contract CommitmentTree {
     //  Views
     // ──────────────────────────────────────────────────────────────
 
+    /// @notice Read a leaf by its 0-based index.
     function getLeaf(uint256 index) external view returns (bytes32) {
-        return leaves[index];
+        return nodes[TREE_SIZE + index];
+    }
+
+    /// @notice Backward-compatible alias kept as `leaves(index)`.
+    function leaves(uint256 index) external view returns (bytes32) {
+        return nodes[TREE_SIZE + index];
     }
 
     function getRoot() external view returns (bytes32) {
         return root;
     }
 
-    /// @notice Get the Merkle proof for a leaf at the given index.
+    /// @notice Get the Merkle proof for a leaf at the given 0-based index.
+    ///         Reads siblings directly from stored internal nodes — O(log n).
     /// @return siblings The sibling hashes along the path from leaf to root.
     function getMerkleProof(uint256 index)
         external
         view
         returns (bytes32[9] memory siblings)
     {
-        uint256 idx = index;
-        bytes32[512] memory layer = leaves;
-
+        uint256 idx = TREE_SIZE + index;
         for (uint256 depth; depth < TREE_DEPTH; ++depth) {
-            uint256 layerLen = TREE_SIZE >> depth;
-            uint256 sibIdx = idx ^ 1; // flip last bit to get sibling
-            siblings[depth] = (sibIdx < layerLen) ? layer[sibIdx] : bytes32(0);
-
-            // Compute next layer.
-            uint256 nextLen = layerLen / 2;
-            bytes32[512] memory next;
-            for (uint256 i; i < nextLen; ++i) {
-                next[i] = keccak256(abi.encodePacked(layer[2 * i], layer[2 * i + 1]));
-            }
-            layer = next;
-            idx = idx / 2;
+            // Sibling is the node that shares the same parent.
+            siblings[depth] = nodes[idx ^ 1];
+            idx /= 2;
         }
     }
 
@@ -227,25 +234,15 @@ contract CommitmentTree {
         return TREE_SIZE; // full
     }
 
-    /// @notice Compute the Merkle root from all leaves using keccak256.
-    ///         MIGRATION NOTE: For ZK compatibility (ZKSettlement circuit
-    ///         verification), internal nodes must use Poseidon hashing.
-    ///         This requires redeploying the tree contract. The root stored
-    ///         here will NOT match the circuit's Poseidon Merkle root.
-    ///         Plan: deploy Poseidon version alongside this during Phase 6,
-    ///         migrate real commitments, and update ZKSettlement.registryRoot.
-    function _computeRoot() internal view returns (bytes32) {
-        bytes32[512] memory layer = leaves;
-        uint256 layerLen = TREE_SIZE;
-
-        for (uint256 depth; depth < TREE_DEPTH; ++depth) {
-            uint256 nextLen = layerLen / 2;
-            for (uint256 i; i < nextLen; ++i) {
-                layer[i] = keccak256(abi.encodePacked(layer[2 * i], layer[2 * i + 1]));
-            }
-            layerLen = nextLen;
+    /// @notice Recompute internal nodes along the path from a leaf to the root.
+    ///         Only touches O(TREE_DEPTH) = 9 storage slots.
+    /// @param leafIdx The 1-indexed position of the mutated leaf.
+    function _updatePath(uint256 leafIdx) internal {
+        uint256 idx = leafIdx / 2; // start at parent
+        while (idx >= 1) {
+            nodes[idx] = keccak256(abi.encodePacked(nodes[2 * idx], nodes[2 * idx + 1]));
+            idx /= 2;
         }
-
-        return layer[0];
+        root = nodes[1];
     }
 }

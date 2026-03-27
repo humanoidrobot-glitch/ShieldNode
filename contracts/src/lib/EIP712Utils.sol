@@ -6,11 +6,32 @@ pragma solidity ^0.8.24;
 ///         Extracted to ensure RECEIPT_TYPEHASH and signature recovery are
 ///         defined in exactly one place.
 library EIP712Utils {
+    // ── Errors ────────────────────────────────────────────────────
+
+    error BadSignatureLength(uint256 length);
+    error InvalidSignature();
+
     /// @notice The EIP-712 typehash for bandwidth receipts.
     ///         Used by SessionSettlement, ZKSettlement, and SlashingOracle.
     bytes32 internal constant RECEIPT_TYPEHASH = keccak256(
         "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
     );
+
+    /// @notice Compute the EIP-712 domain separator for a ShieldNode contract.
+    /// @param contractAddr The verifyingContract address (typically address(this)).
+    function computeDomainSeparator(address contractAddr) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256("ShieldNode"),
+                keccak256("1"),
+                block.chainid,
+                contractAddr
+            )
+        );
+    }
 
     /// @notice Compute the EIP-712 struct hash for a bandwidth receipt.
     function receiptStructHash(
@@ -38,7 +59,7 @@ library EIP712Utils {
         bytes32 digest,
         bytes memory sig
     ) internal pure returns (address) {
-        require(sig.length == 65, "EIP712: bad sig length");
+        if (sig.length != 65) revert BadSignatureLength(sig.length);
         bytes32 r;
         bytes32 s_;
         uint8 v;
@@ -48,7 +69,7 @@ library EIP712Utils {
             v  := byte(0, mload(add(sig, 96)))
         }
         address signer = ecrecover(digest, v, r, s_);
-        require(signer != address(0), "EIP712: invalid sig");
+        if (signer == address(0)) revert InvalidSignature();
         return signer;
     }
 }
