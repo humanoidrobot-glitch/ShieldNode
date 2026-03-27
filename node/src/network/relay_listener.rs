@@ -5,7 +5,7 @@ use alloy::primitives::{Address, B256};
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::crypto::sphinx::SphinxPacket;
@@ -49,7 +49,7 @@ use super::control_msg::{self, RelayControlType, ACK_SUCCESS, ACK_FAILURE};
 ///    port with the new session_id.
 pub struct RelayListener {
     socket: UdpSocket,
-    relay_service: Arc<Mutex<RelayService>>,
+    relay_service: Arc<RwLock<RelayService>>,
     tun: Option<Arc<TunDevice>>,
     /// Kept for future direct bandwidth bookkeeping (e.g. per-relay-hop stats).
     #[allow(dead_code)]
@@ -69,7 +69,7 @@ impl RelayListener {
     /// optional — if any is `None` receipt signing is disabled.
     pub async fn bind(
         port: u16,
-        relay_service: Arc<Mutex<RelayService>>,
+        relay_service: Arc<RwLock<RelayService>>,
         tun: Option<Arc<TunDevice>>,
         bandwidth: Arc<Mutex<BandwidthTracker>>,
         operator_signer: Option<PrivateKeySigner>,
@@ -176,9 +176,9 @@ impl RelayListener {
                 "received relay packet"
             );
 
-            // Peel one layer
+            // Peel one layer (read lock — concurrent with other forwarders)
             let (next_hop, inner_packet) = {
-                let svc = self.relay_service.lock().await;
+                let svc = self.relay_service.read().await;
                 match svc.forward_packet(session_id, &sphinx_packet).await {
                     Ok(result) => result,
                     Err(e) => {
@@ -274,7 +274,7 @@ impl RelayListener {
                 };
 
                 let accepted = {
-                    let mut svc = self.relay_service.lock().await;
+                    let mut svc = self.relay_service.write().await;
                     svc.add_session(state)
                 };
 
@@ -312,7 +312,7 @@ impl RelayListener {
                 );
 
                 {
-                    let mut svc = self.relay_service.lock().await;
+                    let mut svc = self.relay_service.write().await;
                     svc.remove_session(target_session_id);
                 }
 
@@ -385,7 +385,7 @@ impl RelayListener {
 
         // ── verify session exists ────────────────────────────────────
         {
-            let svc = self.relay_service.lock().await;
+            let svc = self.relay_service.read().await;
             if !svc.has_session(session_id) {
                 warn!(
                     peer = %peer_addr,

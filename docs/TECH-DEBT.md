@@ -20,13 +20,8 @@ Resolved in `fe83b5e`. Both Rust (`circuit.rs`) and TypeScript (`scoring.ts`) no
 
 ## Performance
 
-### Alloy provider caching
-Every RPC call (node reads, gas price, session open/settle) constructs a new alloy HTTP provider, which involves URL parsing and HTTP client setup.
-
-**Files affected:**
-- `client/src-tauri/src/chain.rs` — `get_active_nodes()`, `get_gas_price()`
-- `client/src-tauri/src/wallet.rs` — `open_session()`, `settle_session()`, `get_gas_price()`
-- `node/src/network/chain.rs` — `register()`, `heartbeat()`, `update_endpoint()`
+### ~~Alloy provider caching~~ — RESOLVED (client)
+Resolved (client side): `ChainReader` now parses the URL once in `new()` and provides a `provider()` helper that avoids re-parsing. Three functions (`get_active_nodes`, `get_gas_price`, `get_completion_rates`) no longer duplicate URL parsing. Node-side `ChainService` already had `build_provider()` centralized.
 
 **Why deferred:** Overhead is negligible for current call frequency (once per connect, every 30s for gas). Caching requires `Arc` or `OnceCell` restructuring of `AppState`.
 
@@ -73,12 +68,8 @@ Resolved: Removed the hand-rolled `mod hex` from `chain.rs`. The `hex` crate (no
 
 ## Multi-Hop Relay (Phase 2)
 
-### Relay Mutex lock per packet
-`relay_listener.rs` acquires `Arc<Mutex<RelayService>>` on every incoming relay packet. Under high packet rates this becomes a bottleneck.
-
-**Why deferred:** Acceptable throughput for Phase 2 testing with <10 nodes. Lock hold time is minimal (HashMap lookup + crypto peel).
-
-**When to fix:** Phase 4 stress testing. Replace with `RwLock` or `DashMap` for concurrent session lookups.
+### ~~Relay Mutex lock per packet~~ — RESOLVED
+Resolved: Replaced `Arc<Mutex<RelayService>>` with `Arc<RwLock<RelayService>>`. The hot-path `forward_packet()` (read-only: HashMap lookup + Sphinx peel) now uses `.read().await`, allowing concurrent packet forwarding. Only `add_session`/`remove_session` use `.write().await`.
 
 ### SphinxPacket allocates Vec on every serialize/deserialize
 `to_bytes()` and `from_bytes()` allocate new `Vec<u8>` per call. `peel_layer()` also copies the inner payload. On the relay hot path this creates allocation pressure.
@@ -230,19 +221,11 @@ Resolved: Backend now returns gas price as `f64` in Gwei. Sub-Gwei values (e.g.,
 ### ~~Strict mode for minimum network size guard~~ — RESOLVED
 Resolved: `strict_network_size` config field + Settings UI toggle. When enabled and nodes < 20, `connect()` returns error instead of proceeding.
 
-### Node list not cached in AppState
-`fetch_nodes()` calls `get_active_nodes()` via RPC on every invocation. Both `get_nodes` (UI) and `get_network_health` issue full RPC calls. If the UI polls frequently, this is wasteful.
+### ~~Node list not cached in AppState~~ — RESOLVED
+Resolved: Added `node_list_cache` field to `AppState` with 30-second TTL. `fetch_nodes()` returns cached results on rapid successive calls (UI polling, network health checks) and only refreshes from RPC when the cache expires.
 
-**Why deferred:** Node list changes slowly (heartbeats every 6 hours). Current call frequency is low (on connect, on rotation).
-
-**When to fix:** When UI polling is added for network health display. Cache node list in `AppState` with 30-60s TTL, similar to the completion rates cache.
-
-### IPv6 subnet diversity not enforced
-`subnet_24()` in `circuit.rs` only handles IPv4 dotted-quad endpoints. IPv6 endpoints (e.g., `[2001:db8::1]:51820`) return `None` from `subnet_24()`, silently skipping subnet diversity for IPv6 nodes. Two IPv6 nodes on the same /48 would not be detected.
-
-**Why deferred:** No IPv6 nodes exist on the current testnet. The fallback is safe — `None` comparisons never match, so IPv6 nodes pass diversity unchecked rather than being incorrectly blocked.
-
-**When to fix:** When IPv6 nodes appear on the network. Add a `subnet_48()` helper for IPv6 and handle bracket notation in endpoint parsing.
+### ~~IPv6 subnet diversity not enforced~~ — RESOLVED
+Resolved: Renamed `subnet_24()` to `subnet_prefix()`. Now parses endpoints via `SocketAddr` to handle both IPv4 (/24 prefix from first 3 octets) and IPv6 (/48 prefix from first 3 segments). Bracket notation (`[::1]:port`) is supported. Added IPv6-specific tests.
 
 ### No integration test for select_circuit_with_pins with diversity
 The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No test calls `select_circuit_with_pins` with a node pool that has known subnet/ASN collisions and verifies the returned circuit respects them. The `weighted_selection_favors_high_stake` test inadvertently runs under the diversity fallback path because all mock nodes share `127.0.0.1`.

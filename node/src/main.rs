@@ -286,7 +286,7 @@ async fn main() -> Result<()> {
 
     // ── relay listener (multi-hop forwarding) ─────────────────────────
 
-    let relay_service = Arc::new(Mutex::new(RelayService::new(bandwidth.clone())));
+    let relay_service = Arc::new(tokio::sync::RwLock::new(RelayService::new(bandwidth.clone())));
 
     // Build operator signer and settlement address for EIP-712 receipt
     // co-signing (all three must be present to enable the feature).

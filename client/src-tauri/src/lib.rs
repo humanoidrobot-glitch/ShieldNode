@@ -75,6 +75,8 @@ pub struct AppState {
     pub real_packet_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
     pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
+    /// Cached node list with TTL (avoids RPC on every UI poll).
+    pub node_list_cache: Arc<Mutex<(Vec<NodeInfo>, std::time::Instant)>>,
 }
 
 impl Default for AppState {
@@ -94,6 +96,10 @@ impl Default for AppState {
             completion_rates_cache: Arc::new(Mutex::new((
                 std::collections::HashMap::new(),
                 std::time::Instant::now() - std::time::Duration::from_secs(600),
+            ))),
+            node_list_cache: Arc::new(Mutex::new((
+                Vec::new(),
+                std::time::Instant::now() - std::time::Duration::from_secs(60),
             ))),
             cover_cancel: Mutex::new(None),
             real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -856,9 +862,23 @@ pub(crate) async fn rebuild_circuit(
 /// Completion rate cache TTL (10 minutes).
 const COMPLETION_RATE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Node list cache TTL (30 seconds — short enough for timely updates,
+/// long enough to avoid redundant RPC on rapid UI polls).
+const NODE_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Fetch nodes from on-chain registry, falling back to mock data.
 /// Enriches nodes with completion rates (cached) and local reputation penalties.
+/// Results are cached for NODE_LIST_TTL to avoid redundant RPC calls from UI polling.
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
+    // Return cached node list if fresh.
+    {
+        if let Ok(cache) = state.node_list_cache.lock() {
+            if cache.1.elapsed() < NODE_LIST_TTL && !cache.0.is_empty() {
+                return cache.0.clone();
+            }
+        }
+    }
+
     // Use cached completion rates if fresh; otherwise refresh.
     let cached = {
         let cache = state.completion_rates_cache.lock().ok();
@@ -929,6 +949,11 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
                 node.completion_rate = 0.0;
             }
         }
+    }
+
+    // Cache the enriched node list.
+    if let Ok(mut cache) = state.node_list_cache.lock() {
+        *cache = (nodes.clone(), std::time::Instant::now());
     }
 
     nodes

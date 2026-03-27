@@ -86,9 +86,12 @@ pub struct OnChainNodeInfo {
 // ---------------------------------------------------------------------------
 
 /// Read-only interface to on-chain ShieldNode contracts.
+///
+/// Caches the parsed URL and HTTP provider to avoid reconstructing them
+/// on every RPC call.
 #[derive(Clone)]
 pub struct ChainReader {
-    rpc_url: String,
+    rpc_url: url::Url,
     registry_address: Address,
     settlement_address: Address,
 }
@@ -99,11 +102,17 @@ impl ChainReader {
         registry_address: Address,
         settlement_address: Address,
     ) -> Self {
+        let url: url::Url = rpc_url.parse().expect("invalid RPC URL in ChainReader::new");
         Self {
-            rpc_url,
+            rpc_url: url,
             registry_address,
             settlement_address,
         }
+    }
+
+    /// Build a read-only provider from the cached URL.
+    fn provider(&self) -> impl Provider {
+        ProviderBuilder::new().connect_http(self.rpc_url.clone())
     }
 
     /// Fetch all active nodes from the NodeRegistry contract.
@@ -111,12 +120,7 @@ impl ChainReader {
     /// Calls `getActiveNodes(0, 100)` to obtain the list of active node IDs,
     /// then calls `getNode(id)` for each one to retrieve full metadata.
     pub async fn get_active_nodes(&self) -> Result<Vec<OnChainNodeInfo>, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
 
         let registry =
             INodeRegistry::new(self.registry_address, &provider);
@@ -187,12 +191,7 @@ impl ChainReader {
 
     /// Fetch the current gas price from the RPC provider and return it in Gwei.
     pub async fn get_gas_price(&self) -> Result<f64, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
 
         let gas_price_wei = provider
             .get_gas_price()
@@ -214,12 +213,7 @@ impl ChainReader {
     ///
     /// Returns a map of node_id hex string → completion rate (0.0–1.0).
     pub async fn get_completion_rates(&self) -> Result<std::collections::HashMap<String, f64>, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
         let settlement = ISessionSettlement::new(self.settlement_address, &provider);
 
         // Get total session count.

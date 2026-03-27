@@ -41,8 +41,29 @@ fn default_completion_rate() -> f64 {
 
 // ── circuit diversity helpers ─────────────────────────────────────────
 
-/// Extract /24 subnet prefix from an endpoint string (e.g., "1.2.3.4:51820" → "1.2.3").
-fn subnet_24(endpoint: &str) -> Option<String> {
+/// Extract a subnet prefix from an endpoint string.
+///
+/// IPv4: /24 prefix (e.g., "1.2.3.4:51820" → "1.2.3")
+/// IPv6: /48 prefix (e.g., "[2001:db8:abcd::1]:51820" → "2001:db8:abcd")
+fn subnet_prefix(endpoint: &str) -> Option<String> {
+    use std::net::IpAddr;
+
+    // Try parsing as a full SocketAddr (handles both IPv4 "1.2.3.4:port"
+    // and IPv6 "[::1]:port" bracket notation).
+    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
+        return match addr.ip() {
+            IpAddr::V4(v4) => {
+                let o = v4.octets();
+                Some(format!("{}.{}.{}", o[0], o[1], o[2]))
+            }
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                Some(format!("{:x}:{:x}:{:x}", s[0], s[1], s[2]))
+            }
+        };
+    }
+
+    // Fallback: simple split for bare IPv4 "host:port" without brackets.
     let host = endpoint.split(':').next()?;
     let octets: Vec<&str> = host.split('.').collect();
     if octets.len() == 4 {
@@ -55,11 +76,11 @@ fn subnet_24(endpoint: &str) -> Option<String> {
 /// Check if a candidate node violates diversity constraints against already-selected nodes.
 /// Returns true if the candidate is acceptable (diverse enough).
 fn is_diverse(candidate: &NodeInfo, selected: &[Option<NodeInfo>]) -> bool {
-    let candidate_subnet = subnet_24(&candidate.endpoint);
+    let candidate_subnet = subnet_prefix(&candidate.endpoint);
 
     for slot in selected.iter().flatten() {
-        // Same /24 subnet → reject
-        if let (Some(ref a), Some(ref b)) = (&candidate_subnet, &subnet_24(&slot.endpoint)) {
+        // Same subnet prefix (/24 for IPv4, /48 for IPv6) → reject
+        if let (Some(ref a), Some(ref b)) = (&candidate_subnet, &subnet_prefix(&slot.endpoint)) {
             if a == b {
                 return false;
             }
@@ -537,10 +558,32 @@ mod tests {
     }
 
     #[test]
-    fn subnet_24_extraction() {
-        assert_eq!(subnet_24("1.2.3.4:51820"), Some("1.2.3".to_string()));
-        assert_eq!(subnet_24("10.0.0.1:51820"), Some("10.0.0".to_string()));
-        assert_eq!(subnet_24("invalid"), None);
+    fn subnet_prefix_ipv4() {
+        assert_eq!(subnet_prefix("1.2.3.4:51820"), Some("1.2.3".to_string()));
+        assert_eq!(subnet_prefix("10.0.0.1:51820"), Some("10.0.0".to_string()));
+        assert_eq!(subnet_prefix("invalid"), None);
+    }
+
+    #[test]
+    fn subnet_prefix_ipv6() {
+        assert_eq!(
+            subnet_prefix("[2001:db8:abcd::1]:51820"),
+            Some("2001:db8:abcd".to_string())
+        );
+        assert_eq!(
+            subnet_prefix("[2001:db8:abcd:1234::1]:51820"),
+            Some("2001:db8:abcd".to_string())
+        );
+        // Two IPv6 addresses on the same /48 should produce the same prefix.
+        assert_eq!(
+            subnet_prefix("[2001:db8:abcd::1]:51820"),
+            subnet_prefix("[2001:db8:abcd::2]:51820"),
+        );
+        // Different /48 should produce different prefixes.
+        assert_ne!(
+            subnet_prefix("[2001:db8:abcd::1]:51820"),
+            subnet_prefix("[2001:db8:abce::1]:51820"),
+        );
     }
 
     #[test]
