@@ -83,6 +83,14 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Authorised challengers.
     mapping(address => bool) public challengers;
 
+    /// @dev A single dual-signed receipt used as fraud evidence.
+    struct FraudReceipt {
+        uint256 cumBytes;
+        uint256 ts;
+        bytes   clientSig;
+        bytes   nodeSig;
+    }
+
     /// @dev Proposal storage.  Evidence is not stored — it is verified
     ///      at proposal time and emitted in the SlashProposed event.
     struct Proposal {
@@ -271,37 +279,34 @@ contract SlashingOracle is ISlashingOracle {
     ) internal view {
         (
             uint256 sessionId,
-            uint256 cumBytes1, uint256 ts1, bytes memory cSig1, bytes memory nSig1,
-            uint256 cumBytes2, uint256 ts2, bytes memory cSig2, bytes memory nSig2
-        ) = abi.decode(evidence, (uint256, uint256, uint256, bytes, bytes, uint256, uint256, bytes, bytes));
+            FraudReceipt memory r1,
+            FraudReceipt memory r2
+        ) = abi.decode(evidence, (uint256, FraudReceipt, FraudReceipt));
 
         // The two receipts must report different byte counts.
-        if (cumBytes1 == cumBytes2) {
+        if (r1.cumBytes == r2.cumBytes) {
             revert InvalidEvidence("byte counts match");
         }
 
         // Verify both receipts and check signers match + belong to accused node.
-        _verifyFraudSigners(
-            nodeId, sessionId,
-            cumBytes1, ts1, cSig1, nSig1,
-            cumBytes2, ts2, cSig2, nSig2
-        );
+        _verifyFraudSigners(nodeId, sessionId, r1, r2);
     }
 
-    /// @dev Second half of fraud verification — separated to avoid stack-too-deep.
+    /// @dev Verify both fraud receipts: recover signers, check they match,
+    ///      and confirm the node signer is the accused node's owner.
     function _verifyFraudSigners(
         bytes32 nodeId,
         uint256 sessionId,
-        uint256 cumBytes1, uint256 ts1, bytes memory cSig1, bytes memory nSig1,
-        uint256 cumBytes2, uint256 ts2, bytes memory cSig2, bytes memory nSig2
+        FraudReceipt memory r1,
+        FraudReceipt memory r2
     ) internal view {
-        bytes32 digest1 = _receiptDigest(sessionId, cumBytes1, ts1);
-        address client1 = EIP712Utils.recoverSigner(digest1, cSig1);
-        address node1   = EIP712Utils.recoverSigner(digest1, nSig1);
+        bytes32 digest1 = _receiptDigest(sessionId, r1.cumBytes, r1.ts);
+        address client1 = EIP712Utils.recoverSigner(digest1, r1.clientSig);
+        address node1   = EIP712Utils.recoverSigner(digest1, r1.nodeSig);
 
-        bytes32 digest2 = _receiptDigest(sessionId, cumBytes2, ts2);
-        address client2 = EIP712Utils.recoverSigner(digest2, cSig2);
-        address node2   = EIP712Utils.recoverSigner(digest2, nSig2);
+        bytes32 digest2 = _receiptDigest(sessionId, r2.cumBytes, r2.ts);
+        address client2 = EIP712Utils.recoverSigner(digest2, r2.clientSig);
+        address node2   = EIP712Utils.recoverSigner(digest2, r2.nodeSig);
 
         if (client1 != client2) revert InvalidEvidence("client signers differ");
         if (node1 != node2)     revert InvalidEvidence("node signers differ");

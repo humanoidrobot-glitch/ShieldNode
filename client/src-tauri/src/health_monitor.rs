@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::chain::ChainReader;
-use crate::circuit::{self, CircuitState, NodeInfo};
+use crate::circuit::CircuitState;
 use crate::tunnel::{self, TunnelManager};
 use crate::ConnectionState;
 
@@ -167,16 +167,25 @@ pub async fn health_monitor_loop(
                 })
                 .unwrap_or_default();
 
-            match rebuild_circuit(
+            let exclude_strs: Vec<&str> = exclude_ids.iter().map(|s| s.as_str()).collect();
+            match crate::rebuild_circuit(
                 &chain_reader,
-                &exclude_ids,
-                &connection,
+                &exclude_strs,
                 &circuit,
                 &tunnel,
             )
             .await
             {
-                Ok(_) => {
+                Ok(selected) => {
+                    // Update connection state with new entry node.
+                    if let Ok(mut conn) = connection.lock() {
+                        if let ConnectionState::Connected {
+                            ref mut node_id, ..
+                        } = *conn
+                        {
+                            *node_id = selected[0].node_id.clone();
+                        }
+                    }
                     state.record_rebuild();
                     info!(
                         rebuild_count = state.rebuild_count,
@@ -189,58 +198,6 @@ pub async fn health_monitor_loop(
             }
         }
     }
-}
-
-/// Rebuild a circuit through different nodes.
-async fn rebuild_circuit(
-    chain_reader: &ChainReader,
-    exclude_ids: &[String],
-    connection: &Arc<Mutex<ConnectionState>>,
-    circuit_state: &Arc<Mutex<Option<CircuitState>>>,
-    tunnel: &Arc<Mutex<TunnelManager>>,
-) -> Result<(), String> {
-    let nodes = chain_reader.get_active_nodes().await
-        .map_err(|e| format!("failed to fetch nodes: {e}"))?;
-
-    if nodes.len() < 3 {
-        return Err("fewer than 3 nodes available".to_string());
-    }
-
-    let node_infos: Vec<NodeInfo> = nodes
-        .into_iter()
-        .map(crate::map_on_chain_node)
-        .collect();
-
-    let exclude_strs: Vec<&str> = exclude_ids.iter().map(|s| s.as_str()).collect();
-    let selected = circuit::select_circuit(&node_infos, &exclude_strs)?;
-
-    let new_circuit = circuit::build_circuit(&selected)?;
-    tunnel::register_sessions(&new_circuit).await?;
-
-    // Reconnect tunnel to new entry.
-    {
-        let mut tun = tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
-        tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key)?;
-    }
-
-    // Swap circuit state.
-    {
-        let mut circ = circuit_state.lock().map_err(|e| format!("lock error: {e}"))?;
-        *circ = Some(new_circuit);
-    }
-
-    // Update connection state with new entry node.
-    {
-        let mut conn = connection.lock().map_err(|e| format!("lock error: {e}"))?;
-        if let ConnectionState::Connected {
-            ref mut node_id, ..
-        } = *conn
-        {
-            *node_id = selected[0].node_id.clone();
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

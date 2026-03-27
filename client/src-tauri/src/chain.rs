@@ -331,17 +331,3 @@ fn heartbeat_to_uptime(last_heartbeat: u64, now: u64) -> f64 {
     }
 }
 
-/// Tiny hex-encoding helper so we don't need the `hex` crate as a top-level
-/// dependency (alloy re-exports it, but access varies by version).
-mod hex {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            s.push(HEX_CHARS[(b >> 4) as usize] as char);
-            s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-        }
-        s
-    }
-}

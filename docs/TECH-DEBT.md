@@ -67,22 +67,11 @@ Resolved in `fc7c978`. Now scans all logs for matching `SessionOpened` event sig
 
 **When to fix:** With the shared crate migration.
 
-### Hex parsing implementations
-Three separate hex-to-bytes32 functions exist:
-- `node/src/main.rs` `parse_hex_private_key()` — uses `hex` crate
-- `client/src-tauri/src/wallet.rs` `parse_bytes32()` — manual parsing, returns `FixedBytes`
-- `client/src-tauri/src/lib.rs` `decode_hex_32()` — manual parsing, returns `[u8; 32]`, silent failure
+### ~~Hex parsing implementations~~ — RESOLVED
+Resolved: Added `hex = "0.4"` to client crate. `wallet.rs::parse_bytes32()` and `lib.rs::decode_hex_bytes()` now use `hex::decode()` instead of hand-rolled parsing. Node crate already used `hex` crate.
 
-**Why deferred:** Each has slightly different error handling needs (strict vs lenient). Consolidation requires deciding on a single error strategy.
-
-**When to fix:** With the shared crate migration. Use the `hex` crate everywhere.
-
-### Custom hex encoding in chain.rs
-`client/src-tauri/src/chain.rs` has a hand-rolled `hex::encode` module instead of using the `hex` crate.
-
-**Why deferred:** Avoids adding another dependency to the client crate. The implementation is 12 lines and correct.
-
-**When to fix:** When `hex` crate is added as a dependency (already available transitively via alloy).
+### ~~Custom hex encoding in chain.rs~~ — RESOLVED
+Resolved: Removed the hand-rolled `mod hex` from `chain.rs`. The `hex` crate (now a direct dependency) provides `hex::encode()`.
 
 ---
 
@@ -154,12 +143,8 @@ Resolved in `9f792c9`. Added `get_settings` and `update_settings` Tauri commands
 ### ~~Constructor uses require strings instead of custom errors~~ — RESOLVED
 Resolved in `9b0ee46`. Constructor now uses `ZeroAddress()` custom error.
 
-### `_verifyFraudSigners` takes 10 parameters
-The function accepts 10 individual parameters due to stack-too-deep constraints. A `FraudReceipt` struct would reduce this to 3 params (nodeId, sessionId, two receipt structs) and improve readability.
-
-**Why deferred:** Requires `via_ir` regardless due to the nested decode. The struct refactor alone doesn't eliminate the need for the function split.
-
-**When to fix:** When `via_ir` can be removed (e.g., if Solidity compiler improves stack handling) or during mainnet audit prep.
+### ~~`_verifyFraudSigners` takes 10 parameters~~ — RESOLVED
+Resolved: Introduced `FraudReceipt` struct (cumBytes, ts, clientSig, nodeSig). `_verifyBandwidthFraud` decodes into two `FraudReceipt` memory structs. `_verifyFraudSigners` now takes 4 params (nodeId, sessionId, r1, r2) instead of 10.
 
 ### ~~`_recoverSigner` duplicated between SlashingOracle and SessionSettlement~~ — RESOLVED
 Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`, `receiptStructHash`, and `hashTypedData`. Both contracts import and use the shared library.
@@ -270,12 +255,8 @@ The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No te
 
 **When to fix:** Phase 5 anti-griefing test suite. Add nodes with varied endpoints to verify end-to-end diversity enforcement.
 
-### rebuild_circuit duplicated between health_monitor and rotation_loop
-`health_monitor.rs::rebuild_circuit()` and `lib.rs::rotation_loop()` perform nearly identical 7-step rebuild sequences: fetch nodes → select circuit → build circuit → register sessions → reconnect tunnel → swap state → update connection. ~50 lines of duplicated logic.
-
-**Why deferred:** Both callers have slightly different error handling and context. Extracting a shared helper requires passing 5+ `Arc<Mutex>` params.
-
-**When to fix:** When either path is extended (e.g., adding completion rate enrichment to rebuilds). Extract a `rebuild_circuit_internal()` helper callable from both.
+### ~~rebuild_circuit duplicated between health_monitor and rotation_loop~~ — RESOLVED
+Resolved: Extracted `rebuild_circuit()` as a `pub(crate)` function in `lib.rs`. Takes `ChainReader`, exclude list, circuit state, and tunnel manager. Returns selected `NodeInfo` triple so callers can update connection state as needed. Both `health_monitor_loop` and `rotation_loop` now call this shared function.
 
 ---
 

@@ -137,11 +137,10 @@ contract SlashingOracleTest is Test {
         bytes memory cSig2 = _signReceipt(clientPk, sessionId, bytes2_, ts2);
         bytes memory nSig2 = _signReceipt(nodePk, sessionId, bytes2_, ts2);
 
-        return abi.encode(
-            sessionId,
-            bytes1_, ts1, cSig1, nSig1,
-            bytes2_, ts2, cSig2, nSig2
-        );
+        SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(bytes1_, ts1, cSig1, nSig1);
+        SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(bytes2_, ts2, cSig2, nSig2);
+
+        return abi.encode(sessionId, r1, r2);
     }
 
     /// @dev Build a challenger attestation for ProvableLogging or SelectiveDenial.

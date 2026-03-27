@@ -127,14 +127,12 @@ pub async fn get_gas_price(rpc_url: &str) -> Result<f64, String> {
 
 fn parse_bytes32(hex_str: &str) -> Result<FixedBytes<32>, String> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    if stripped.len() != 64 {
-        return Err(format!("expected 64 hex chars, got {}", stripped.len()));
+    let bytes = hex::decode(stripped).map_err(|e| format!("invalid hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
     }
     let mut out = [0u8; 32];
-    for (i, chunk) in stripped.as_bytes().chunks(2).enumerate() {
-        let s = std::str::from_utf8(chunk).map_err(|e| format!("invalid hex: {e}"))?;
-        out[i] = u8::from_str_radix(s, 16).map_err(|e| format!("invalid hex: {e}"))?;
-    }
+    out.copy_from_slice(&bytes);
     Ok(FixedBytes::from(out))
 }
 
