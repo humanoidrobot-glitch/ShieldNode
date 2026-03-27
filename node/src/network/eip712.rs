@@ -5,13 +5,6 @@
 
 use alloy::primitives::{keccak256, Address, B256, U256};
 
-/// `keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")`
-pub fn eip712_domain_typehash() -> B256 {
-    keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
-    )
-}
-
 /// Compute the EIP-712 domain separator for a ShieldNode contract.
 ///
 /// ```text
@@ -24,7 +17,9 @@ pub fn eip712_domain_typehash() -> B256 {
 /// ))
 /// ```
 pub fn compute_domain_separator(chain_id: u64, verifying_contract: Address) -> B256 {
-    let domain_typehash = eip712_domain_typehash();
+    let domain_typehash = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
     let name_hash = keccak256("ShieldNode");
     let version_hash = keccak256("1");
 

@@ -198,11 +198,6 @@ contract CommitmentTree {
         return nodes[TREE_SIZE + index];
     }
 
-    /// @notice Backward-compatible alias kept as `leaves(index)`.
-    function leaves(uint256 index) external view returns (bytes32) {
-        return nodes[TREE_SIZE + index];
-    }
-
     function getRoot() external view returns (bytes32) {
         return root;
     }
