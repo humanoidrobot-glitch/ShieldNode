@@ -27,28 +27,9 @@ const MIN_DATA_PACKET_SIZE: usize = 8 + 68;
 /// Default relay port used when the next-hop encoding has port == 0.
 const DEFAULT_RELAY_PORT: u16 = 51821;
 
-// ── control message types ─────────────────────────────────────────────
+// ── control message types (from shared registry) ──────────────────────
 
-const MSG_SESSION_SETUP: u8 = 0x01;
-const MSG_SESSION_TEARDOWN: u8 = 0x02;
-const MSG_RECEIPT_SIGN: u8 = 0x03;
-
-/// Expected payload length for SESSION_SETUP after the message-type byte:
-/// 8 (session_id) + 32 (session_key) + 8 (hop_index) = 48
-const SESSION_SETUP_PAYLOAD_LEN: usize = 8 + 32 + 8;
-
-/// Expected payload length for SESSION_TEARDOWN after the message-type byte:
-/// 8 (session_id) = 8
-const SESSION_TEARDOWN_PAYLOAD_LEN: usize = 8;
-
-/// Expected payload length for RECEIPT_SIGN after the message-type byte:
-/// 8 (session_id) + 8 (cumulative_bytes) + 8 (timestamp) + 65 (client_signature) = 89
-const RECEIPT_SIGN_PAYLOAD_LEN: usize = 8 + 8 + 8 + 65;
-
-// ── ACK bytes ─────────────────────────────────────────────────────────
-
-const ACK_SUCCESS: u8 = 0x01;
-const ACK_FAILURE: u8 = 0x00;
+use super::control_msg::{self, RelayControlType, ACK_SUCCESS, ACK_FAILURE};
 
 /// A dedicated UDP listener for multi-hop relay traffic.
 ///
@@ -265,12 +246,12 @@ impl RelayListener {
         let msg_type = data[0];
         let payload = &data[1..];
 
-        match msg_type {
-            MSG_SESSION_SETUP => {
-                if payload.len() < SESSION_SETUP_PAYLOAD_LEN {
+        match RelayControlType::from_byte(msg_type) {
+            Some(RelayControlType::SessionSetup) => {
+                if payload.len() < control_msg::payload_len::SESSION_SETUP {
                     warn!(
                         peer = %peer_addr,
-                        expected = SESSION_SETUP_PAYLOAD_LEN,
+                        expected = control_msg::payload_len::SESSION_SETUP,
                         got = payload.len(),
                         "SESSION_SETUP payload too short"
                     );
@@ -315,11 +296,11 @@ impl RelayListener {
                 }
             }
 
-            MSG_SESSION_TEARDOWN => {
-                if payload.len() < SESSION_TEARDOWN_PAYLOAD_LEN {
+            Some(RelayControlType::SessionTeardown) => {
+                if payload.len() < control_msg::payload_len::SESSION_TEARDOWN {
                     warn!(
                         peer = %peer_addr,
-                        expected = SESSION_TEARDOWN_PAYLOAD_LEN,
+                        expected = control_msg::payload_len::SESSION_TEARDOWN,
                         got = payload.len(),
                         "SESSION_TEARDOWN payload too short"
                     );
@@ -343,14 +324,14 @@ impl RelayListener {
                 vec![ACK_SUCCESS]
             }
 
-            MSG_RECEIPT_SIGN => {
+            Some(RelayControlType::ReceiptSign) => {
                 self.handle_receipt_sign(payload, peer_addr).await
             }
 
-            other => {
+            None => {
                 warn!(
                     peer = %peer_addr,
-                    msg_type = other,
+                    msg_type,
                     "unknown control message type"
                 );
                 vec![ACK_FAILURE]
@@ -383,10 +364,10 @@ impl RelayListener {
             }
         };
 
-        if payload.len() < RECEIPT_SIGN_PAYLOAD_LEN {
+        if payload.len() < control_msg::payload_len::RECEIPT_SIGN {
             warn!(
                 peer = %peer_addr,
-                expected = RECEIPT_SIGN_PAYLOAD_LEN,
+                expected = control_msg::payload_len::RECEIPT_SIGN,
                 got = payload.len(),
                 "RECEIPT_SIGN payload too short"
             );

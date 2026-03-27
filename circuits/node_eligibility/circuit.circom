@@ -4,6 +4,7 @@ include "circomlib/circuits/poseidon.circom";
 include "circomlib/circuits/comparators.circom";
 include "circomlib/circuits/bitify.circom";
 include "circomlib/circuits/mux1.circom";
+include "../lib/merkle.circom";
 
 /// @title NodeEligibility
 /// @notice Proves a node meets selection criteria without revealing identity.
@@ -52,29 +53,13 @@ template NodeEligibility(MERKLE_DEPTH) {
     commitHash.inputs[4] <== nodeSecret;
 
     // ── 2. Verify Merkle membership ───────────────────────────────
-    component indexBits = Num2Bits(MERKLE_DEPTH);
-    indexBits.in <== merkleIndex;
-
-    signal merkleHash[MERKLE_DEPTH + 1];
-    merkleHash[0] <== commitHash.out;
-
-    component merkleHashers[MERKLE_DEPTH];
-    component merkleMux[MERKLE_DEPTH];
-
+    component merkleCheck = MerkleVerify(MERKLE_DEPTH);
+    merkleCheck.leaf <== commitHash.out;
+    merkleCheck.index <== merkleIndex;
+    merkleCheck.root <== registryRoot;
     for (var i = 0; i < MERKLE_DEPTH; i++) {
-        merkleMux[i] = Mux1();
-        merkleMux[i].c[0] <== merkleHash[i];
-        merkleMux[i].c[1] <== merkleProof[i];
-        merkleMux[i].s <== indexBits.out[i];
-
-        merkleHashers[i] = Poseidon(2);
-        merkleHashers[i].inputs[0] <== merkleMux[i].out;
-        merkleHashers[i].inputs[1] <== merkleHash[i] + merkleProof[i] - merkleMux[i].out;
-
-        merkleHash[i + 1] <== merkleHashers[i].out;
+        merkleCheck.siblings[i] <== merkleProof[i];
     }
-
-    merkleHash[MERKLE_DEPTH] === registryRoot;
 
     // ── 3. Verify stake >= minStake ───────────────────────────────
     component stakeCheck = GreaterEqThan(80);

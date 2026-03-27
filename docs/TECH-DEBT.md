@@ -32,12 +32,8 @@ Every RPC call (node reads, gas price, session open/settle) constructs a new all
 
 **When to fix:** Phase 4 stress testing, or if RPC latency becomes noticeable.
 
-### Sequential node fetches in get_active_nodes
-`client/src-tauri/src/chain.rs` calls `getNode()` sequentially for each active node ID. For N nodes, this is N serial RPC round trips.
-
-**Why deferred:** Registry has <10 nodes currently. Serial fetches take <1s.
-
-**When to fix:** When registry grows past ~50 nodes. Use `futures::future::join_all` to parallelize.
+### ~~Sequential node fetches in get_active_nodes~~ — RESOLVED
+Resolved: `get_active_nodes()` now uses `futures::future::join_all()` to fetch all node details in parallel. Added `futures = "0.3"` to client crate.
 
 ### std::sync::Mutex vs tokio::sync::Mutex
 `client/src-tauri/src/lib.rs` uses `std::sync::Mutex` for `AppState` fields in async Tauri commands. This is a blocking lock in an async context.
@@ -317,12 +313,8 @@ Resolved: Added `EIP712Utils.computeDomainSeparator(address)` to the shared libr
 ### ~~HKDF-SHA256 helper duplicated across 3 crypto files~~ — RESOLVED
 Resolved: Extracted `hkdf_sha256::<N>(salt, ikm, info)` to `node/src/crypto/kdf.rs` with const-generic output size. All three callers (`ratchet.rs`, `noise.rs`, `hybrid.rs`) updated.
 
-### No shared control message type registry
-Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN, `0x03` RECEIPT_SIGN). Ratchet uses a 4-byte ASCII magic (`RATC`). These are independent ad-hoc schemes with no shared enum or framing layer. If messages ever share a transport, collisions are possible.
-
-**Why deferred:** Messages currently travel on different channels (Sphinx payload vs raw relay socket). No functional conflict.
-
-**When to fix:** When adding more control message types (cover traffic flags, batching negotiation). Define a `ControlMessageType` enum or a canonical framing header used by all control messages.
+### ~~No shared control message type registry~~ — RESOLVED
+Resolved: Added `node/src/network/control_msg.rs` with `RelayControlType` enum (SessionSetup/Teardown/ReceiptSign), `SphinxControlMagic` enum (RatchetStep/LinkPadding), shared ACK constants, and payload length constants. `relay_listener.rs` uses `RelayControlType::from_byte()`. `ratchet.rs` and `link_padding.rs` use `SphinxControlMagic` for magic bytes. Includes a collision-detection test.
 
 ---
 
@@ -356,12 +348,8 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 **When to fix:** When integrating link padding into the live relay pipeline. Add `add_peer`/`remove_peer` calls in relay session setup/teardown.
 
-### AtomicBool stop flag instead of CancellationToken in link_padding_loop
-`link_padding_loop` uses `AtomicBool` with `Relaxed` ordering for the stop signal. The node crate doesn't depend on `tokio-util` (which provides `CancellationToken`). The `AtomicBool` pattern requires the loop to finish its current sleep before observing the stop, whereas `CancellationToken` with `tokio::select!` wakes immediately.
-
-**Why deferred:** Adding `tokio-util` to the node crate just for `CancellationToken` is a dependency overhead. The `AtomicBool` pattern works correctly — worst case is one extra 100ms iteration before stop.
-
-**When to fix:** If `tokio-util` is added to the node crate for other reasons. Or replace with a `tokio::sync::Notify` which is already available via tokio.
+### ~~AtomicBool stop flag instead of CancellationToken in link_padding_loop~~ — RESOLVED
+Resolved: Replaced `Arc<AtomicBool>` with `Arc<tokio::sync::Notify>`. The loop now uses `tokio::select!` to wake immediately on stop notification instead of polling after each sleep interval.
 
 ---
 
@@ -409,12 +397,8 @@ CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth r
 
 ## ZK Circuits — Shared Templates
 
-### Merkle proof template duplicated across circuits
-The Merkle proof verification pattern (Num2Bits index decomposition → Mux1 selector → Poseidon(2) hasher → XOR trick for sibling) is duplicated byte-for-byte in `circuits/bandwidth_receipt/circuit.circom` and `circuits/node_eligibility/circuit.circom`. Any change to the traversal logic must be made in both places.
-
-**Why deferred:** Only two circuits use it. Extracting to a shared `lib/merkle.circom` template requires restructuring the circuit include paths and testing both consumers against the shared code.
-
-**When to fix:** When adding a third circuit that needs Merkle verification, or during audit prep. Create `circuits/lib/merkle.circom` with a `MerkleVerify(DEPTH)` template and include from both circuits.
+### ~~Merkle proof template duplicated across circuits~~ — RESOLVED
+Resolved: Extracted `MerkleVerify(DEPTH)` template to `circuits/lib/merkle.circom`. Both `node_eligibility/circuit.circom` and `bandwidth_receipt/circuit.circom` now include and use the shared template instead of inline Merkle traversal loops.
 
 ---
 

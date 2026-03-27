@@ -133,56 +133,53 @@ impl ChainReader {
             return Ok(Vec::new());
         }
 
-        let mut nodes = Vec::with_capacity(node_ids.len());
-
         // Current timestamp for uptime calculation.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        for id in &node_ids {
-            match registry.getNode(*id).call().await {
-                Ok(node_info) => {
-                    let info = node_info;
-
-                    // Convert stake from wei to ETH (1 ETH = 1e18 wei).
-                    let stake_eth = wei_to_eth(info.stake);
-
-                    // Derive an uptime score from heartbeat freshness.
-                    // If the heartbeat is less than 5 minutes old  -> 1.0
-                    // If the heartbeat is more than 1 hour old     -> 0.0
-                    // Linear interpolation in between.
-                    let last_hb: u64 = info
-                        .lastHeartbeat
-                        .try_into()
-                        .unwrap_or(0);
-                    let uptime = heartbeat_to_uptime(last_hb, now);
-
-                    // slash count (u256 -> u32, clamped)
-                    let slash_count: u32 = info
-                        .slashCount
-                        .try_into()
-                        .unwrap_or(u32::MAX);
-
-                    // price per byte as f64 (wei)
-                    let price_per_byte: f64 = u128_from_u256(info.pricePerByte) as f64;
-
-                    nodes.push(OnChainNodeInfo {
-                        node_id: format!("0x{}", hex::encode(id.as_slice())),
-                        public_key: format!("0x{}", hex::encode(info.publicKey.as_slice())),
-                        endpoint: info.endpoint,
-                        stake: stake_eth,
-                        uptime,
-                        price_per_byte,
-                        slash_count,
-                    });
+        // Fetch all node details in parallel.
+        let futures: Vec<_> = node_ids
+            .iter()
+            .map(|id| {
+                let reg = &registry;
+                let id = *id;
+                async move {
+                    match reg.getNode(id).call().await {
+                        Ok(info) => Some((id, info)),
+                        Err(e) => {
+                            warn!(node_id = %format!("0x{}", hex::encode(id.as_slice())), error = %e, "failed to fetch node info, skipping");
+                            None
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(node_id = %format!("0x{}", hex::encode(id.as_slice())), error = %e, "failed to fetch node info, skipping");
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        let nodes: Vec<OnChainNodeInfo> = results
+            .into_iter()
+            .flatten()
+            .map(|(id, info)| {
+                let stake_eth = wei_to_eth(info.stake);
+                let last_hb: u64 = info.lastHeartbeat.try_into().unwrap_or(0);
+                let uptime = heartbeat_to_uptime(last_hb, now);
+                let slash_count: u32 = info.slashCount.try_into().unwrap_or(u32::MAX);
+                let price_per_byte: f64 = u128_from_u256(info.pricePerByte) as f64;
+
+                OnChainNodeInfo {
+                    node_id: format!("0x{}", hex::encode(id.as_slice())),
+                    public_key: format!("0x{}", hex::encode(info.publicKey.as_slice())),
+                    endpoint: info.endpoint,
+                    stake: stake_eth,
+                    uptime,
+                    price_per_byte,
+                    slash_count,
                 }
-            }
-        }
+            })
+            .collect();
 
         info!(count = nodes.len(), "fetched full node info from registry");
         Ok(nodes)

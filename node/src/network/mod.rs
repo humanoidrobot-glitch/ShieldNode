@@ -2,6 +2,7 @@ pub mod attestation;
 pub mod batch_reorder;
 pub mod chain;
 pub mod challenge;
+pub mod control_msg;
 pub mod discovery;
 pub mod eip712;
 pub mod heartbeat;

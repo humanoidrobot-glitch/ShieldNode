@@ -4,6 +4,7 @@ include "circomlib/circuits/poseidon.circom";
 include "circomlib/circuits/comparators.circom";
 include "circomlib/circuits/mux1.circom";
 include "circomlib/circuits/bitify.circom";
+include "../lib/merkle.circom";
 
 // ECDSA verification over secp256k1.
 // Requires: https://github.com/0xPARC/circom-ecdsa
@@ -202,31 +203,13 @@ template BandwidthReceipt(MERKLE_DEPTH) {
         leafHash.inputs[4 + i] <== nodePubkey[1][i];
     }
 
-    // Walk the Merkle tree from leaf to root.
-    component indexBits = Num2Bits(MERKLE_DEPTH);
-    indexBits.in <== nodeMerkleIndex;
-
-    signal merkleHash[MERKLE_DEPTH + 1];
-    merkleHash[0] <== leafHash.out;
-
-    component merkleHashers[MERKLE_DEPTH];
-    component merkleMux[MERKLE_DEPTH];
-
+    component merkleCheck = MerkleVerify(MERKLE_DEPTH);
+    merkleCheck.leaf <== leafHash.out;
+    merkleCheck.index <== nodeMerkleIndex;
+    merkleCheck.root <== registryRoot;
     for (var i = 0; i < MERKLE_DEPTH; i++) {
-        merkleMux[i] = Mux1();
-        merkleMux[i].c[0] <== merkleHash[i];
-        merkleMux[i].c[1] <== nodeMerkleProof[i];
-        merkleMux[i].s <== indexBits.out[i];
-
-        merkleHashers[i] = Poseidon(2);
-        merkleHashers[i].inputs[0] <== merkleMux[i].out;
-        // XOR trick: A + B - selected = the other value
-        merkleHashers[i].inputs[1] <== merkleHash[i] + nodeMerkleProof[i] - merkleMux[i].out;
-
-        merkleHash[i + 1] <== merkleHashers[i].out;
+        merkleCheck.siblings[i] <== nodeMerkleProof[i];
     }
-
-    merkleHash[MERKLE_DEPTH] === registryRoot;
 
     // ── 5. Compute payment ────────────────────────────────────────
     signal rawPayment;
