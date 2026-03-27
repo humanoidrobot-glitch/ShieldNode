@@ -15,19 +15,21 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::Rng;
 use tokio::net::UdpSocket;
+use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::tunnel::packet_norm::NORMALIZED_SIZE;
 
+use super::control_msg::SphinxControlMagic;
+
 /// Padding packet magic (first 4 bytes). Receiving nodes recognize and
 /// silently discard padding without processing as relay traffic.
-pub const PADDING_MAGIC: [u8; 4] = [0x50, 0x41, 0x44, 0x44]; // "PADD"
+pub const PADDING_MAGIC: [u8; 4] = SphinxControlMagic::PADDING_BYTES;
 
 /// Per-peer link state.
 struct PeerLink {
@@ -175,9 +177,10 @@ pub fn is_padding_packet(data: &[u8]) -> bool {
 
 /// Run the link padding loop for all registered peers.
 ///
-/// Set `stop` to true to terminate the loop gracefully.
+/// Notify `stop` to terminate the loop gracefully (wakes immediately
+/// instead of waiting for the next sleep interval to expire).
 pub async fn link_padding_loop(
-    stop: Arc<AtomicBool>,
+    stop: Arc<Notify>,
     socket: Arc<UdpSocket>,
     manager: Arc<tokio::sync::Mutex<LinkPaddingManager>>,
 ) {
@@ -186,17 +189,18 @@ pub async fn link_padding_loop(
     info!("link padding loop started");
 
     loop {
-        if stop.load(Ordering::Relaxed) {
-            let mgr = manager.lock().await;
-            info!(
-                total_padding = mgr.total_padding_sent(),
-                peers = mgr.peer_count(),
-                "link padding loop stopped"
-            );
-            return;
+        tokio::select! {
+            _ = stop.notified() => {
+                let mgr = manager.lock().await;
+                info!(
+                    total_padding = mgr.total_padding_sent(),
+                    peers = mgr.peer_count(),
+                    "link padding loop stopped"
+                );
+                return;
+            }
+            _ = tokio::time::sleep(interval) => {}
         }
-
-        tokio::time::sleep(interval).await;
 
         let padding_needed = {
             let mut mgr = manager.lock().await;

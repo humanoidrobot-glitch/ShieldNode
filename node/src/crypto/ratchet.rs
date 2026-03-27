@@ -13,11 +13,10 @@
 
 use std::time::{Duration, Instant};
 
-use hkdf::Hkdf;
-use sha2::Sha256;
 use zeroize::Zeroize;
 
 use super::aead;
+use super::kdf::hkdf_sha256;
 
 /// Rekey interval: 30 seconds.
 const REKEY_INTERVAL: Duration = Duration::from_secs(30);
@@ -188,11 +187,7 @@ impl Drop for Ratchet {
 /// Follows Signal's symmetric ratchet pattern: both outputs from one HKDF,
 /// differentiated by position (first 32 = chain, second 32 = encryption).
 fn derive_keys(ikm: &[u8; 32], _epoch: u64) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
-
-    let mut okm = [0u8; 64];
-    hk.expand(RATCHET_INFO, &mut okm)
-        .expect("64 bytes is valid HKDF-SHA256 output");
+    let mut okm = hkdf_sha256::<64>(None, ikm, RATCHET_INFO);
 
     let mut chain_key = [0u8; 32];
     let mut enc_key = [0u8; 32];
@@ -206,8 +201,10 @@ fn derive_keys(ikm: &[u8; 32], _epoch: u64) -> ([u8; 32], [u8; 32]) {
 
 // ── ratchet step control message ──────────────────────────────────────
 
-/// Magic bytes identifying a ratchet-step control message in the Sphinx layer.
-pub const RATCHET_STEP_MAGIC: [u8; 4] = [0x52, 0x41, 0x54, 0x43]; // "RATC"
+use crate::network::control_msg::SphinxControlMagic;
+
+/// Re-export for backward compatibility.
+pub const RATCHET_STEP_MAGIC: [u8; 4] = SphinxControlMagic::RATCHET_BYTES;
 
 /// Build a ratchet-step control message announcing a new epoch.
 ///
@@ -215,7 +212,7 @@ pub const RATCHET_STEP_MAGIC: [u8; 4] = [0x52, 0x41, 0x54, 0x43]; // "RATC"
 /// The receiving side advances its ratchet to the announced epoch.
 pub fn build_ratchet_step_message(new_epoch: u64) -> Vec<u8> {
     let mut msg = Vec::with_capacity(12);
-    msg.extend_from_slice(&RATCHET_STEP_MAGIC);
+    msg.extend_from_slice(&SphinxControlMagic::RatchetStep.as_bytes());
     msg.extend_from_slice(&new_epoch.to_be_bytes());
     msg
 }
@@ -226,7 +223,7 @@ pub fn parse_ratchet_step_message(data: &[u8]) -> Option<u64> {
     if data.len() < 12 {
         return None;
     }
-    if data[..4] != RATCHET_STEP_MAGIC {
+    if SphinxControlMagic::from_bytes(&data[..4]) != Some(SphinxControlMagic::RatchetStep) {
         return None;
     }
     let epoch = u64::from_be_bytes(data[4..12].try_into().ok()?);

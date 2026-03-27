@@ -86,9 +86,12 @@ pub struct OnChainNodeInfo {
 // ---------------------------------------------------------------------------
 
 /// Read-only interface to on-chain ShieldNode contracts.
+///
+/// Caches the parsed URL and HTTP provider to avoid reconstructing them
+/// on every RPC call.
 #[derive(Clone)]
 pub struct ChainReader {
-    rpc_url: String,
+    rpc_url: url::Url,
     registry_address: Address,
     settlement_address: Address,
 }
@@ -99,11 +102,17 @@ impl ChainReader {
         registry_address: Address,
         settlement_address: Address,
     ) -> Self {
+        let url: url::Url = rpc_url.parse().expect("invalid RPC URL in ChainReader::new");
         Self {
-            rpc_url,
+            rpc_url: url,
             registry_address,
             settlement_address,
         }
+    }
+
+    /// Build a read-only provider from the cached URL.
+    fn provider(&self) -> impl Provider {
+        ProviderBuilder::new().connect_http(self.rpc_url.clone())
     }
 
     /// Fetch all active nodes from the NodeRegistry contract.
@@ -111,12 +120,7 @@ impl ChainReader {
     /// Calls `getActiveNodes(0, 100)` to obtain the list of active node IDs,
     /// then calls `getNode(id)` for each one to retrieve full metadata.
     pub async fn get_active_nodes(&self) -> Result<Vec<OnChainNodeInfo>, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
 
         let registry =
             INodeRegistry::new(self.registry_address, &provider);
@@ -133,56 +137,53 @@ impl ChainReader {
             return Ok(Vec::new());
         }
 
-        let mut nodes = Vec::with_capacity(node_ids.len());
-
         // Current timestamp for uptime calculation.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        for id in &node_ids {
-            match registry.getNode(*id).call().await {
-                Ok(node_info) => {
-                    let info = node_info;
-
-                    // Convert stake from wei to ETH (1 ETH = 1e18 wei).
-                    let stake_eth = wei_to_eth(info.stake);
-
-                    // Derive an uptime score from heartbeat freshness.
-                    // If the heartbeat is less than 5 minutes old  -> 1.0
-                    // If the heartbeat is more than 1 hour old     -> 0.0
-                    // Linear interpolation in between.
-                    let last_hb: u64 = info
-                        .lastHeartbeat
-                        .try_into()
-                        .unwrap_or(0);
-                    let uptime = heartbeat_to_uptime(last_hb, now);
-
-                    // slash count (u256 -> u32, clamped)
-                    let slash_count: u32 = info
-                        .slashCount
-                        .try_into()
-                        .unwrap_or(u32::MAX);
-
-                    // price per byte as f64 (wei)
-                    let price_per_byte: f64 = u128_from_u256(info.pricePerByte) as f64;
-
-                    nodes.push(OnChainNodeInfo {
-                        node_id: format!("0x{}", hex::encode(id.as_slice())),
-                        public_key: format!("0x{}", hex::encode(info.publicKey.as_slice())),
-                        endpoint: info.endpoint,
-                        stake: stake_eth,
-                        uptime,
-                        price_per_byte,
-                        slash_count,
-                    });
+        // Fetch all node details in parallel.
+        let futures: Vec<_> = node_ids
+            .iter()
+            .map(|id| {
+                let reg = &registry;
+                let id = *id;
+                async move {
+                    match reg.getNode(id).call().await {
+                        Ok(info) => Some((id, info)),
+                        Err(e) => {
+                            warn!(node_id = %format!("0x{}", hex::encode(id.as_slice())), error = %e, "failed to fetch node info, skipping");
+                            None
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(node_id = %format!("0x{}", hex::encode(id.as_slice())), error = %e, "failed to fetch node info, skipping");
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        let nodes: Vec<OnChainNodeInfo> = results
+            .into_iter()
+            .flatten()
+            .map(|(id, info)| {
+                let stake_eth = wei_to_eth(info.stake);
+                let last_hb: u64 = info.lastHeartbeat.try_into().unwrap_or(0);
+                let uptime = heartbeat_to_uptime(last_hb, now);
+                let slash_count: u32 = info.slashCount.try_into().unwrap_or(u32::MAX);
+                let price_per_byte: f64 = u128_from_u256(info.pricePerByte) as f64;
+
+                OnChainNodeInfo {
+                    node_id: format!("0x{}", hex::encode(id.as_slice())),
+                    public_key: format!("0x{}", hex::encode(info.publicKey.as_slice())),
+                    endpoint: info.endpoint,
+                    stake: stake_eth,
+                    uptime,
+                    price_per_byte,
+                    slash_count,
                 }
-            }
-        }
+            })
+            .collect();
 
         info!(count = nodes.len(), "fetched full node info from registry");
         Ok(nodes)
@@ -190,12 +191,7 @@ impl ChainReader {
 
     /// Fetch the current gas price from the RPC provider and return it in Gwei.
     pub async fn get_gas_price(&self) -> Result<f64, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
 
         let gas_price_wei = provider
             .get_gas_price()
@@ -217,12 +213,7 @@ impl ChainReader {
     ///
     /// Returns a map of node_id hex string → completion rate (0.0–1.0).
     pub async fn get_completion_rates(&self) -> Result<std::collections::HashMap<String, f64>, String> {
-        let url: url::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| format!("invalid RPC URL: {e}"))?;
-
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = self.provider();
         let settlement = ISessionSettlement::new(self.settlement_address, &provider);
 
         // Get total session count.
@@ -331,17 +322,3 @@ fn heartbeat_to_uptime(last_heartbeat: u64, now: u64) -> f64 {
     }
 }
 
-/// Tiny hex-encoding helper so we don't need the `hex` crate as a top-level
-/// dependency (alloy re-exports it, but access varies by version).
-mod hex {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            s.push(HEX_CHARS[(b >> 4) as usize] as char);
-            s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-        }
-        s
-    }
-}

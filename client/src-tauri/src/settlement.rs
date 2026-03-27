@@ -10,8 +10,9 @@ use tracing::{info, warn};
 use crate::zk_prove::{self, CircuitArtifacts, PublicInputs, ReceiptWitness};
 use crate::wallet::{self, WalletConfig};
 
-/// Settlement mode parsed from config.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Settlement mode.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SettlementMode {
     /// Always use ZK proof. Fail if artifacts unavailable.
     Zk,
@@ -21,13 +22,9 @@ pub enum SettlementMode {
     Auto,
 }
 
-impl SettlementMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "zk" => Self::Zk,
-            "plaintext" => Self::Plaintext,
-            _ => Self::Auto,
-        }
+impl Default for SettlementMode {
+    fn default() -> Self {
+        Self::Auto
     }
 }
 
@@ -109,12 +106,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_parsing() {
-        assert_eq!(SettlementMode::from_str("zk"), SettlementMode::Zk);
-        assert_eq!(SettlementMode::from_str("ZK"), SettlementMode::Zk);
-        assert_eq!(SettlementMode::from_str("plaintext"), SettlementMode::Plaintext);
-        assert_eq!(SettlementMode::from_str("auto"), SettlementMode::Auto);
-        assert_eq!(SettlementMode::from_str("unknown"), SettlementMode::Auto);
+    fn mode_serde_roundtrip() {
+        let json = serde_json::to_string(&SettlementMode::Zk).unwrap();
+        assert_eq!(json, "\"zk\"");
+        let parsed: SettlementMode = serde_json::from_str("\"plaintext\"").unwrap();
+        assert_eq!(parsed, SettlementMode::Plaintext);
+        let parsed: SettlementMode = serde_json::from_str("\"auto\"").unwrap();
+        assert_eq!(parsed, SettlementMode::Auto);
     }
 
     #[test]

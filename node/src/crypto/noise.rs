@@ -1,8 +1,7 @@
-use hkdf::Hkdf;
-use sha2::Sha256;
 use thiserror::Error;
 
 use super::aead;
+use super::kdf::hkdf_sha256;
 use super::traits::KeyExchange;
 use super::x25519_kem::{X25519Kem, X25519PublicKey, X25519SecretKey};
 
@@ -135,11 +134,7 @@ fn derive_session_key(ee: &[u8; 32], se: &[u8; 32]) -> [u8; 32] {
     ikm[..32].copy_from_slice(ee);
     ikm[32..].copy_from_slice(se);
 
-    let hk = Hkdf::<Sha256>::new(Some(b"ShieldNode-NK-v1"), &ikm);
-    let mut okm = [0u8; 32];
-    hk.expand(b"session-key", &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    okm
+    hkdf_sha256::<32>(Some(b"ShieldNode-NK-v1"), &ikm, b"session-key")
 }
 
 /// Encrypt `plaintext` with the given ChaCha20-Poly1305 key and nonce.

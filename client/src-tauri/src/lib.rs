@@ -75,6 +75,8 @@ pub struct AppState {
     pub real_packet_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
     pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
+    /// Cached node list with TTL (avoids RPC on every UI poll).
+    pub node_list_cache: Arc<Mutex<(Vec<NodeInfo>, std::time::Instant)>>,
 }
 
 impl Default for AppState {
@@ -94,6 +96,10 @@ impl Default for AppState {
             completion_rates_cache: Arc::new(Mutex::new((
                 std::collections::HashMap::new(),
                 std::time::Instant::now() - std::time::Duration::from_secs(600),
+            ))),
+            node_list_cache: Arc::new(Mutex::new((
+                Vec::new(),
+                std::time::Instant::now() - std::time::Duration::from_secs(60),
             ))),
             cover_cancel: Mutex::new(None),
             real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -274,7 +280,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     {
         let cover_level = {
             let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-            cover_traffic::CoverLevel::from_str(&cfg.cover_traffic)
+            cfg.cover_traffic
         };
         if cover_level != cover_traffic::CoverLevel::Off {
             let cancel = CancellationToken::new();
@@ -378,7 +384,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
             private_key: cfg.operator_private_key.clone(),
             settlement_address: SETTLEMENT_ADDRESS.to_string(),
         };
-        let mode = settlement::SettlementMode::from_str(&cfg.settlement_mode);
+        let mode = cfg.settlement_mode;
         (wc, cfg.chain_id, mode)
     };
 
@@ -733,22 +739,7 @@ async fn rotation_loop(
             tunnel::teardown_sessions(old).await;
         }
 
-        // 2. Fetch nodes.
-        let nodes = match chain_reader.get_active_nodes().await {
-            Ok(on_chain) if on_chain.len() >= 3 => {
-                on_chain.into_iter().map(map_on_chain_node).collect::<Vec<_>>()
-            }
-            Ok(_) => {
-                warn!("fewer than 3 nodes available, skipping rotation");
-                continue;
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to fetch nodes for rotation, skipping");
-                continue;
-            }
-        };
-
-        // 3. Build exclude list from old circuit.
+        // 2. Build exclude list from old circuit.
         let exclude_ids: Vec<&str> = old_circuit
             .as_ref()
             .map(|c| vec![
@@ -758,10 +749,16 @@ async fn rotation_loop(
             ])
             .unwrap_or_default();
 
-        let selected = match circuit::select_circuit(&nodes, &exclude_ids) {
+        // 3. Fetch nodes, select, build, register, reconnect, swap circuit.
+        let selected = match rebuild_circuit(
+            &chain_reader,
+            &exclude_ids,
+            &circuit,
+            &tunnel,
+        ).await {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "failed to select rotation circuit, skipping");
+                warn!(error = %e, "circuit rotation failed, skipping");
                 continue;
             }
         };
@@ -773,42 +770,7 @@ async fn rotation_loop(
             "selected new circuit for rotation"
         );
 
-        // 4. Build new circuit and register sessions.
-        let new_circuit = match circuit::build_circuit(&selected) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "failed to build rotation circuit, skipping");
-                continue;
-            }
-        };
-
-        if let Err(e) = tunnel::register_sessions(&new_circuit).await {
-            warn!(error = %e, "failed to register sessions on new circuit, skipping");
-            continue;
-        }
-
-        // 5. Reconnect tunnel to new entry node.
-        {
-            let Ok(mut tun) = tunnel.lock() else {
-                warn!("tunnel mutex poisoned, stopping rotation");
-                return;
-            };
-            if let Err(e) = tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key) {
-                warn!(error = %e, "failed to start tunnel to new entry, skipping rotation");
-                continue;
-            }
-        }
-
-        // 6. Swap circuit state.
-        {
-            let Ok(mut circ) = circuit.lock() else {
-                warn!("circuit mutex poisoned, stopping rotation");
-                return;
-            };
-            *circ = Some(new_circuit);
-        }
-
-        // 7. Update rotation count.
+        // 4. Update rotation count.
         count += 1;
         {
             let Ok(mut conn) = connection.lock() else {
@@ -855,12 +817,68 @@ pub(crate) fn map_on_chain_node(n: chain::OnChainNodeInfo) -> NodeInfo {
     }
 }
 
+/// Shared circuit rebuild logic: fetch nodes, select circuit, build, register
+/// sessions, reconnect tunnel, and swap circuit state.
+///
+/// Returns the selected `NodeInfo` triple so callers can update connection
+/// state as needed (e.g. rotation count).
+pub(crate) async fn rebuild_circuit(
+    chain_reader: &ChainReader,
+    exclude_ids: &[&str],
+    circuit_state: &Arc<Mutex<Option<CircuitState>>>,
+    tunnel: &Arc<Mutex<TunnelManager>>,
+) -> Result<Vec<NodeInfo>, String> {
+    let nodes = chain_reader.get_active_nodes().await
+        .map_err(|e| format!("failed to fetch nodes: {e}"))?;
+
+    if nodes.len() < 3 {
+        return Err("fewer than 3 nodes available".to_string());
+    }
+
+    let node_infos: Vec<NodeInfo> = nodes
+        .into_iter()
+        .map(map_on_chain_node)
+        .collect();
+
+    let selected = circuit::select_circuit(&node_infos, exclude_ids)?;
+    let new_circuit = circuit::build_circuit(&selected)?;
+    tunnel::register_sessions(&new_circuit).await?;
+
+    // Reconnect tunnel to new entry.
+    {
+        let mut tun = tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+        tun.start_tunnel(&selected[0].endpoint, &selected[0].public_key)?;
+    }
+
+    // Swap circuit state.
+    {
+        let mut circ = circuit_state.lock().map_err(|e| format!("lock error: {e}"))?;
+        *circ = Some(new_circuit);
+    }
+
+    Ok(selected)
+}
+
 /// Completion rate cache TTL (10 minutes).
 const COMPLETION_RATE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Node list cache TTL (30 seconds — short enough for timely updates,
+/// long enough to avoid redundant RPC on rapid UI polls).
+const NODE_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Fetch nodes from on-chain registry, falling back to mock data.
 /// Enriches nodes with completion rates (cached) and local reputation penalties.
+/// Results are cached for NODE_LIST_TTL to avoid redundant RPC calls from UI polling.
 async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
+    // Return cached node list if fresh.
+    {
+        if let Ok(cache) = state.node_list_cache.lock() {
+            if cache.1.elapsed() < NODE_LIST_TTL && !cache.0.is_empty() {
+                return cache.0.clone();
+            }
+        }
+    }
+
     // Use cached completion rates if fresh; otherwise refresh.
     let cached = {
         let cache = state.completion_rates_cache.lock().ok();
@@ -933,24 +951,18 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
         }
     }
 
+    // Cache the enriched node list.
+    if let Ok(mut cache) = state.node_list_cache.lock() {
+        *cache = (nodes.clone(), std::time::Instant::now());
+    }
+
     nodes
 }
 
 /// Decode a 0x-prefixed hex string into bytes. Returns empty vec on failure.
 fn decode_hex_bytes(hex_str: &str) -> Vec<u8> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    if stripped.len() % 2 != 0 { return Vec::new(); }
-    let mut out = Vec::with_capacity(stripped.len() / 2);
-    for chunk in stripped.as_bytes().chunks(2) {
-        if let Ok(s) = std::str::from_utf8(chunk) {
-            if let Ok(byte) = u8::from_str_radix(s, 16) {
-                out.push(byte);
-            } else {
-                return Vec::new();
-            }
-        }
-    }
-    out
+    hex::decode(stripped).unwrap_or_default()
 }
 
 // Mock helpers

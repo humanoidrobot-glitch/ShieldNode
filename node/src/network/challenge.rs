@@ -6,11 +6,13 @@
 
 use std::sync::LazyLock;
 
-use alloy::primitives::{keccak256, Address, B256, U256};
+use alloy::primitives::{keccak256, B256, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+pub use super::eip712::compute_domain_separator;
 
 /// EIP-712 typehash for challenge responses (computed once, matches ChallengeManager.sol).
 static RESPONSE_TYPEHASH: LazyLock<B256> = LazyLock::new(|| {
@@ -34,26 +36,6 @@ pub struct ChallengeResponse {
     pub node_id: [u8; 32],
     pub response_hash: [u8; 32],
     pub signature: Vec<u8>,
-}
-
-/// Compute the EIP-712 domain separator for the ChallengeManager contract.
-pub fn compute_domain_separator(chain_id: u64, verifying_contract: Address) -> B256 {
-    let domain_typehash = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
-    );
-    let name_hash = keccak256("ShieldNode");
-    let version_hash = keccak256("1");
-
-    let mut buf = Vec::with_capacity(5 * 32);
-    buf.extend_from_slice(domain_typehash.as_slice());
-    buf.extend_from_slice(name_hash.as_slice());
-    buf.extend_from_slice(version_hash.as_slice());
-    buf.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
-    let mut addr_word = [0u8; 32];
-    addr_word[12..].copy_from_slice(verifying_contract.as_slice());
-    buf.extend_from_slice(&addr_word);
-
-    keccak256(&buf)
 }
 
 /// Generate a response to a challenge.
@@ -126,7 +108,7 @@ pub async fn respond_to_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::FixedBytes;
+    use alloy::primitives::{Address, FixedBytes};
 
     #[tokio::test]
     async fn liveness_response_produces_65_byte_sig() {
@@ -150,13 +132,4 @@ mod tests {
         assert_ne!(resp.response_hash, [0; 32]);
     }
 
-    #[test]
-    fn domain_separator_is_deterministic() {
-        let addr: Address = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11"
-            .parse()
-            .unwrap();
-        let d1 = compute_domain_separator(11155111, addr);
-        let d2 = compute_domain_separator(11155111, addr);
-        assert_eq!(d1, d2);
-    }
 }

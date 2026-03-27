@@ -42,6 +42,7 @@ contract SlashingOracleTest is Test {
 
     // EIP-712 constants — read from deployed contracts in setUp().
     bytes32 internal domainSep;
+    bytes32 internal attestationDomainSep;
     bytes32 internal RECEIPT_TYPEHASH;
     bytes32 internal ATTESTATION_TYPEHASH;
 
@@ -84,6 +85,7 @@ contract SlashingOracleTest is Test {
 
         // Read EIP-712 constants from the deployed contracts.
         domainSep = oracle.DOMAIN_SEPARATOR();
+        attestationDomainSep = oracle.ATTESTATION_DOMAIN_SEPARATOR();
         RECEIPT_TYPEHASH = oracle.RECEIPT_TYPEHASH();
         ATTESTATION_TYPEHASH = oracle.ATTESTATION_TYPEHASH();
     }
@@ -118,7 +120,7 @@ contract SlashingOracleTest is Test {
             abi.encode(ATTESTATION_TYPEHASH, nodeId, ts, descHash)
         );
         bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", domainSep, structHash)
+            abi.encodePacked("\x19\x01", attestationDomainSep, structHash)
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -135,11 +137,10 @@ contract SlashingOracleTest is Test {
         bytes memory cSig2 = _signReceipt(clientPk, sessionId, bytes2_, ts2);
         bytes memory nSig2 = _signReceipt(nodePk, sessionId, bytes2_, ts2);
 
-        return abi.encode(
-            sessionId,
-            bytes1_, ts1, cSig1, nSig1,
-            bytes2_, ts2, cSig2, nSig2
-        );
+        SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(bytes1_, ts1, cSig1, nSig1);
+        SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(bytes2_, ts2, cSig2, nSig2);
+
+        return abi.encode(sessionId, r1, r2);
     }
 
     /// @dev Build a challenger attestation for ProvableLogging or SelectiveDenial.

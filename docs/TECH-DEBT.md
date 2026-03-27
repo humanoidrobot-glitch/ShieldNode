@@ -20,24 +20,15 @@ Resolved in `fe83b5e`. Both Rust (`circuit.rs`) and TypeScript (`scoring.ts`) no
 
 ## Performance
 
-### Alloy provider caching
-Every RPC call (node reads, gas price, session open/settle) constructs a new alloy HTTP provider, which involves URL parsing and HTTP client setup.
-
-**Files affected:**
-- `client/src-tauri/src/chain.rs` — `get_active_nodes()`, `get_gas_price()`
-- `client/src-tauri/src/wallet.rs` — `open_session()`, `settle_session()`, `get_gas_price()`
-- `node/src/network/chain.rs` — `register()`, `heartbeat()`, `update_endpoint()`
+### ~~Alloy provider caching~~ — RESOLVED (client)
+Resolved (client side): `ChainReader` now parses the URL once in `new()` and provides a `provider()` helper that avoids re-parsing. Three functions (`get_active_nodes`, `get_gas_price`, `get_completion_rates`) no longer duplicate URL parsing. Node-side `ChainService` already had `build_provider()` centralized.
 
 **Why deferred:** Overhead is negligible for current call frequency (once per connect, every 30s for gas). Caching requires `Arc` or `OnceCell` restructuring of `AppState`.
 
 **When to fix:** Phase 4 stress testing, or if RPC latency becomes noticeable.
 
-### Sequential node fetches in get_active_nodes
-`client/src-tauri/src/chain.rs` calls `getNode()` sequentially for each active node ID. For N nodes, this is N serial RPC round trips.
-
-**Why deferred:** Registry has <10 nodes currently. Serial fetches take <1s.
-
-**When to fix:** When registry grows past ~50 nodes. Use `futures::future::join_all` to parallelize.
+### ~~Sequential node fetches in get_active_nodes~~ — RESOLVED
+Resolved: `get_active_nodes()` now uses `futures::future::join_all()` to fetch all node details in parallel. Added `futures = "0.3"` to client crate.
 
 ### std::sync::Mutex vs tokio::sync::Mutex
 `client/src-tauri/src/lib.rs` uses `std::sync::Mutex` for `AppState` fields in async Tauri commands. This is a blocking lock in an async context.
@@ -67,33 +58,18 @@ Resolved in `fc7c978`. Now scans all logs for matching `SessionOpened` event sig
 
 **When to fix:** With the shared crate migration.
 
-### Hex parsing implementations
-Three separate hex-to-bytes32 functions exist:
-- `node/src/main.rs` `parse_hex_private_key()` — uses `hex` crate
-- `client/src-tauri/src/wallet.rs` `parse_bytes32()` — manual parsing, returns `FixedBytes`
-- `client/src-tauri/src/lib.rs` `decode_hex_32()` — manual parsing, returns `[u8; 32]`, silent failure
+### ~~Hex parsing implementations~~ — RESOLVED
+Resolved: Added `hex = "0.4"` to client crate. `wallet.rs::parse_bytes32()` and `lib.rs::decode_hex_bytes()` now use `hex::decode()` instead of hand-rolled parsing. Node crate already used `hex` crate.
 
-**Why deferred:** Each has slightly different error handling needs (strict vs lenient). Consolidation requires deciding on a single error strategy.
-
-**When to fix:** With the shared crate migration. Use the `hex` crate everywhere.
-
-### Custom hex encoding in chain.rs
-`client/src-tauri/src/chain.rs` has a hand-rolled `hex::encode` module instead of using the `hex` crate.
-
-**Why deferred:** Avoids adding another dependency to the client crate. The implementation is 12 lines and correct.
-
-**When to fix:** When `hex` crate is added as a dependency (already available transitively via alloy).
+### ~~Custom hex encoding in chain.rs~~ — RESOLVED
+Resolved: Removed the hand-rolled `mod hex` from `chain.rs`. The `hex` crate (now a direct dependency) provides `hex::encode()`.
 
 ---
 
 ## Multi-Hop Relay (Phase 2)
 
-### Relay Mutex lock per packet
-`relay_listener.rs` acquires `Arc<Mutex<RelayService>>` on every incoming relay packet. Under high packet rates this becomes a bottleneck.
-
-**Why deferred:** Acceptable throughput for Phase 2 testing with <10 nodes. Lock hold time is minimal (HashMap lookup + crypto peel).
-
-**When to fix:** Phase 4 stress testing. Replace with `RwLock` or `DashMap` for concurrent session lookups.
+### ~~Relay Mutex lock per packet~~ — RESOLVED
+Resolved: Replaced `Arc<Mutex<RelayService>>` with `Arc<RwLock<RelayService>>`. The hot-path `forward_packet()` (read-only: HashMap lookup + Sphinx peel) now uses `.read().await`, allowing concurrent packet forwarding. Only `add_session`/`remove_session` use `.write().await`.
 
 ### SphinxPacket allocates Vec on every serialize/deserialize
 `to_bytes()` and `from_bytes()` allocate new `Vec<u8>` per call. `peel_layer()` also copies the inner payload. On the relay hot path this creates allocation pressure.
@@ -154,12 +130,8 @@ Resolved in `9f792c9`. Added `get_settings` and `update_settings` Tauri commands
 ### ~~Constructor uses require strings instead of custom errors~~ — RESOLVED
 Resolved in `9b0ee46`. Constructor now uses `ZeroAddress()` custom error.
 
-### `_verifyFraudSigners` takes 10 parameters
-The function accepts 10 individual parameters due to stack-too-deep constraints. A `FraudReceipt` struct would reduce this to 3 params (nodeId, sessionId, two receipt structs) and improve readability.
-
-**Why deferred:** Requires `via_ir` regardless due to the nested decode. The struct refactor alone doesn't eliminate the need for the function split.
-
-**When to fix:** When `via_ir` can be removed (e.g., if Solidity compiler improves stack handling) or during mainnet audit prep.
+### ~~`_verifyFraudSigners` takes 10 parameters~~ — RESOLVED
+Resolved: Introduced `FraudReceipt` struct (cumBytes, ts, clientSig, nodeSig). `_verifyBandwidthFraud` decodes into two `FraudReceipt` memory structs. `_verifyFraudSigners` now takes 4 params (nodeId, sessionId, r1, r2) instead of 10.
 
 ### ~~`_recoverSigner` duplicated between SlashingOracle and SessionSettlement~~ — RESOLVED
 Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`, `receiptStructHash`, and `hashTypedData`. Both contracts import and use the shared library.
@@ -167,19 +139,11 @@ Resolved: Extracted to `contracts/src/lib/EIP712Utils.sol` with `recoverSigner`,
 ### ~~Missing test: slash proposal for non-existent node~~ — RESOLVED
 Resolved in `f3465f3`. Two tests added: proposal succeeds (attestation doesn't check registry), execution reverts at `registry.slash` with "node not found". Documented as expected behavior.
 
-### EIP712Utils.recoverSigner uses require string instead of custom error
-`EIP712Utils.recoverSigner` uses `require(sig.length == 65, "EIP712: bad sig length")`. The `SlashingOracle` previously used `revert InvalidEvidence("bad sig length")` — a custom error that is cheaper in gas and pattern-matchable by off-chain tools. The shared library chose `require` strings for simplicity since both contracts had different error conventions.
+### ~~EIP712Utils.recoverSigner uses require string instead of custom error~~ — RESOLVED
+Resolved: Replaced `require` strings with `BadSignatureLength(uint256)` and `InvalidSignature()` custom errors in `EIP712Utils`.
 
-**Why deferred:** No test catches the error type difference. Gas impact is negligible for a failure path.
-
-**When to fix:** During mainnet audit prep. Add a custom `EIP712Error` to the library if auditors flag it.
-
-### Attestation domain uses settlement address as verifyingContract
-`DOMAIN_SEPARATOR` uses the SessionSettlement address as `verifyingContract` for both receipt signatures (correct) and attestation signatures (semantically wrong — attestations are oracle-native). Wallets will show the settlement address when signing attestations, which is confusing. Low real-world impact since `SlashAttestation` has a distinct typehash.
-
-**Why deferred:** Adding a second domain separator doubles complexity. The distinct typehash prevents cross-type confusion.
-
-**When to fix:** Phase 6 when decentralising the challenge system. Attestations should use their own domain with `address(this)`.
+### ~~Attestation domain uses settlement address as verifyingContract~~ — RESOLVED
+Resolved: `SlashingOracle` now has a separate `ATTESTATION_DOMAIN_SEPARATOR` using `address(this)` as `verifyingContract`. Receipt verification still uses the `DOMAIN_SEPARATOR` from `SessionSettlement`. `_verifyChallengerAttestation` uses the attestation-specific domain.
 
 ---
 
@@ -199,12 +163,8 @@ Resolved: `update_settings` now uses `app.path().app_config_dir()` via Tauri's `
 
 **When to fix:** With the shared crate migration (see Architecture section). Highest-priority candidate alongside EIP-712 receipt logic.
 
-### Dual backward-compat accessors on NodeKeyPair
-`node/src/crypto/keys.rs` exposes parallel accessor pairs: `public_key()` / `public_key_kem()`, `secret()` / `secret_kem()`. The raw dalek-typed accessors exist for callers that haven't migrated to trait types.
-
-**Why deferred:** `main.rs` and `noise.rs` still use the dalek types in some paths.
-
-**When to fix:** When all callers are migrated to trait-based types, remove the raw dalek accessors.
+### ~~Dual backward-compat accessors on NodeKeyPair~~ — RESOLVED
+Resolved: Removed `public_key()` and `secret()` raw dalek accessors. All callers in `main.rs` migrated to `public_key_bytes()` and `secret_kem().to_bytes()`.
 
 ### SymmetricCipher trait re-keys per call
 `ChaCha20Poly1305Cipher` creates a new cipher instance on every `encrypt`/`decrypt`. The trait is stateless by design (`fn encrypt(key, nonce, plaintext)`).
@@ -261,19 +221,11 @@ Resolved: Backend now returns gas price as `f64` in Gwei. Sub-Gwei values (e.g.,
 ### ~~Strict mode for minimum network size guard~~ — RESOLVED
 Resolved: `strict_network_size` config field + Settings UI toggle. When enabled and nodes < 20, `connect()` returns error instead of proceeding.
 
-### Node list not cached in AppState
-`fetch_nodes()` calls `get_active_nodes()` via RPC on every invocation. Both `get_nodes` (UI) and `get_network_health` issue full RPC calls. If the UI polls frequently, this is wasteful.
+### ~~Node list not cached in AppState~~ — RESOLVED
+Resolved: Added `node_list_cache` field to `AppState` with 30-second TTL. `fetch_nodes()` returns cached results on rapid successive calls (UI polling, network health checks) and only refreshes from RPC when the cache expires.
 
-**Why deferred:** Node list changes slowly (heartbeats every 6 hours). Current call frequency is low (on connect, on rotation).
-
-**When to fix:** When UI polling is added for network health display. Cache node list in `AppState` with 30-60s TTL, similar to the completion rates cache.
-
-### IPv6 subnet diversity not enforced
-`subnet_24()` in `circuit.rs` only handles IPv4 dotted-quad endpoints. IPv6 endpoints (e.g., `[2001:db8::1]:51820`) return `None` from `subnet_24()`, silently skipping subnet diversity for IPv6 nodes. Two IPv6 nodes on the same /48 would not be detected.
-
-**Why deferred:** No IPv6 nodes exist on the current testnet. The fallback is safe — `None` comparisons never match, so IPv6 nodes pass diversity unchecked rather than being incorrectly blocked.
-
-**When to fix:** When IPv6 nodes appear on the network. Add a `subnet_48()` helper for IPv6 and handle bracket notation in endpoint parsing.
+### ~~IPv6 subnet diversity not enforced~~ — RESOLVED
+Resolved: Renamed `subnet_24()` to `subnet_prefix()`. Now parses endpoints via `SocketAddr` to handle both IPv4 (/24 prefix from first 3 octets) and IPv6 (/48 prefix from first 3 segments). Bracket notation (`[::1]:port`) is supported. Added IPv6-specific tests.
 
 ### No integration test for select_circuit_with_pins with diversity
 The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No test calls `select_circuit_with_pins` with a node pool that has known subnet/ASN collisions and verifies the returned circuit respects them. The `weighted_selection_favors_high_stake` test inadvertently runs under the diversity fallback path because all mock nodes share `127.0.0.1`.
@@ -282,12 +234,8 @@ The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No te
 
 **When to fix:** Phase 5 anti-griefing test suite. Add nodes with varied endpoints to verify end-to-end diversity enforcement.
 
-### rebuild_circuit duplicated between health_monitor and rotation_loop
-`health_monitor.rs::rebuild_circuit()` and `lib.rs::rotation_loop()` perform nearly identical 7-step rebuild sequences: fetch nodes → select circuit → build circuit → register sessions → reconnect tunnel → swap state → update connection. ~50 lines of duplicated logic.
-
-**Why deferred:** Both callers have slightly different error handling and context. Extracting a shared helper requires passing 5+ `Arc<Mutex>` params.
-
-**When to fix:** When either path is extended (e.g., adding completion rate enrichment to rebuilds). Extract a `rebuild_circuit_internal()` helper callable from both.
+### ~~rebuild_circuit duplicated between health_monitor and rotation_loop~~ — RESOLVED
+Resolved: Extracted `rebuild_circuit()` as a `pub(crate)` function in `lib.rs`. Takes `ChainReader`, exclude list, circuit state, and tunnel manager. Returns selected `NodeInfo` triple so callers can update connection state as needed. Both `health_monitor_loop` and `rotation_loop` now call this shared function.
 
 ---
 
@@ -300,12 +248,8 @@ The 5 diversity tests cover `is_diverse()` and `subnet_24()` in isolation. No te
 
 **When to fix:** When TEE nodes are ready to deploy. Extend `NodeRegistry.register()` with an optional `attestationHash` parameter, or add a client-side attestation fetch via the DHT.
 
-### TEE_ENTRY_BONUS is dead code
-`TEE_ENTRY_BONUS` (10.0) is defined in `node/src/network/attestation.rs` but never referenced anywhere. The client's `score_node` applies the general TEE bonus (20.0) but does not apply position-specific preference — the same score is used for all three hop positions. Entry nodes (most sensitive — see client IP) should preferentially be TEE-attested.
-
-**Why deferred:** Position-aware scoring requires changing `select_circuit_with_pins` to pass the hop position to `score_node`, or applying a post-selection bonus/filter for the entry slot. Moderate refactor.
-
-**When to fix:** When TEE nodes exist on the network. Add a position parameter to scoring or a post-selection filter that rerolls the entry slot if a TEE candidate is available.
+### ~~TEE_ENTRY_BONUS is dead code~~ — RESOLVED
+Resolved: Removed `TEE_ENTRY_BONUS` constant from `attestation.rs`. Position-aware TEE scoring is deferred until TEE nodes exist on the network.
 
 ### Client hardcodes TEE scoring bonus
 The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. The node crate defines `TEE_SCORE_BONUS = 20.0` in `attestation.rs`. These are currently equal but can silently diverge since the client crate has no dependency on the node crate.
@@ -339,48 +283,28 @@ The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. Th
 
 **When to fix:** Add a `SlashReason.ChallengeUnresponded` to the SlashingOracle, or allow ChallengeManager to call `proposeSlash()` directly with a pre-encoded evidence blob. Consider adding a bot that watches `ChallengeExpired` events and auto-files slash proposals.
 
-### compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)
-Both `node/src/network/challenge.rs` and `node/src/network/receipts.rs` implement identical `compute_domain_separator()` functions (~18 lines each). Same ABI encoding pattern with the same domain name, version, and layout.
+### ~~compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)~~ — RESOLVED
+Resolved: Extracted to `node/src/network/eip712.rs`. Both `challenge.rs` and `receipts.rs` re-export `compute_domain_separator` from the shared module.
 
-**Why deferred:** Part of the broader shared module extraction. Both files are in the same crate so extraction is straightforward but low priority.
-
-**When to fix:** Extract to a shared `node/src/network/eip712.rs` utility module. Both callers import from there.
-
-### Solidity DOMAIN_SEPARATOR construction duplicated across 4 contracts
-`SessionSettlement`, `ZKSettlement`, `SlashingOracle`, and `ChallengeManager` all construct their EIP-712 DOMAIN_SEPARATOR with identical code (~8 lines each). Each uses a different `verifyingContract` (their own address), so the values differ, but the construction pattern is copy-pasted.
-
-**Why deferred:** Each contract genuinely needs a different DOMAIN_SEPARATOR (different `verifyingContract`). A shared `computeDomainSeparator()` in `EIP712Utils` would save ~5 lines per contract but adds a function call in the constructor. Low ROI.
-
-**When to fix:** Optional cleanup during audit prep. Add `EIP712Utils.computeDomainSeparator(string name, string version)` and have each constructor call it.
+### ~~Solidity DOMAIN_SEPARATOR construction duplicated across 4 contracts~~ — RESOLVED
+Resolved: Added `EIP712Utils.computeDomainSeparator(address)` to the shared library. `SessionSettlement`, `ZKSettlement`, and `ChallengeManager` constructors now call it. `SlashingOracle` reads from `SessionSettlement` (unchanged).
 
 ---
 
 ## Crypto — Ratcheting (Phase 5)
 
-### HKDF-SHA256 helper duplicated across 3 crypto files
-`ratchet.rs::derive_keys`, `noise.rs::derive_session_key`, and `hybrid.rs::combine_shared_secrets` all instantiate `Hkdf::<Sha256>` with the same pattern (new → expand → expect). A shared `fn hkdf_sha256(ikm, salt, info) -> [u8; 32]` would eliminate this.
+### ~~HKDF-SHA256 helper duplicated across 3 crypto files~~ — RESOLVED
+Resolved: Extracted `hkdf_sha256::<N>(salt, ikm, info)` to `node/src/crypto/kdf.rs` with const-generic output size. All three callers (`ratchet.rs`, `noise.rs`, `hybrid.rs`) updated.
 
-**Why deferred:** Each call site has slightly different parameters (salt, info, output size). Extracting a shared helper requires a flexible signature (optional salt, variable output length).
-
-**When to fix:** Extract to `node/src/crypto/kdf.rs` or add to an existing shared module. Low priority — the pattern is correct in all three sites.
-
-### No shared control message type registry
-Relay listener uses 1-byte discriminants (`0x01` SESSION_SETUP, `0x02` TEARDOWN, `0x03` RECEIPT_SIGN). Ratchet uses a 4-byte ASCII magic (`RATC`). These are independent ad-hoc schemes with no shared enum or framing layer. If messages ever share a transport, collisions are possible.
-
-**Why deferred:** Messages currently travel on different channels (Sphinx payload vs raw relay socket). No functional conflict.
-
-**When to fix:** When adding more control message types (cover traffic flags, batching negotiation). Define a `ControlMessageType` enum or a canonical framing header used by all control messages.
+### ~~No shared control message type registry~~ — RESOLVED
+Resolved: Added `node/src/network/control_msg.rs` with `RelayControlType` enum (SessionSetup/Teardown/ReceiptSign), `SphinxControlMagic` enum (RatchetStep/LinkPadding), shared ACK constants, and payload length constants. `relay_listener.rs` uses `RelayControlType::from_byte()`. `ratchet.rs` and `link_padding.rs` use `SphinxControlMagic` for magic bytes. Includes a collision-detection test.
 
 ---
 
 ## Cover Traffic (Phase 5)
 
-### cover_traffic config field is stringly-typed
-`ClientConfig.cover_traffic` and `SettingsPayload.cover_traffic` are `String` ("off"/"low"/"high"). `CoverLevel` is a proper Rust enum but conversion happens only at the point of use via `CoverLevel::from_str()`, which silently maps invalid values to `Off`. Invalid config values like typos survive serialization and disk persistence without error.
-
-**Why deferred:** Switching to `CoverLevel` as the config type requires `#[serde(rename_all = "lowercase")]` on the enum, a config migration for existing saved files, and updating the TypeScript `<select>` value handling.
-
-**When to fix:** Next config schema cleanup. Derive `Serialize`/`Deserialize` on `CoverLevel` directly and store the enum. Implement `FromStr` trait (with `Result` return) instead of the current infallible `from_str` method that shadows the trait name.
+### ~~cover_traffic config field is stringly-typed~~ — RESOLVED
+Resolved: `CoverLevel` now derives `Serialize`/`Deserialize` with `#[serde(rename_all = "lowercase")]`. `ClientConfig` and `SettingsPayload` use `CoverLevel` directly. Manual `from_str()` removed.
 
 ### COVER_MARKER (0xCC) relies on implicit payload format assumption
 Cover packets are identified by the exit node via `payload[0] == 0xCC` after peeling all Sphinx layers. This works because IPv4 headers start with `0x45` (version 4, IHL 5) so real tunnel traffic won't collide. However, the assumption is undocumented and fragile — non-IP payloads, custom protocols, or future Sphinx payload formats could start with `0xCC`.
@@ -407,23 +331,15 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 **When to fix:** When integrating link padding into the live relay pipeline. Add `add_peer`/`remove_peer` calls in relay session setup/teardown.
 
-### AtomicBool stop flag instead of CancellationToken in link_padding_loop
-`link_padding_loop` uses `AtomicBool` with `Relaxed` ordering for the stop signal. The node crate doesn't depend on `tokio-util` (which provides `CancellationToken`). The `AtomicBool` pattern requires the loop to finish its current sleep before observing the stop, whereas `CancellationToken` with `tokio::select!` wakes immediately.
-
-**Why deferred:** Adding `tokio-util` to the node crate just for `CancellationToken` is a dependency overhead. The `AtomicBool` pattern works correctly — worst case is one extra 100ms iteration before stop.
-
-**When to fix:** If `tokio-util` is added to the node crate for other reasons. Or replace with a `tokio::sync::Notify` which is already available via tokio.
+### ~~AtomicBool stop flag instead of CancellationToken in link_padding_loop~~ — RESOLVED
+Resolved: Replaced `Arc<AtomicBool>` with `Arc<tokio::sync::Notify>`. The loop now uses `tokio::select!` to wake immediately on stop notification instead of polling after each sleep interval.
 
 ---
 
 ## ZK Settlement (Phase 5)
 
-### settlement_mode is stringly-typed (same pattern as cover_traffic)
-`ClientConfig.settlement_mode` is a `String` parsed via `SettlementMode::from_str()` which silently defaults to `Auto` on invalid input. Same issue as `cover_traffic`. Both shadow `std::str::FromStr` without implementing the trait.
-
-**Why deferred:** Same fix needed for both fields — derive `Serialize`/`Deserialize` on the enums, implement `FromStr` with `Result` return. Needs config migration for existing saved files.
-
-**When to fix:** Next config schema cleanup. Do both `CoverLevel` and `SettlementMode` together.
+### ~~settlement_mode is stringly-typed (same pattern as cover_traffic)~~ — RESOLVED
+Resolved: `SettlementMode` now derives `Serialize`/`Deserialize` with `#[serde(rename_all = "lowercase")]`. `ClientConfig` and `SettingsPayload` use `SettlementMode` directly. Manual `from_str()` removed.
 
 ### ZK circuit artifact paths are hardcoded relative paths
 `default_artifacts()` in `settlement.rs` uses paths like `circuits/build/circuit.r1cs` relative to the working directory. This has the same unreliability as the old `current_dir()` config persistence bug. Should use `app_data_dir()` from Tauri or make paths configurable via `ClientConfig`.
@@ -443,12 +359,8 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 ## CommitmentTree (Phase 6)
 
-### Full-array SLOAD on every insert/remove (~600K gas per mutation)
-`_computeRoot()` copies all 512 leaves from storage to memory (`bytes32[512] memory layer = leaves`) on every call — 512 SLOADs at ~100 gas each = ~51K gas before hashing begins. Total insert cost exceeds 600K gas (vs. ~150K documented for NodeRegistry.register). `getMerkleProof()` repeats the same full copy.
-
-**Why deferred:** Gas is acceptable at 0.2 Gwei (~$0.24 per insert). The correct fix — storing internal nodes and doing O(log n) path updates — is a significant rewrite of the tree structure (1023 storage slots for a full binary tree, update logic for 9 levels on each mutation).
-
-**When to fix:** If the tree is deployed to mainnet and insert frequency makes gas cost meaningful. Switch to a stored-internal-node tree where mutations update O(log n) nodes and proofs read O(log n) slots.
+### ~~Full-array SLOAD on every insert/remove (~600K gas per mutation)~~ — RESOLVED
+Resolved: `CommitmentTree` now stores the full binary tree (1024-slot array, 1-indexed). `_updatePath()` walks from the mutated leaf to the root, updating only 9 internal nodes. `getMerkleProof()` reads siblings directly from storage — no recomputation. Gas per mutation reduced from ~600K to ~O(log n) path updates.
 
 ### keccak256 internal nodes incompatible with ZK circuit
 CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth receipt circuit uses Poseidon for its registryRoot Merkle proof. These roots will not match — the ZK circuit cannot verify membership against this tree's root. Documented in the contract with a migration note.
@@ -468,12 +380,8 @@ CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth r
 
 ## ZK Circuits — Shared Templates
 
-### Merkle proof template duplicated across circuits
-The Merkle proof verification pattern (Num2Bits index decomposition → Mux1 selector → Poseidon(2) hasher → XOR trick for sibling) is duplicated byte-for-byte in `circuits/bandwidth_receipt/circuit.circom` and `circuits/node_eligibility/circuit.circom`. Any change to the traversal logic must be made in both places.
-
-**Why deferred:** Only two circuits use it. Extracting to a shared `lib/merkle.circom` template requires restructuring the circuit include paths and testing both consumers against the shared code.
-
-**When to fix:** When adding a third circuit that needs Merkle verification, or during audit prep. Create `circuits/lib/merkle.circom` with a `MerkleVerify(DEPTH)` template and include from both circuits.
+### ~~Merkle proof template duplicated across circuits~~ — RESOLVED
+Resolved: Extracted `MerkleVerify(DEPTH)` template to `circuits/lib/merkle.circom`. Both `node_eligibility/circuit.circom` and `bandwidth_receipt/circuit.circom` now include and use the shared template instead of inline Merkle traversal loops.
 
 ---
 

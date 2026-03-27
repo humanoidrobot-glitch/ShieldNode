@@ -28,6 +28,8 @@ sha2 = "0.10"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
+hex = "0.4"
+futures = "0.3"
 
 # ZK proof generation (Groth16 over BN254)
 ark-circom = { version = "0.5" }
