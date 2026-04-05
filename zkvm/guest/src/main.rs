@@ -1,15 +1,9 @@
-//! ZK-VM guest program: proves correct relay packet forwarding AND
-//! execution trace integrity (no side-channel outputs).
+//! ZK-VM guest program: three proof modes for ShieldNode relay nodes.
 //!
-//! Two proof modes:
 //! - Mode 0 (forwarding only): proves correct decryption and routing
 //! - Mode 1 (full trace): proves forwarding + no extra outputs occurred
-//!
-//! The full trace mode commits additional metadata: total I/O bytes,
-//! commit count, and a hash binding all inputs to all outputs. The
-//! verifier checks that the commit count matches exactly what the
-//! honest relay function should produce (4 commits), proving no
-//! hidden data was leaked via the journal.
+//! - Mode 2 (no-log compliance): proves runtime state contains no
+//!   connection metadata beyond active sessions
 
 #![no_main]
 #![no_std]
@@ -23,6 +17,7 @@ use chacha20poly1305::{
 };
 use risc0_zkvm::guest::env;
 
+mod compliance;
 mod trace;
 use trace::TraceMetadata;
 
@@ -64,10 +59,15 @@ fn sha2_hash(data: &[u8]) -> [u8; 32] {
 risc0_zkvm::guest::entry!(main);
 
 fn main() {
-    // Read proof mode: 0 = forwarding only, 1 = full execution trace.
+    // Read proof mode: 0 = forwarding, 1 = execution trace, 2 = no-log compliance.
     let mode: u8 = env::read();
 
-    // Read private inputs.
+    if mode == 2 {
+        run_compliance_proof();
+        return;
+    }
+
+    // Modes 0 and 1: relay forwarding proof.
     let encrypted_payload: Vec<u8> = env::read();
     let session_key: [u8; 32] = env::read();
     let nonce_bytes: [u8; 12] = env::read();
@@ -127,4 +127,48 @@ fn main() {
     // ELF hash) produced the proof. The commit_count in TraceMetadata is
     // a defense-in-depth check, not the primary invariant. A different
     // guest binary would have a different image ID and be rejected.
+}
+
+/// Mode 2: No-log compliance proof.
+///
+/// Reads a serialized snapshot of the node's runtime state and verifies
+/// it contains no connection metadata beyond active sessions.
+fn run_compliance_proof() {
+    let node_id: [u8; 32] = env::read();
+    let timestamp: u64 = env::read();
+    let session_count: u32 = env::read();
+
+    let mut session_ids = Vec::with_capacity(session_count as usize);
+    let mut session_key_hashes = Vec::with_capacity(session_count as usize);
+    for _ in 0..session_count {
+        let id: u64 = env::read();
+        let key_hash: [u8; 32] = env::read();
+        session_ids.push(id);
+        session_key_hashes.push(key_hash);
+    }
+
+    let bw_count: u32 = env::read();
+    let mut bandwidth_session_ids = Vec::with_capacity(bw_count as usize);
+    let mut bandwidth_counts = Vec::with_capacity(bw_count as usize);
+    for _ in 0..bw_count {
+        let id: u64 = env::read();
+        let bytes_in: u64 = env::read();
+        let bytes_out: u64 = env::read();
+        bandwidth_session_ids.push(id);
+        bandwidth_counts.push((bytes_in, bytes_out));
+    }
+
+    let snapshot = compliance::ComplianceSnapshot {
+        node_id,
+        timestamp,
+        session_ids,
+        session_key_hashes,
+        bandwidth_session_ids,
+        bandwidth_counts,
+    };
+
+    let output = compliance::verify_compliance(&snapshot);
+
+    // Commit public outputs.
+    env::commit_slice(&output.to_bytes());
 }

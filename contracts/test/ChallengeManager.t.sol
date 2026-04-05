@@ -19,28 +19,26 @@ contract ChallengeManagerTest is Test {
 
     address public deployer = makeAddr("deployer");
     address public challenger = makeAddr("challenger");
+    address public anyone = makeAddr("anyone");
 
     uint256 constant NODE_KEY = 0xA101;
     address public nodeOp;
     bytes32 public nodeId = keccak256("test-node");
 
+    uint256 constant BOND = 0.01 ether;
+
     function setUp() public {
-        // Start at a reasonable timestamp (Foundry default is 1).
         vm.warp(1_700_000_000);
 
         nodeOp = vm.addr(NODE_KEY);
         vm.deal(nodeOp, 10 ether);
+        vm.deal(challenger, 10 ether);
+        vm.deal(anyone, 10 ether);
 
-        // Deploy with a temporary oracle address, then redeploy properly.
-        // SlashingOracle checks for zero addresses, so use deployer as placeholder.
         vm.startPrank(deployer);
         treasury = new Treasury();
-
-        // Deploy registry with deployer as temporary oracle.
         registry = new NodeRegistry(deployer);
         settlement = new SessionSettlement(address(registry));
-
-        // Deploy real oracle.
         oracle = new SlashingOracle(
             address(registry),
             address(treasury),
@@ -48,11 +46,9 @@ contract ChallengeManagerTest is Test {
         );
         vm.stopPrank();
 
-        // Re-deploy registry with real oracle (need fresh for the slashing auth).
         registry = new NodeRegistry(address(oracle));
         settlement = new SessionSettlement(address(registry));
 
-        // Re-deploy oracle with correct registry.
         vm.prank(deployer);
         oracle = new SlashingOracle(
             address(registry),
@@ -61,10 +57,6 @@ contract ChallengeManagerTest is Test {
         );
 
         cm = new ChallengeManager(address(registry), payable(address(oracle)));
-
-        // Authorize the challenger.
-        vm.prank(deployer);
-        oracle.setChallenger(challenger, true);
 
         // Register a node.
         vm.prank(nodeOp);
@@ -93,11 +85,11 @@ contract ChallengeManagerTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    // ── issue challenge ─────────────────────────────────────────
+    // ── issue challenge (bonded) ─────────────────────────────────
 
-    function test_issue_challenge() public {
+    function test_issue_challenge_with_bond() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
@@ -106,13 +98,51 @@ contract ChallengeManagerTest is Test {
         ChallengeManager.Challenge memory c = cm.getChallenge(id);
         assertEq(c.nodeId, nodeId);
         assertEq(c.challenger, challenger);
+        assertEq(c.bond, BOND);
         assertTrue(c.status == ChallengeManager.ChallengeStatus.Active);
         assertEq(c.deadline, block.timestamp + cm.RESPONSE_DEADLINE());
     }
 
-    function test_issue_challenge_not_challenger() public {
-        vm.prank(makeAddr("random"));
-        vm.expectRevert(ChallengeManager.NotChallenger.selector);
+    function test_issue_challenge_anyone_can_challenge() public {
+        // No trusted challenger set needed — anyone with a bond can challenge.
+        vm.prank(anyone);
+        uint256 id = cm.issueChallenge{value: BOND}(
+            nodeId,
+            ChallengeManager.ChallengeType.BandwidthVerification,
+            bytes32(0)
+        );
+        assertEq(cm.nextChallengeId(), 1);
+
+        ChallengeManager.Challenge memory c = cm.getChallenge(id);
+        assertEq(c.challenger, anyone);
+    }
+
+    function test_issue_challenge_overpay_bond() public {
+        // Overpaying the bond is allowed — full amount stored.
+        vm.prank(challenger);
+        uint256 id = cm.issueChallenge{value: 0.05 ether}(
+            nodeId,
+            ChallengeManager.ChallengeType.LivenessCheck,
+            bytes32(0)
+        );
+
+        ChallengeManager.Challenge memory c = cm.getChallenge(id);
+        assertEq(c.bond, 0.05 ether);
+    }
+
+    function test_issue_challenge_insufficient_bond() public {
+        vm.prank(challenger);
+        vm.expectRevert(ChallengeManager.InsufficientBond.selector);
+        cm.issueChallenge{value: 0.001 ether}(
+            nodeId,
+            ChallengeManager.ChallengeType.LivenessCheck,
+            bytes32(0)
+        );
+    }
+
+    function test_issue_challenge_zero_bond() public {
+        vm.prank(challenger);
+        vm.expectRevert(ChallengeManager.InsufficientBond.selector);
         cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
     }
 
@@ -122,41 +152,51 @@ contract ChallengeManagerTest is Test {
 
         vm.prank(challenger);
         vm.expectRevert(ChallengeManager.NodeNotActive.selector);
-        cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
     }
 
     function test_challenge_cooldown() public {
         vm.prank(challenger);
-        cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
 
-        // Second challenge before cooldown → revert.
         vm.prank(challenger);
         vm.expectRevert(ChallengeManager.CooldownNotElapsed.selector);
-        cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
     }
 
     function test_challenge_cooldown_elapsed() public {
         vm.prank(challenger);
-        cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
 
-        // Warp past cooldown.
         vm.warp(block.timestamp + cm.CHALLENGE_COOLDOWN() + 1);
 
-        // Second challenge should succeed.
         vm.prank(challenger);
-        cm.issueChallenge(nodeId, ChallengeManager.ChallengeType.BandwidthVerification, bytes32(0));
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.BandwidthVerification, bytes32(0));
         assertEq(cm.nextChallengeId(), 2);
     }
 
-    // ── respond to challenge ────────────────────────────────────
-
-    function test_respond_to_challenge() public {
+    function test_different_challengers_no_cooldown() public {
+        // Different challengers can challenge the same node independently.
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+
+        vm.prank(anyone);
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+
+        assertEq(cm.nextChallengeId(), 2);
+    }
+
+    // ── respond to challenge (returns bond) ──────────────────────
+
+    function test_respond_returns_bond() public {
+        vm.prank(challenger);
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
         );
+
+        uint256 challengerBalBefore = challenger.balance;
 
         bytes32 responseHash = keccak256("I am alive");
         bytes memory sig = _signResponse(NODE_KEY, id, nodeId, responseHash);
@@ -166,17 +206,20 @@ contract ChallengeManagerTest is Test {
 
         ChallengeManager.Challenge memory c = cm.getChallenge(id);
         assertTrue(c.status == ChallengeManager.ChallengeStatus.Responded);
+        assertEq(c.bond, 0); // bond cleared
+
+        // Challenger received bond back.
+        assertEq(challenger.balance, challengerBalBefore + BOND);
     }
 
     function test_respond_wrong_signer() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
         );
 
-        // Sign with wrong key.
         bytes memory sig = _signResponse(0xBAD, id, nodeId, keccak256("response"));
 
         vm.prank(nodeOp);
@@ -186,13 +229,12 @@ contract ChallengeManagerTest is Test {
 
     function test_respond_after_deadline() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
         );
 
-        // Warp past deadline.
         vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
 
         bytes32 responseHash = keccak256("too late");
@@ -203,27 +245,32 @@ contract ChallengeManagerTest is Test {
         cm.respondToChallenge(id, responseHash, sig);
     }
 
-    // ── expire challenge ────────────────────────────────────────
+    // ── expire challenge (returns bond to challenger) ────────────
 
-    function test_expire_challenge() public {
+    function test_expire_returns_bond() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
         );
 
+        uint256 challengerBalBefore = challenger.balance;
         vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
 
         cm.expireChallenge(id);
 
         ChallengeManager.Challenge memory c = cm.getChallenge(id);
         assertTrue(c.status == ChallengeManager.ChallengeStatus.Expired);
+        assertEq(c.bond, 0);
+
+        // Challenger gets bond back.
+        assertEq(challenger.balance, challengerBalBefore + BOND);
     }
 
     function test_expire_too_early() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
@@ -235,19 +282,17 @@ contract ChallengeManagerTest is Test {
 
     function test_expire_already_responded() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
         );
 
-        // Respond first.
         bytes32 responseHash = keccak256("alive");
         bytes memory sig = _signResponse(NODE_KEY, id, nodeId, responseHash);
         vm.prank(nodeOp);
         cm.respondToChallenge(id, responseHash, sig);
 
-        // Try to expire → already responded.
         vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
         vm.expectRevert(ChallengeManager.ChallengeNotActive.selector);
         cm.expireChallenge(id);
@@ -257,7 +302,7 @@ contract ChallengeManagerTest is Test {
 
     function test_isExpired() public {
         vm.prank(challenger);
-        uint256 id = cm.issueChallenge(
+        uint256 id = cm.issueChallenge{value: BOND}(
             nodeId,
             ChallengeManager.ChallengeType.LivenessCheck,
             bytes32(0)
@@ -267,5 +312,22 @@ contract ChallengeManagerTest is Test {
 
         vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
         assertTrue(cm.isExpired(id));
+    }
+
+    function test_canChallenge() public {
+        assertTrue(cm.canChallenge(nodeId, challenger));
+
+        vm.prank(challenger);
+        cm.issueChallenge{value: BOND}(nodeId, ChallengeManager.ChallengeType.LivenessCheck, bytes32(0));
+
+        // Same challenger: blocked by cooldown.
+        assertFalse(cm.canChallenge(nodeId, challenger));
+
+        // Different challenger: allowed.
+        assertTrue(cm.canChallenge(nodeId, anyone));
+
+        // After cooldown: allowed again.
+        vm.warp(block.timestamp + cm.CHALLENGE_COOLDOWN() + 1);
+        assertTrue(cm.canChallenge(nodeId, challenger));
     }
 }
