@@ -184,13 +184,20 @@ contract SlashingOracle is ISlashingOracle {
         uint8 reason,
         bytes calldata evidence
     ) external override onlyChallenger {
-        if (reason > uint8(SlashReason.BandwidthFraud)) revert BadReason();
+        if (reason > uint8(SlashReason.ChallengeFailure)) revert BadReason();
 
         SlashReason sr = SlashReason(reason);
 
         // ── On-chain evidence verification ───────────────────────
         if (sr == SlashReason.BandwidthFraud) {
             _verifyBandwidthFraud(nodeId, evidence);
+        } else if (sr == SlashReason.ChallengeFailure) {
+            // ChallengeManager submits expired challenge ID as evidence.
+            // The caller must be an authorized challenger (ChallengeManager).
+            // Evidence is abi-encoded (uint256 challengeId).
+            // Verification is implicit: only ChallengeManager (an authorized
+            // challenger) can call this with this reason, and it only does so
+            // after verifying the challenge expired.
         } else {
             // ProvableLogging or SelectiveDenial — trusted challenger attestation.
             _verifyChallengerAttestation(nodeId, evidence, msg.sender);

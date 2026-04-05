@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {INodeRegistry}    from "./interfaces/INodeRegistry.sol";
+import {ISlashingOracle}  from "./interfaces/ISlashingOracle.sol";
 import {NodeRegistry}     from "./NodeRegistry.sol";
 import {SlashingOracle}   from "./SlashingOracle.sol";
 import {EIP712Utils}      from "./lib/EIP712Utils.sol";
@@ -260,7 +261,7 @@ contract ChallengeManager {
         if (c.status != ChallengeStatus.Active) revert ChallengeNotActive();
         if (block.timestamp <= c.deadline) revert DeadlineNotPassed();
 
-        c.status = ChallengeStatus.Expired;
+        c.status = ChallengeStatus.Slashed;
 
         uint256 bondAmount = c.bond;
         c.bond = 0;
@@ -268,9 +269,12 @@ contract ChallengeManager {
         emit ChallengeExpired(challengeId, c.nodeId);
         emit BondAndRewardPaid(challengeId, c.challenger, bondAmount, 0);
 
-        // Return bond to challenger. Slash reward comes from the
-        // SlashingOracle when the challenger files a slash proposal
-        // using this expiration as evidence.
+        // Propose slash via the oracle — ChallengeManager must be registered
+        // as an authorized challenger on the SlashingOracle.
+        bytes memory evidence = abi.encode(challengeId);
+        oracle.proposeSlash(c.nodeId, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence);
+
+        // Return bond to challenger.
         (bool ok, ) = c.challenger.call{value: bondAmount}("");
         if (!ok) revert TransferFailed();
     }

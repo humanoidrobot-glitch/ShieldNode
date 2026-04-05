@@ -149,7 +149,7 @@ contract CommitmentTree {
         // Update the leaf and propagate to root.
         nodes[TREE_SIZE + slot] = commitment;
         isReal[slot] = true;
-        commitmentIndex[commitment] = slot;
+        commitmentIndex[commitment] = slot + 1; // +1 so 0 means "not found"
         realCount++;
 
         if (dummyCount > 0) {
@@ -174,7 +174,9 @@ contract CommitmentTree {
     /// @param commitment The commitment to remove.
     /// @param salt Salt for the replacement dummy.
     function removeReal(bytes32 commitment, bytes32 salt) external onlyOwner {
-        uint256 slot = commitmentIndex[commitment];
+        uint256 raw = commitmentIndex[commitment];
+        if (raw == 0) revert CommitmentNotFound();
+        uint256 slot = raw - 1;
         if (!isReal[slot] || nodes[TREE_SIZE + slot] != commitment) revert CommitmentNotFound();
 
         // Replace with a new dummy and propagate to root.

@@ -36,7 +36,7 @@ contract ChallengeManagerTest is Test {
         vm.deal(anyone, 10 ether);
 
         vm.startPrank(deployer);
-        treasury = new Treasury();
+        treasury = new Treasury(deployer);
         registry = new NodeRegistry(deployer);
         settlement = new SessionSettlement(address(registry));
         oracle = new SlashingOracle(
@@ -57,6 +57,10 @@ contract ChallengeManagerTest is Test {
         );
 
         cm = new ChallengeManager(address(registry), payable(address(oracle)));
+
+        // Register ChallengeManager as authorized challenger on the oracle.
+        vm.prank(deployer);
+        oracle.setChallenger(address(cm), true);
 
         // Register a node.
         vm.prank(nodeOp);
@@ -261,7 +265,7 @@ contract ChallengeManagerTest is Test {
         cm.expireChallenge(id);
 
         ChallengeManager.Challenge memory c = cm.getChallenge(id);
-        assertTrue(c.status == ChallengeManager.ChallengeStatus.Expired);
+        assertTrue(c.status == ChallengeManager.ChallengeStatus.Slashed);
         assertEq(c.bond, 0);
 
         // Challenger gets bond back.

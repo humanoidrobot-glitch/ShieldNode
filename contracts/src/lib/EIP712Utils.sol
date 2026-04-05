@@ -52,6 +52,10 @@ library EIP712Utils {
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
+    /// @dev Upper bound for `s` value (EIP-2 malleability protection).
+    uint256 private constant SECP256K1N_HALF =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
     /// @notice Recover the signer of an ECDSA signature.
     /// @param digest The EIP-712 digest that was signed.
     /// @param sig    The 65-byte signature (r || s || v).
@@ -68,6 +72,7 @@ library EIP712Utils {
             s_ := mload(add(sig, 64))
             v  := byte(0, mload(add(sig, 96)))
         }
+        require(uint256(s_) <= SECP256K1N_HALF, "EIP712Utils: malleable sig");
         address signer = ecrecover(digest, v, r, s_);
         if (signer == address(0)) revert InvalidSignature();
         return signer;

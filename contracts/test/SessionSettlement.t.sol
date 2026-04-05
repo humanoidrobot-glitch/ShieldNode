@@ -183,11 +183,7 @@ contract SessionSettlementTest is Test {
         uint256 cumBytes   = 500;
         uint256 ts         = block.timestamp;
 
-        // Warp past FORCE_SETTLE_TIMEOUT.
-        // startBlock stores block.number; the timeout compares block.timestamp
-        // against startBlock + FORCE_SETTLE_TIMEOUT. We need to ensure the
-        // condition passes. Since startBlock is a block number (small), warping
-        // time to a large value will always satisfy the check.
+        // Warp past FORCE_SETTLE_TIMEOUT (1 hour).
         vm.warp(block.timestamp + 2 hours);
 
         bytes32 d = _digest(sessionId, cumBytes, ts);

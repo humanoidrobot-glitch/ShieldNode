@@ -54,7 +54,7 @@ contract SlashingOracleTest is Test {
         vm.startPrank(deployer);
 
         // Deploy contracts in the same order as Deploy.s.sol.
-        treasury = new Treasury();
+        treasury = new Treasury(deployer);
 
         // Predict oracle address (deployed 2 contracts later).
         uint64 nonce = vm.getNonce(deployer);
@@ -201,11 +201,9 @@ contract SlashingOracleTest is Test {
         bytes memory cSig2 = _signReceipt(clientPk, 42, 2000, 200);
         bytes memory nSig2 = _signReceipt(wrongPk, 42, 2000, 200);
 
-        bytes memory evidence = abi.encode(
-            uint256(42),
-            uint256(1000), uint256(100), cSig1, nSig1,
-            uint256(2000), uint256(200), cSig2, nSig2
-        );
+        SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(1000, 100, cSig1, nSig1);
+        SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(2000, 200, cSig2, nSig2);
+        bytes memory evidence = abi.encode(uint256(42), r1, r2);
 
         vm.prank(challAddr);
         vm.expectRevert(abi.encodeWithSelector(
@@ -221,11 +219,9 @@ contract SlashingOracleTest is Test {
         bytes memory cSig2 = _signReceipt(otherClientPk, 42, 2000, 200);
         bytes memory nSig2 = _signReceipt(nodePk, 42, 2000, 200);
 
-        bytes memory evidence = abi.encode(
-            uint256(42),
-            uint256(1000), uint256(100), cSig1, nSig1,
-            uint256(2000), uint256(200), cSig2, nSig2
-        );
+        SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(1000, 100, cSig1, nSig1);
+        SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(2000, 200, cSig2, nSig2);
+        bytes memory evidence = abi.encode(uint256(42), r1, r2);
 
         vm.prank(challAddr);
         vm.expectRevert(abi.encodeWithSelector(

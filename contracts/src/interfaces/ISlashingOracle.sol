@@ -12,7 +12,8 @@ interface ISlashingOracle {
     enum SlashReason {
         ProvableLogging,
         SelectiveDenial,
-        BandwidthFraud
+        BandwidthFraud,
+        ChallengeFailure
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -67,9 +67,20 @@ contract SessionSettlement is ISessionSettlement {
     //  Open session
     // ──────────────────────────────────────────────────────────────
 
+    /// @notice Maximum fraction of deposit payable via force-settle (basis points).
+    uint256 public constant FORCE_SETTLE_CAP_BPS = 5000; // 50%
+
     /// @inheritdoc ISessionSettlement
     function openSession(bytes32[3] calldata nodeIds) external payable override {
         require(msg.value >= MINIMUM_DEPOSIT, "Session: deposit too low");
+
+        // All three nodes must be distinct.
+        require(
+            nodeIds[0] != nodeIds[1] &&
+            nodeIds[1] != nodeIds[2] &&
+            nodeIds[0] != nodeIds[2],
+            "Session: duplicate nodes"
+        );
 
         // All three nodes must be active.
         for (uint256 i; i < 3; ++i) {
@@ -79,15 +90,19 @@ contract SessionSettlement is ISessionSettlement {
             );
         }
 
+        // Snapshot exit node's price at session open so it cannot be manipulated.
+        INodeRegistry.NodeInfo memory exitNode = nodeRegistry.getNode(nodeIds[2]);
+
         uint256 sessionId = nextSessionId++;
 
         _sessions[sessionId] = SessionInfo({
             client:          msg.sender,
             nodeIds:         nodeIds,
             deposit:         msg.value,
-            startBlock:      block.number,
+            startTime:       block.timestamp,
             settled:         false,
-            cumulativeBytes: 0
+            cumulativeBytes: 0,
+            pricePerByte:    exitNode.pricePerByte
         });
 
         emit SessionOpened(sessionId, msg.sender, nodeIds, msg.value);
@@ -129,7 +144,7 @@ contract SessionSettlement is ISessionSettlement {
         address nodeSigner = EIP712Utils.recoverSigner(digest, nodeSig);
         require(nodeSigner == exitNode.owner, "Session: bad node sig");
 
-        _settle(sessionId, s, cumulativeBytes);
+        _settle(sessionId, s, cumulativeBytes, s.deposit);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -145,7 +160,7 @@ contract SessionSettlement is ISessionSettlement {
         require(s.client != address(0), "Session: unknown");
         require(!s.settled, "Session: already settled");
         require(
-            block.timestamp >= s.startBlock + FORCE_SETTLE_TIMEOUT,
+            block.timestamp >= s.startTime + FORCE_SETTLE_TIMEOUT,
             "Session: too early"
         );
 
@@ -185,7 +200,9 @@ contract SessionSettlement is ISessionSettlement {
         }
         require(validSigner, "Session: bad node sig");
 
-        _settle(sessionId, s, cumulativeBytes);
+        // Cap force-settle payment to prevent deposit theft by a single node.
+        uint256 cap = (s.deposit * FORCE_SETTLE_CAP_BPS) / 10000;
+        _settle(sessionId, s, cumulativeBytes, cap);
 
         emit SessionForceSettled(
             sessionId,
@@ -214,16 +231,17 @@ contract SessionSettlement is ISessionSettlement {
     // ──────────────────────────────────────────────────────────────
 
     /// @dev Settle a session: pay the three nodes, refund the client.
+    /// @param cap Maximum total payment (s.deposit for cooperative, capped for force-settle).
     function _settle(
         uint256 sessionId,
         SessionInfo storage s,
-        uint256 cumulativeBytes
+        uint256 cumulativeBytes,
+        uint256 cap
     ) internal {
-        // Use exit node's pricePerByte as the authoritative rate.
-        INodeRegistry.NodeInfo memory exitNode = nodeRegistry.getNode(s.nodeIds[2]);
-        uint256 totalPaid = cumulativeBytes * exitNode.pricePerByte;
-        if (totalPaid > s.deposit) {
-            totalPaid = s.deposit;
+        // Use the price snapshotted at session open.
+        uint256 totalPaid = cumulativeBytes * s.pricePerByte;
+        if (totalPaid > cap) {
+            totalPaid = cap;
         }
 
         // Effects
@@ -264,8 +282,7 @@ contract SessionSettlement is ISessionSettlement {
         SessionInfo storage s,
         uint256 cumulativeBytes
     ) internal view returns (uint256) {
-        INodeRegistry.NodeInfo memory exitNode = nodeRegistry.getNode(s.nodeIds[2]);
-        uint256 total = cumulativeBytes * exitNode.pricePerByte;
+        uint256 total = cumulativeBytes * s.pricePerByte;
         return total > s.deposit ? s.deposit : total;
     }
 

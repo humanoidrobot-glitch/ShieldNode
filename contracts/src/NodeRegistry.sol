@@ -136,10 +136,10 @@ contract NodeRegistry is INodeRegistry {
         uint256 amount = _nodes[nodeId].stake;
         require(amount > 0, "NodeRegistry: nothing to withdraw");
 
-        // Effects — zero out before transfer (checks-effects-interactions)
-        _nodes[nodeId].stake = 0;
+        // Effects — delete before transfer (checks-effects-interactions)
         delete _nodes[nodeId];
         delete deregisteredAt[nodeId];
+        delete banned[nodeId];
 
         // Interaction
         (bool ok, ) = msg.sender.call{value: amount}("");
@@ -183,6 +183,14 @@ contract NodeRegistry is INodeRegistry {
         uint256 newPrice
     ) external onlyNodeOwner(nodeId) {
         _nodes[nodeId].pricePerByte = newPrice;
+    }
+
+    /// @notice Add more stake to an active node without deregistering.
+    function topUpStake(bytes32 nodeId) external payable onlyNodeOwner(nodeId) {
+        require(_nodes[nodeId].isActive, "NodeRegistry: not active");
+        require(msg.value > 0, "NodeRegistry: zero top-up");
+        _nodes[nodeId].stake += msg.value;
+        emit StakeUpdated(nodeId, _nodes[nodeId].stake);
     }
 
     // ──────────────────────────────────────────────────────────────

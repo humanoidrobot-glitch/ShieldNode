@@ -26,7 +26,7 @@ contract Deploy is Script {
         address predictedOracle = vm.computeCreateAddress(deployer, baseNonce + 3);
 
         // 1. Treasury
-        Treasury treasury = new Treasury();
+        Treasury treasury = new Treasury(deployer);
         console.log("Treasury deployed at:", address(treasury));
 
         // 2. NodeRegistry (with predicted oracle address)

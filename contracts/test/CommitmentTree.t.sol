@@ -53,7 +53,7 @@ contract CommitmentTreeTest is Test {
 
         assertEq(tree.realCount(), 1);
         assertEq(tree.dummyCount(), 511);
-        assertTrue(tree.isReal(tree.commitmentIndex(commitment)));
+        assertTrue(tree.isReal(tree.commitmentIndex(commitment) - 1));
     }
 
     function test_insert_multiple_real_nodes() public {
@@ -149,12 +149,12 @@ contract CommitmentTreeTest is Test {
         bytes32 commitment = keccak256("prove-me");
         tree.insertReal(commitment);
 
-        uint256 idx = tree.commitmentIndex(commitment);
-        bytes32[9] memory proof = tree.getMerkleProof(idx);
+        uint256 slot = tree.commitmentIndex(commitment) - 1;
+        bytes32[9] memory proof = tree.getMerkleProof(slot);
 
         // Manually verify the proof.
         bytes32 current = commitment;
-        uint256 index = idx;
+        uint256 index = slot;
         for (uint256 i; i < 9; ++i) {
             if (index % 2 == 0) {
                 current = keccak256(abi.encodePacked(current, proof[i]));

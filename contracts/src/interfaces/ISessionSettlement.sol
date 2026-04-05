@@ -13,9 +13,10 @@ interface ISessionSettlement {
         address    client;
         bytes32[3] nodeIds;
         uint256    deposit;
-        uint256    startBlock;
+        uint256    startTime;
         bool       settled;
         uint256    cumulativeBytes;
+        uint256    pricePerByte;
     }
 
     // ──────────────────────────────────────────────────────────────

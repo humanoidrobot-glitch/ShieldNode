@@ -19,6 +19,9 @@ contract Treasury {
     /// @notice Contract owner (deployer).
     address public owner;
 
+    /// @notice Guardian address that can veto queued withdrawals during timelock.
+    address public guardian;
+
     /// @notice Running counter of deposit operations (for history).
     uint256 public depositCount;
 
@@ -57,6 +60,12 @@ contract Treasury {
     /// @notice Emitted when a queued withdrawal is executed.
     event WithdrawalExecuted(uint256 indexed withdrawalId, address indexed to, uint256 amount);
 
+    /// @notice Emitted when a queued withdrawal is cancelled.
+    event WithdrawalCancelled(uint256 indexed withdrawalId);
+
+    /// @notice Emitted when the guardian is updated.
+    event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
     // ──────────────────────────────────────────────────────────────
@@ -66,12 +75,19 @@ contract Treasury {
         _;
     }
 
+    modifier onlyGuardian() {
+        require(msg.sender == guardian, "Treasury: not guardian");
+        _;
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  Constructor
     // ──────────────────────────────────────────────────────────────
 
-    constructor() {
+    /// @param _guardian Address that can veto queued withdrawals.
+    constructor(address _guardian) {
         owner = msg.sender;
+        guardian = _guardian;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -132,6 +148,36 @@ contract Treasury {
 
         withdrawalCount++;
         emit WithdrawalExecuted(withdrawalId, req.to, req.amount);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Cancel (guardian or owner)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Cancel a queued withdrawal during the timelock period.
+    ///         Callable by either the owner or the guardian.
+    function cancelWithdrawal(uint256 withdrawalId) external {
+        require(
+            msg.sender == owner || msg.sender == guardian,
+            "Treasury: not owner or guardian"
+        );
+        WithdrawalRequest storage req = withdrawals[withdrawalId];
+        require(req.amount > 0, "Treasury: unknown withdrawal");
+        require(!req.executed, "Treasury: already executed");
+
+        delete withdrawals[withdrawalId];
+
+        emit WithdrawalCancelled(withdrawalId);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Admin
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Update the guardian address.
+    function setGuardian(address _guardian) external onlyOwner {
+        emit GuardianUpdated(guardian, _guardian);
+        guardian = _guardian;
     }
 
     // ──────────────────────────────────────────────────────────────
