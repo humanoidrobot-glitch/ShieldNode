@@ -1,6 +1,26 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+interface WatchlistSubscription {
+  url: string;
+  enabled: boolean;
+  label: string;
+}
+
+interface WatchlistSummary {
+  url: string;
+  name: string;
+  maintainer: string;
+  entryCount: number;
+  updatedAt: number;
+  signed: boolean;
+}
+
+interface WatchlistInfo {
+  subscriptions: WatchlistSubscription[];
+  loaded: WatchlistSummary[];
+}
+
 interface SettingsPayload {
   rpc_url: string;
   chain_id: number;
@@ -12,6 +32,7 @@ interface SettingsPayload {
   cover_traffic: string;
   settlement_mode: string;
   preferred_nodes: string[];
+  watchlist_subscriptions: WatchlistSubscription[];
 }
 
 // Local UI state with user-friendly field names.
@@ -29,6 +50,7 @@ interface SettingsState {
   pinnedExit: string;
   // Fields not editable in the UI but preserved on round-trip.
   _chainId: number;
+  _watchlistSubscriptions: WatchlistSubscription[];
 }
 
 function toLocal(p: SettingsPayload): SettingsState {
@@ -45,6 +67,7 @@ function toLocal(p: SettingsPayload): SettingsState {
     pinnedRelay: p.preferred_nodes[1] || "",
     pinnedExit: p.preferred_nodes[2] || "",
     _chainId: p.chain_id,
+    _watchlistSubscriptions: p.watchlist_subscriptions || [],
   };
 }
 
@@ -60,6 +83,7 @@ function toPayload(s: SettingsState): SettingsPayload {
     cover_traffic: s.coverTraffic,
     settlement_mode: s.settlementMode,
     preferred_nodes: [s.pinnedEntry, s.pinnedRelay, s.pinnedExit],
+    watchlist_subscriptions: s._watchlistSubscriptions,
   };
 }
 
@@ -112,6 +136,7 @@ export function Settings() {
     pinnedRelay: "",
     pinnedExit: "",
     _chainId: 11155111,
+    _watchlistSubscriptions: [],
   });
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -281,9 +306,107 @@ export function Settings() {
         ))}
       </div>
 
+      <WatchlistSection />
+
       <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
         Settings take effect on next connection.
       </p>
+    </div>
+  );
+}
+
+// ── Watchlist management section ─────────────────────────────────────
+
+function WatchlistSection() {
+  const [info, setInfo] = useState<WatchlistInfo | null>(null);
+  const [newUrl, setNewUrl] = useState("");
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(() => {
+    invoke<WatchlistInfo>("get_watchlists").then(setInfo).catch(() => {});
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const addWatchlist = async () => {
+    const url = newUrl.trim();
+    if (!url) return;
+    setError("");
+    try {
+      await invoke("add_watchlist", { url });
+      setNewUrl("");
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const removeWatchlist = async (url: string) => {
+    try {
+      await invoke("remove_watchlist", { url });
+    } catch (e) {
+      setError(String(e));
+    }
+    refresh();
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+        Community watchlists
+      </label>
+      <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
+        Opt-in lists of suspected colluding nodes. Advisory only.
+      </p>
+
+      {info && info.loaded.length > 0 && (
+        <div className="flex flex-col gap-1.5 mb-2">
+          {info.loaded.map((wl) => (
+            <div
+              key={wl.url}
+              className="flex items-center justify-between px-2 py-1.5 rounded text-xs"
+              style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)" }}
+            >
+              <div className="flex-1 min-w-0">
+                <span style={{ color: "var(--text-primary)" }}>{wl.name}</span>
+                <span className="ml-2" style={{ color: "var(--text-secondary)" }}>
+                  {wl.entryCount} node{wl.entryCount !== 1 ? "s" : ""}
+                  {wl.signed ? " · signed" : " · unverified"}
+                </span>
+              </div>
+              <button
+                onClick={() => removeWatchlist(wl.url)}
+                className="ml-2 px-1.5 text-xs rounded cursor-pointer"
+                style={{ color: "var(--accent-red, #ef4444)" }}
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          placeholder="https://example.com/watchlist.json"
+          value={newUrl}
+          onChange={(e) => setNewUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addWatchlist()}
+          className="flex-1 px-3 py-1.5 rounded text-xs font-mono"
+          style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+        />
+        <button
+          onClick={addWatchlist}
+          className="px-3 py-1.5 rounded text-xs cursor-pointer"
+          style={{ background: "var(--accent-green)", color: "white" }}
+        >
+          Add
+        </button>
+      </div>
+      {error && (
+        <p className="text-xs mt-1" style={{ color: "var(--accent-red, #ef4444)" }}>{error}</p>
+      )}
     </div>
   );
 }

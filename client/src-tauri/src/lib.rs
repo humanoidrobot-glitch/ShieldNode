@@ -13,6 +13,7 @@ mod settlement;
 mod sphinx;
 mod tunnel;
 mod wallet;
+mod watchlist;
 mod zk_prove;
 
 use std::sync::{Arc, Mutex};
@@ -77,6 +78,8 @@ pub struct AppState {
     pub completion_rates_cache: Arc<Mutex<(std::collections::HashMap<String, f64>, std::time::Instant)>>,
     /// Cached node list with TTL (avoids RPC on every UI poll).
     pub node_list_cache: Arc<Mutex<(Vec<NodeInfo>, std::time::Instant)>>,
+    /// Community watchlist manager.
+    pub watchlists: Arc<Mutex<watchlist::WatchlistManager>>,
 }
 
 impl Default for AppState {
@@ -103,6 +106,7 @@ impl Default for AppState {
             ))),
             cover_cancel: Mutex::new(None),
             real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watchlists: Arc::new(Mutex::new(watchlist::WatchlistManager::new())),
         }
     }
 }
@@ -615,6 +619,107 @@ async fn update_settings(
     Ok(())
 }
 
+// ── Watchlist commands ───────────────────────────────────────────────────
+
+/// Return summaries of all loaded watchlists plus the subscription config.
+#[tauri::command]
+async fn get_watchlists(
+    state: State<'_, AppState>,
+) -> Result<watchlist::WatchlistInfo, String> {
+    let subscriptions = {
+        let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        cfg.watchlist_subscriptions.clone()
+    };
+    let summaries = {
+        let mgr = state.watchlists.lock().map_err(|e| format!("lock error: {e}"))?;
+        mgr.summaries()
+    };
+    Ok(watchlist::WatchlistInfo {
+        subscriptions,
+        loaded: summaries,
+    })
+}
+
+/// Add a new watchlist subscription. Fetches it immediately.
+#[tauri::command]
+async fn add_watchlist(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    let sub = watchlist::WatchlistSubscription {
+        url,
+        enabled: true,
+        label: String::new(),
+    };
+
+    // Add to config and persist.
+    let subs = {
+        let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        // Avoid duplicates.
+        if cfg.watchlist_subscriptions.iter().any(|s| s.url == sub.url) {
+            return Err("watchlist already subscribed".to_string());
+        }
+        cfg.watchlist_subscriptions.push(sub);
+        let snapshot = cfg.clone();
+        let config_dir = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| format!("config dir: {e}"))?;
+        let _ = snapshot.save(&config_dir.join("shieldnode-client.json"));
+        cfg.watchlist_subscriptions.clone()
+    };
+
+    // Refresh all watchlists (no lock held across await).
+    let fetched = watchlist::fetch_all_watchlists(&subs).await;
+    {
+        let mut mgr = state.watchlists.lock().map_err(|e| format!("lock error: {e}"))?;
+        mgr.apply_fetched(fetched);
+    }
+
+    // Invalidate node list cache so next fetch applies watchlist penalties.
+    if let Ok(mut cache) = state.node_list_cache.lock() {
+        cache.1 = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    }
+
+    info!("watchlist subscription added");
+    Ok(())
+}
+
+/// Remove a watchlist subscription by URL.
+#[tauri::command]
+async fn remove_watchlist(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    {
+        let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        cfg.watchlist_subscriptions.retain(|s| s.url != url);
+        let snapshot = cfg.clone();
+        let config_dir = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| format!("config dir: {e}"))?;
+        let _ = snapshot.save(&config_dir.join("shieldnode-client.json"));
+    }
+
+    // Refresh loaded lists (no lock held across await).
+    let subs = state.config.lock().map_err(|e| format!("lock error: {e}"))?.watchlist_subscriptions.clone();
+    let fetched = watchlist::fetch_all_watchlists(&subs).await;
+    {
+        let mut mgr = state.watchlists.lock().map_err(|e| format!("lock error: {e}"))?;
+        mgr.apply_fetched(fetched);
+    }
+
+    if let Ok(mut cache) = state.node_list_cache.lock() {
+        cache.1 = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    }
+
+    info!(url = %url, "watchlist removed");
+    Ok(())
+}
+
 /// Send a raw IP packet through the 3-hop Sphinx circuit.
 ///
 /// The packet is wrapped in three Sphinx onion layers and sent to the entry
@@ -856,7 +961,7 @@ pub(crate) async fn rebuild_circuit(
         *circ = Some(new_circuit);
     }
 
-    Ok(selected)
+    Ok(selected.to_vec())
 }
 
 /// Completion rate cache TTL (10 minutes).
@@ -942,10 +1047,49 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
         }
     }
 
-    // Apply reputation penalties (separate brief lock).
-    if let Ok(rep) = state.reputation.lock() {
+    // Refresh watchlists if stale (no lock held across await).
+    {
+        let needs_refresh = state
+            .watchlists
+            .lock()
+            .map(|mgr| mgr.needs_refresh())
+            .unwrap_or(false);
+        if needs_refresh {
+            let subs = state
+                .config
+                .lock()
+                .map(|cfg| cfg.watchlist_subscriptions.clone())
+                .unwrap_or_default();
+            if !subs.is_empty() {
+                let fetched = watchlist::fetch_all_watchlists(&subs).await;
+                if let Ok(mut mgr) = state.watchlists.lock() {
+                    mgr.apply_fetched(fetched);
+                }
+            }
+        }
+    }
+
+    // Apply reputation + watchlist penalties (single lock each).
+    {
+        let penalized: std::collections::HashSet<String> = state
+            .reputation
+            .lock()
+            .map(|rep| {
+                nodes
+                    .iter()
+                    .filter(|n| rep.score_penalty(&n.node_id) > 0.0)
+                    .map(|n| n.node_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let wl_flagged = state
+            .watchlists
+            .lock()
+            .map(|mgr| mgr.flagged_node_ids())
+            .unwrap_or_default();
+
         for node in &mut nodes {
-            if rep.score_penalty(&node.node_id) > 0.0 {
+            if penalized.contains(&node.node_id) || wl_flagged.contains(&node.node_id) {
                 node.completion_rate = 0.0;
             }
         }
@@ -1065,6 +1209,9 @@ pub fn run() {
             get_network_health,
             get_settings,
             update_settings,
+            get_watchlists,
+            add_watchlist,
+            remove_watchlist,
             send_packet,
         ])
         .run(tauri::generate_context!())

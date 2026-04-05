@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::cover_traffic::CoverLevel;
 use crate::settlement::SettlementMode;
+use crate::watchlist::WatchlistSubscription;
 
 /// Client-side configuration for the ShieldNode VPN client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +42,10 @@ pub struct ClientConfig {
     /// In production this would be replaced by WalletConnect / injected wallet.
     #[serde(default)]
     pub operator_private_key: Option<String>,
+
+    /// Community watchlist subscriptions.
+    #[serde(default)]
+    pub watchlist_subscriptions: Vec<WatchlistSubscription>,
 }
 
 impl Default for ClientConfig {
@@ -57,6 +62,7 @@ impl Default for ClientConfig {
             settlement_mode: SettlementMode::Auto,
             preferred_nodes: Vec::new(),
             operator_private_key: None,
+            watchlist_subscriptions: Vec::new(),
         }
     }
 }
@@ -74,6 +80,7 @@ pub struct SettingsPayload {
     pub cover_traffic: CoverLevel,
     pub settlement_mode: SettlementMode,
     pub preferred_nodes: Vec<String>,
+    pub watchlist_subscriptions: Vec<WatchlistSubscription>,
 }
 
 impl From<&ClientConfig> for SettingsPayload {
@@ -89,6 +96,7 @@ impl From<&ClientConfig> for SettingsPayload {
             cover_traffic: cfg.cover_traffic,
             settlement_mode: cfg.settlement_mode,
             preferred_nodes: cfg.preferred_nodes.clone(),
+            watchlist_subscriptions: cfg.watchlist_subscriptions.clone(),
         }
     }
 }
@@ -106,6 +114,7 @@ impl ClientConfig {
         self.cover_traffic = s.cover_traffic;
         self.settlement_mode = s.settlement_mode;
         self.preferred_nodes = s.preferred_nodes.clone();
+        self.watchlist_subscriptions = s.watchlist_subscriptions.clone();
     }
 
     /// Load configuration from a JSON file on disk.
