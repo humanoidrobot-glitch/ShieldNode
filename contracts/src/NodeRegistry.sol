@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
+import {SlashingOracle} from "./SlashingOracle.sol";
 
 /// @title NodeRegistry
 /// @notice On-chain registry of ShieldNode VPN operators.  Handles staking,
@@ -44,6 +45,12 @@ contract NodeRegistry is INodeRegistry {
     /// @dev nodeId -> permanently banned flag
     mapping(bytes32 => bool) public banned;
 
+    /// @dev Permanent slash count — survives withdrawStake/re-registration.
+    mapping(bytes32 => uint256) public permanentSlashCount;
+
+    /// @dev Permanent ban — survives withdrawStake.
+    mapping(bytes32 => bool) public permanentBan;
+
     /// @dev Ordered list of every node ID that has been registered (including
     ///      deregistered ones; filtering is done at read time).
     bytes32[] private _allNodeIds;
@@ -85,6 +92,7 @@ contract NodeRegistry is INodeRegistry {
         string calldata endpoint
     ) external payable override {
         require(_nodes[nodeId].owner == address(0), "NodeRegistry: already registered");
+        require(!permanentBan[nodeId], "NodeRegistry: permanently banned");
         require(msg.value >= MINIMUM_STAKE, "NodeRegistry: insufficient stake");
         require(nodeId != bytes32(0), "NodeRegistry: zero nodeId");
         require(publicKey != bytes32(0), "NodeRegistry: zero publicKey");
@@ -97,7 +105,7 @@ contract NodeRegistry is INodeRegistry {
             stake:         msg.value,
             registeredAt:  block.timestamp,
             lastHeartbeat: block.timestamp,
-            slashCount:    0,
+            slashCount:    permanentSlashCount[nodeId],
             isActive:      true,
             pricePerByte:  0,
             commitment:    bytes32(0)
@@ -132,14 +140,20 @@ contract NodeRegistry is INodeRegistry {
             block.timestamp >= deregTs + UNSTAKE_COOLDOWN,
             "NodeRegistry: cooldown not passed"
         );
+        // Block withdrawal if slash proposals are pending against this node.
+        require(
+            SlashingOracle(payable(slashingOracle)).pendingSlashCount(nodeId) == 0,
+            "NodeRegistry: pending slash"
+        );
 
         uint256 amount = _nodes[nodeId].stake;
         require(amount > 0, "NodeRegistry: nothing to withdraw");
 
-        // Effects — delete before transfer (checks-effects-interactions)
+        // Effects — delete before transfer (checks-effects-interactions).
+        // permanentSlashCount and permanentBan are NOT deleted — they persist.
         delete _nodes[nodeId];
         delete deregisteredAt[nodeId];
-        delete banned[nodeId];
+        delete banned[nodeId]; // session-scoped flag; permanentBan survives
 
         // Interaction
         (bool ok, ) = msg.sender.call{value: amount}("");
@@ -259,6 +273,7 @@ contract NodeRegistry is INodeRegistry {
         // Effects
         node.stake -= actual;
         node.slashCount += 1;
+        permanentSlashCount[nodeId] = node.slashCount;
 
         emit StakeUpdated(nodeId, node.stake);
 
@@ -272,6 +287,7 @@ contract NodeRegistry is INodeRegistry {
     function ban(bytes32 nodeId) external onlyOracle {
         _nodes[nodeId].isActive = false;
         banned[nodeId] = true;
+        permanentBan[nodeId] = true;
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ interface ISessionSettlement {
     struct SessionInfo {
         address    client;
         bytes32[3] nodeIds;
+        address[3] nodeOwners;
         uint256    deposit;
         uint256    startTime;
         bool       settled;

@@ -2,15 +2,17 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
-import {NodeRegistry}   from "../src/NodeRegistry.sol";
-import {INodeRegistry}  from "../src/interfaces/INodeRegistry.sol";
+import {NodeRegistry}       from "../src/NodeRegistry.sol";
+import {INodeRegistry}      from "../src/interfaces/INodeRegistry.sol";
+import {SlashingOracle}     from "../src/SlashingOracle.sol";
+import {SessionSettlement}  from "../src/SessionSettlement.sol";
+import {Treasury}           from "../src/Treasury.sol";
 
-/// @title NodeRegistryTest
-/// @notice Foundry tests for the NodeRegistry contract.
 contract NodeRegistryTest is Test {
     NodeRegistry public registry;
+    SlashingOracle public oracle;
 
-    address public oracle   = makeAddr("oracle");
+    address public deployer  = makeAddr("deployer");
     address public operator = makeAddr("operator");
     address public rando    = makeAddr("rando");
 
@@ -19,7 +21,21 @@ contract NodeRegistryTest is Test {
     string  constant ENDPOINT   = "192.168.1.1:51820";
 
     function setUp() public {
-        registry = new NodeRegistry(oracle);
+        vm.startPrank(deployer);
+        Treasury treasury = new Treasury(deployer);
+
+        // Deploy oracle first with a dummy registry, then redeploy properly.
+        // We need the oracle address for NodeRegistry, and NodeRegistry address for oracle.
+        uint64 nonce = vm.getNonce(deployer);
+        address predictedOracle = vm.computeCreateAddress(deployer, nonce + 2);
+
+        registry = new NodeRegistry(predictedOracle);
+        SessionSettlement settlement = new SessionSettlement(address(registry));
+        oracle = new SlashingOracle(address(registry), address(treasury), address(settlement));
+        vm.stopPrank();
+
+        require(address(oracle) == predictedOracle, "oracle address prediction failed");
+
         vm.deal(operator, 10 ether);
         vm.deal(rando, 10 ether);
     }
@@ -155,9 +171,9 @@ contract NodeRegistryTest is Test {
         vm.prank(operator);
         registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
 
-        uint256 oracleBalBefore = oracle.balance;
+        uint256 oracleBalBefore = address(oracle).balance;
 
-        vm.prank(oracle);
+        vm.prank(address(oracle));
         registry.slash(NODE_ID, 0.1 ether);
 
         INodeRegistry.NodeInfo memory info = registry.getNode(NODE_ID);
@@ -165,7 +181,7 @@ contract NodeRegistryTest is Test {
         assertEq(info.slashCount, 1);
 
         // Oracle should have received the slashed funds.
-        assertEq(oracle.balance - oracleBalBefore, 0.1 ether);
+        assertEq(address(oracle).balance - oracleBalBefore, 0.1 ether);
     }
 
     function test_slash_unauthorized() public {

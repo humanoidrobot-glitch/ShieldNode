@@ -104,6 +104,13 @@ contract SlashingOracle is ISlashingOracle {
     mapping(uint256 => Proposal) public proposals;
     uint256 public nextProposalId;
 
+    /// @dev Evidence hash dedup — prevents the same evidence from creating multiple proposals.
+    mapping(bytes32 => bool) public usedEvidence;
+
+    /// @dev Count of pending (unexecuted) slash proposals per node.
+    ///      NodeRegistry can check this to block withdrawals while slashes are pending.
+    mapping(bytes32 => uint256) public pendingSlashCount;
+
     // ──────────────────────────────────────────────────────────────
     //  Events (supplementary -- interface events are inherited)
     // ──────────────────────────────────────────────────────────────
@@ -186,6 +193,11 @@ contract SlashingOracle is ISlashingOracle {
     ) external override onlyChallenger {
         if (reason > uint8(SlashReason.ChallengeFailure)) revert BadReason();
 
+        // Prevent duplicate proposals from the same evidence.
+        bytes32 evidenceHash = keccak256(abi.encode(nodeId, reason, evidence));
+        require(!usedEvidence[evidenceHash], "SlashingOracle: duplicate evidence");
+        usedEvidence[evidenceHash] = true;
+
         SlashReason sr = SlashReason(reason);
 
         // ── On-chain evidence verification ───────────────────────
@@ -213,6 +225,8 @@ contract SlashingOracle is ISlashingOracle {
             executed:   false
         });
 
+        pendingSlashCount[nodeId]++;
+
         emit SlashProposed(proposalId, nodeId, msg.sender, sr);
     }
 
@@ -224,6 +238,9 @@ contract SlashingOracle is ISlashingOracle {
         if (block.timestamp < p.createdAt + GRACE_PERIOD) revert GracePeriodActive();
 
         p.executed = true;
+        if (pendingSlashCount[p.nodeId] > 0) {
+            pendingSlashCount[p.nodeId]--;
+        }
 
         // Determine slash percentage based on the node's current slash count.
         INodeRegistry.NodeInfo memory info = registry.getNode(p.nodeId);

@@ -78,6 +78,15 @@ contract ZKSettlement {
     /// @notice Tracks which proof nullifiers have been used.
     mapping(bytes32 => bool) public nullifiers;
 
+    /// @notice Depositor address per depositId (for refunds).
+    mapping(bytes32 => address) public depositors;
+
+    /// @notice Deposit timestamp per depositId (for refund timeout).
+    mapping(bytes32 => uint256) public depositTimestamps;
+
+    /// @notice Minimum time before a deposit can be refunded.
+    uint256 public constant REFUND_TIMEOUT = 7 days;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -120,8 +129,26 @@ contract ZKSettlement {
         require(deposits[depositId] == 0, "ZKSettlement: duplicate deposit");
 
         deposits[depositId] = msg.value;
+        depositors[depositId] = msg.sender;
+        depositTimestamps[depositId] = block.timestamp;
 
         emit DepositMade(depositId, msg.sender, msg.value);
+    }
+
+    /// @notice Refund a deposit after the timeout (e.g., proof became invalid).
+    function refundDeposit(bytes32 depositId) external {
+        require(depositors[depositId] == msg.sender, "ZKSettlement: not depositor");
+        require(
+            block.timestamp >= depositTimestamps[depositId] + REFUND_TIMEOUT,
+            "ZKSettlement: too early"
+        );
+        uint256 amount = deposits[depositId];
+        require(amount > 0, "ZKSettlement: no deposit");
+
+        deposits[depositId] = 0;
+
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "ZKSettlement: refund failed");
     }
 
     // ──────────────────────────────────────────────────────────────
