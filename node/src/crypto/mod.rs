@@ -4,6 +4,7 @@ pub mod ecdsa;
 pub mod hybrid;
 pub mod kdf;
 pub mod keys;
+pub mod mldsa;
 pub mod mlkem;
 pub mod noise;
 pub mod ratchet;
