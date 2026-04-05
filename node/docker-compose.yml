@@ -1,0 +1,29 @@
+services:
+  shieldnode:
+    build: .
+    container_name: shieldnode
+    restart: unless-stopped
+    ports:
+      - "51820:51820/udp"   # WireGuard tunnel
+      - "51821:51821/udp"   # Relay (multi-hop)
+      - "4001:4001/tcp"     # libp2p discovery
+      - "127.0.0.1:9090:9090/tcp"  # Metrics / health API (localhost only)
+    volumes:
+      - node-data:/data
+      - ./config.toml:/data/config.toml:ro
+    environment:
+      - RUST_LOG=info
+    # Uncomment for exit-node mode (requires TUN device access):
+    # cap_add:
+    #   - NET_ADMIN
+    # devices:
+    #   - /dev/net/tun:/dev/net/tun
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9090/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  node-data:

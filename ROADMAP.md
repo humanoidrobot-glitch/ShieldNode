@@ -370,7 +370,7 @@ ShieldNode benefits from Ethereum's own PQ transition but does not block on it:
 - Use `pqcrypto-dilithium` or `ml-dsa` crate for ML-DSA-65 signatures. NIST FIPS 204 compliant
 - Hybrid key exchange combiner: `session_key = HKDF-SHA256(X25519_shared || ML-KEM_shared, salt=session_id, info="shieldnode-hybrid-kex")`. Both shared secrets contribute; compromise of either alone does not break the session key
 - ML-KEM-768 key sizes: public key 1,184 bytes, ciphertext 1,088 bytes. Per-hop handshake adds ~2.3 KB. For a 3-hop circuit: ~6.9 KB total overhead during construction. Negligible given this happens once per session
-- ML-DSA-65 signature size: 3,293 bytes. Too large for direct on-chain verification at reasonable gas cost, but inside a ZK circuit the signature size does not affect on-chain gas — only the proof verification cost (~200K–300K gas) matters. This is why ZK settlement is the natural home for PQ signatures
+- ML-DSA-65 signature size: 3,309 bytes. Too large for direct on-chain verification at reasonable gas cost, but inside a ZK circuit the signature size does not affect on-chain gas — only the proof verification cost (~200K–300K gas) matters. This is why ZK settlement is the natural home for PQ signatures
 - The `Signer` trait abstraction (Phase 4) must support both deterministic (ECDSA) and randomized (ML-DSA) signing. ML-DSA requires access to a CSPRNG during signing — ensure the trait interface accommodates this
 
 ---

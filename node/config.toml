@@ -1,0 +1,45 @@
+# ShieldNode Relay Configuration
+# Copy this file and fill in your operator details.
+
+# ── Network Ports ─────────────────────────────────────────────────────
+listen_port = 51820          # WireGuard tunnel (UDP)
+relay_port = 51821           # Multi-hop relay (UDP)
+libp2p_port = 4001           # Peer discovery (TCP)
+metrics_port = 9090          # Health / metrics API (HTTP)
+
+# ── Ethereum ──────────────────────────────────────────────────────────
+# Replace with your own RPC endpoint (Alchemy, Infura, or self-hosted).
+ethereum_rpc = "https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY"
+chain_id = 11155111          # Sepolia (change to 1 for mainnet)
+
+# Sepolia contract addresses (update for mainnet deployment):
+stake_address = "0xC6D9923E54547e0C7c5B456bFf16fEdF2d61df11"
+settlement_address = "0xF32a5346080d4EE505aB5758EFE3B69fC03aE959"
+
+# ── Operator Wallet ───────────────────────────────────────────────────
+# Hex-encoded 32-byte private key (with or without 0x prefix).
+# This wallet pays for heartbeats (~$0.02 each) and holds your stake.
+# KEEP THIS SECRET. Do not commit to version control.
+# operator_private_key = "0x..."
+
+# ── Node Identity ─────────────────────────────────────────────────────
+node_private_key_path = "/data/node_key.bin"
+data_dir = "/data"
+
+# ── Heartbeat ─────────────────────────────────────────────────────────
+heartbeat_interval_secs = 21600  # 6 hours
+
+# ── Pricing ───────────────────────────────────────────────────────────
+price_per_byte = 2000        # wei-equivalent per byte
+
+# ── Exit Mode (off by default — relay only) ───────────────────────────
+# Requires NET_ADMIN capability for TUN device.
+exit_mode = false
+tun_address = "10.13.37.1"
+tun_netmask = 24
+
+# ── Traffic Analysis Resistance (optional) ────────────────────────────
+link_padding_enabled = false
+link_padding_pps = 50        # packets/sec per peer link
+batch_reorder_enabled = false
+batch_window_ms = 50         # ms collection window
