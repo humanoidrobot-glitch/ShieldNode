@@ -70,6 +70,8 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     signal input exitCommitmentPub;    // Poseidon(exitAddr, exitPay)
     signal input refundCommitmentPub;  // Poseidon(clientAddr, refund)
     signal input registryRoot;         // Merkle root of registered nodes
+    signal input nullifierPub;         // Poseidon(sessionId, clientAddress) — unique per session
+    signal input depositIdPub;         // Binds proof to a specific deposit
 
     // ── Public outputs (payment amounts for on-chain verification) ────
     signal output entryPayOut;
@@ -283,6 +285,22 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     refundCommit.inputs[0] <== clientAddress;
     refundCommit.inputs[1] <== refund;
     refundCommit.out === refundCommitmentPub;
+
+    // ── 8. Nullifier binding ─────────────────────────────────────
+    // Deterministic nullifier = Poseidon(sessionId, clientAddress).
+    // Prevents proof replay: each session+client pair produces exactly
+    // one nullifier. The contract checks this against its nullifier set.
+    component nullifierHash = Poseidon(2);
+    nullifierHash.inputs[0] <== sessionId;
+    nullifierHash.inputs[1] <== clientAddress;
+    nullifierHash.out === nullifierPub;
+
+    // ── 9. Deposit ID binding ────────────────────────────────────
+    // The deposit field must match the public depositId, binding the
+    // proof to a specific on-chain deposit. The depositId is derived
+    // from the deposit amount and session parameters by the client.
+    signal input depositIdPrivate;  // private: the actual deposit ID
+    depositIdPrivate === depositIdPub;
 }
 
 // Instantiate with Merkle depth 20 (~1M node capacity).
@@ -293,5 +311,7 @@ component main {public [
     relayCommitmentPub,
     exitCommitmentPub,
     refundCommitmentPub,
-    registryRoot
+    registryRoot,
+    nullifierPub,
+    depositIdPub
 ]} = BandwidthReceipt(20);

@@ -49,6 +49,9 @@ pub struct ReceiptWitness {
     // Merkle proof for node registry
     pub node_merkle_proof: Vec<String>,
     pub node_merkle_index: String,
+
+    // Deposit ID binding (private input, constrained to match public signal)
+    pub deposit_id_private: String,
 }
 
 /// Public inputs for the proof (must match circuit's public signal order).
@@ -62,6 +65,8 @@ pub struct PublicInputs {
     pub exit_commitment: String,
     pub refund_commitment: String,
     pub registry_root: String,
+    pub nullifier: String,
+    pub deposit_id: String,
     // Circuit outputs (proven payment amounts).
     pub entry_pay: String,
     pub relay_pay: String,
