@@ -25,6 +25,9 @@ contract NodeRegistry is INodeRegistry {
     /// @notice Cooldown between deregistration and stake withdrawal.
     uint256 public constant UNSTAKE_COOLDOWN = 7 days;
 
+    /// @notice Maximum allowed price per byte (prevents overflow in settlement).
+    uint256 public constant MAX_PRICE_PER_BYTE = 1e12;
+
     // ──────────────────────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────────────────────
@@ -208,6 +211,7 @@ contract NodeRegistry is INodeRegistry {
         bytes32 nodeId,
         uint256 newPrice
     ) external onlyNodeOwner(nodeId) {
+        require(newPrice <= MAX_PRICE_PER_BYTE, "NodeRegistry: price too high");
         _nodes[nodeId].pricePerByte = newPrice;
     }
 
@@ -301,6 +305,19 @@ contract NodeRegistry is INodeRegistry {
         _nodes[nodeId].isActive = false;
         banned[nodeId] = true;
         permanentBan[nodeId] = true;
+    }
+
+    /// @notice Deactivate a node due to repeated liveness failures.
+    ///         Starts the unstake cooldown so the operator can withdraw and
+    ///         re-register. Not a permanent ban.
+    /// @param nodeId The node to deactivate.
+    function deactivateForLiveness(bytes32 nodeId) external onlyOracle {
+        address nodeOwner = _nodes[nodeId].owner;
+        require(nodeOwner != address(0), "NodeRegistry: node not found");
+        _nodes[nodeId].isActive = false;
+        deregisteredAt[nodeId] = block.timestamp;
+
+        emit NodeDeregistered(nodeId, nodeOwner);
     }
 
     // ──────────────────────────────────────────────────────────────

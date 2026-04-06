@@ -218,4 +218,26 @@ contract NodeRegistryTest is Test {
         vm.warp(block.timestamp + 18 hours + 1);
         assertFalse(registry.isNodeActive(NODE_ID));
     }
+
+    // ────────────────────── pricePerByte cap (Fix 4) ──────────────────────
+
+    function test_updatePrice_within_cap() public {
+        vm.prank(operator);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+
+        vm.prank(operator);
+        registry.updatePricePerByte(NODE_ID, 1e12);
+
+        INodeRegistry.NodeInfo memory info = registry.getNode(NODE_ID);
+        assertEq(info.pricePerByte, 1e12);
+    }
+
+    function test_updatePrice_exceeds_cap_reverts() public {
+        vm.prank(operator);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+
+        vm.prank(operator);
+        vm.expectRevert("NodeRegistry: price too high");
+        registry.updatePricePerByte(NODE_ID, 1e12 + 1);
+    }
 }

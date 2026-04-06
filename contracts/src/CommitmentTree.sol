@@ -32,6 +32,9 @@ contract CommitmentTree {
     ///         migration to a dummyless contract.
     uint256 public constant FORK_THRESHOLD = 256;
 
+    /// @notice Timelock delay for insert/remove operations.
+    uint256 public constant COMMITMENT_TIMELOCK = 48 hours;
+
     // ──────────────────────────────────────────────────────────────
     //  State
     // ──────────────────────────────────────────────────────────────
@@ -66,6 +69,17 @@ contract CommitmentTree {
     /// @notice Mapping from commitment → leaf index (0-based, for external API).
     mapping(bytes32 => uint256) public commitmentIndex;
 
+    /// @dev Timelocked commitment proposals.
+    struct CommitmentProposal {
+        bytes32 commitment;
+        bytes32 salt;      // only used for removal
+        bool    isInsert;  // true = insert, false = remove
+        uint256 readyAt;
+        bool    executed;
+    }
+    mapping(uint256 => CommitmentProposal) public commitmentProposals;
+    uint256 public nextProposalId;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -74,6 +88,8 @@ contract CommitmentTree {
     event RealNodeInserted(bytes32 indexed commitment, uint256 index);
     event RealNodeRemoved(bytes32 indexed commitment, uint256 index);
     event ForkThresholdReached(uint256 realCount);
+    event InsertProposed(uint256 indexed proposalId, bytes32 indexed commitment, uint256 readyAt);
+    event RemoveProposed(uint256 indexed proposalId, bytes32 indexed commitment, uint256 readyAt);
 
     // ──────────────────────────────────────────────────────────────
     //  Errors
@@ -147,13 +163,61 @@ contract CommitmentTree {
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Insert real node
+    //  Timelocked insert / remove
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Replace a dummy slot with a real node commitment.
-    /// @param commitment The node's Poseidon commitment (from NodeRegistry).
-    function insertReal(bytes32 commitment) external onlyOwner {
+    /// @notice Propose inserting a real node commitment (48h timelock).
+    /// @param commitment The node's Poseidon commitment.
+    /// @return proposalId The ID of the created proposal.
+    function proposeInsert(bytes32 commitment) external onlyOwner returns (uint256 proposalId) {
         if (commitment == bytes32(0)) revert ZeroCommitment();
+        proposalId = nextProposalId++;
+        uint256 readyAt = block.timestamp + COMMITMENT_TIMELOCK;
+        commitmentProposals[proposalId] = CommitmentProposal({
+            commitment: commitment,
+            salt:       bytes32(0),
+            isInsert:   true,
+            readyAt:    readyAt,
+            executed:   false
+        });
+        emit InsertProposed(proposalId, commitment, readyAt);
+    }
+
+    /// @notice Propose removing a real node commitment (48h timelock).
+    /// @param commitment The commitment to remove.
+    /// @param salt Salt for the replacement dummy.
+    /// @return proposalId The ID of the created proposal.
+    function proposeRemove(bytes32 commitment, bytes32 salt) external onlyOwner returns (uint256 proposalId) {
+        proposalId = nextProposalId++;
+        uint256 readyAt = block.timestamp + COMMITMENT_TIMELOCK;
+        commitmentProposals[proposalId] = CommitmentProposal({
+            commitment: commitment,
+            salt:       salt,
+            isInsert:   false,
+            readyAt:    readyAt,
+            executed:   false
+        });
+        emit RemoveProposed(proposalId, commitment, readyAt);
+    }
+
+    /// @notice Execute a timelocked insert or remove proposal.
+    /// @param proposalId The proposal to execute.
+    function executeProposal(uint256 proposalId) external onlyOwner {
+        CommitmentProposal storage cp = commitmentProposals[proposalId];
+        require(cp.readyAt > 0, "CommitmentTree: unknown proposal");
+        require(!cp.executed, "CommitmentTree: already executed");
+        require(block.timestamp >= cp.readyAt, "CommitmentTree: timelock active");
+        cp.executed = true;
+
+        if (cp.isInsert) {
+            _insertReal(cp.commitment);
+        } else {
+            _removeReal(cp.commitment, cp.salt);
+        }
+    }
+
+    /// @dev Replace a dummy slot with a real node commitment.
+    function _insertReal(bytes32 commitment) internal {
         if (commitmentIndex[commitment] != 0) revert DuplicateCommitment();
 
         // Find the next dummy slot.
@@ -180,14 +244,8 @@ contract CommitmentTree {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────
-    //  Remove real node (replace with dummy)
-    // ──────────────────────────────────────────────────────────────
-
-    /// @notice Replace a real node's commitment with a fresh dummy.
-    /// @param commitment The commitment to remove.
-    /// @param salt Salt for the replacement dummy.
-    function removeReal(bytes32 commitment, bytes32 salt) external onlyOwner {
+    /// @dev Replace a real node's commitment with a fresh dummy.
+    function _removeReal(bytes32 commitment, bytes32 salt) internal {
         uint256 raw = commitmentIndex[commitment];
         if (raw == 0) revert CommitmentNotFound();
         uint256 slot = raw - 1;

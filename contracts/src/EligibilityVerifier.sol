@@ -41,6 +41,9 @@ contract EligibilityVerifier {
     uint256 public constant DEFAULT_MAX_SLASHES = 1;
     uint256 public constant DEFAULT_MIN_UPTIME = 900; // 90% × 1000
 
+    /// @notice Timelock delay for registry root updates.
+    uint256 public constant ROOT_TIMELOCK = 48 hours;
+
     // ──────────────────────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────────────────────
@@ -59,12 +62,22 @@ contract EligibilityVerifier {
     /// @notice Tracks used nullifiers to prevent double-proof.
     mapping(uint256 => bool) public usedNullifiers;
 
+    /// @dev Timelocked registry root proposals.
+    struct RootProposal {
+        uint256 newRoot;
+        uint256 readyAt;
+        bool    executed;
+    }
+    mapping(uint256 => RootProposal) public rootProposals;
+    uint256 public nextProposalId;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
 
     event EligibilityProven(uint256 indexed nullifier);
     event RegistryRootUpdated(uint256 newRoot);
+    event RegistryRootProposed(uint256 indexed proposalId, uint256 newRoot, uint256 readyAt);
 
     // ──────────────────────────────────────────────────────────────
     //  Errors
@@ -92,12 +105,34 @@ contract EligibilityVerifier {
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Admin
+    //  Admin (timelocked)
     // ──────────────────────────────────────────────────────────────
 
-    function updateRegistryRoot(uint256 newRoot) external onlyOwner {
-        registryRoot = newRoot;
-        emit RegistryRootUpdated(newRoot);
+    /// @notice Propose a new registry root (48h timelock).
+    /// @param newRoot The new Merkle root.
+    /// @return proposalId The ID of the created proposal.
+    function proposeRegistryRoot(uint256 newRoot) external onlyOwner returns (uint256 proposalId) {
+        require(newRoot != 0, "EligibilityVerifier: zero root");
+        proposalId = nextProposalId++;
+        uint256 readyAt = block.timestamp + ROOT_TIMELOCK;
+        rootProposals[proposalId] = RootProposal({
+            newRoot:  newRoot,
+            readyAt:  readyAt,
+            executed: false
+        });
+        emit RegistryRootProposed(proposalId, newRoot, readyAt);
+    }
+
+    /// @notice Execute a timelocked registry root update.
+    /// @param proposalId The proposal to execute.
+    function executeRegistryRoot(uint256 proposalId) external onlyOwner {
+        RootProposal storage rp = rootProposals[proposalId];
+        require(rp.readyAt > 0, "EligibilityVerifier: unknown proposal");
+        require(!rp.executed, "EligibilityVerifier: already executed");
+        require(block.timestamp >= rp.readyAt, "EligibilityVerifier: timelock active");
+        rp.executed = true;
+        registryRoot = rp.newRoot;
+        emit RegistryRootUpdated(rp.newRoot);
     }
 
     // ──────────────────────────────────────────────────────────────

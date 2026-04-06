@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @notice Minimal interface for pull-payment withdrawal.
+interface IWithdrawable {
+    function withdraw() external;
+}
+
 /// @title Treasury
 /// @notice Receives protocol revenue (e.g. slashing proceeds) and allows the
 ///         owner to withdraw after a timelock.
@@ -186,6 +191,18 @@ contract Treasury {
         delete withdrawals[withdrawalId];
 
         emit WithdrawalCancelled(withdrawalId);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Claim from pull-payment contracts
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Claim funds from a pull-payment contract (e.g. SlashingOracle).
+    ///         The source contract sends ETH to this contract via its withdraw(),
+    ///         which is received by receive() and emits a Deposited event.
+    /// @param source Address of the pull-payment contract to withdraw from.
+    function claimFromOracle(address source) external onlyOwner {
+        IWithdrawable(source).withdraw();
     }
 
     // ──────────────────────────────────────────────────────────────

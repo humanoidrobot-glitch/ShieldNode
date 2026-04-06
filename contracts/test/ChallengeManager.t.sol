@@ -347,4 +347,66 @@ contract ChallengeManagerTest is Test {
         vm.warp(block.timestamp + cm.CHALLENGE_COOLDOWN() + 1);
         assertTrue(cm.canChallenge(nodeId, challenger));
     }
+
+    // ── reentrancy guard (Fix 2) ────────────────────────────────
+
+    function test_withdraw_reentrancy_reverts() public {
+        // Issue challenge, respond (bond credited to challenger via pull-payment).
+        vm.prank(challenger);
+        uint256 id = cm.issueChallenge{value: BOND}(
+            nodeId,
+            ChallengeManager.ChallengeType.LivenessCheck,
+            bytes32(0)
+        );
+
+        bytes32 responseHash = keccak256("alive");
+        bytes memory sig = _signResponse(NODE_KEY, id, nodeId, responseHash);
+        vm.prank(nodeOp);
+        cm.respondToChallenge(id, responseHash, sig);
+
+        // Deploy reentrancy attacker and transfer the pending balance.
+        ReentrancyAttacker attacker = new ReentrancyAttacker(address(cm));
+        // We need the attacker to have a pending withdrawal. Since we can't
+        // transfer pending balance, issue a new challenge from the attacker.
+        vm.deal(address(attacker), 1 ether);
+        vm.prank(address(attacker));
+        uint256 id2 = cm.issueChallenge{value: BOND}(
+            nodeId,
+            ChallengeManager.ChallengeType.LivenessCheck,
+            bytes32(0)
+        );
+
+        // Warp past cooldown for the node (needed for the second challenge).
+        vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
+
+        // Expire the attacker's challenge (bond returned via pull-payment).
+        cm.expireChallenge(id2);
+
+        // Attacker tries to withdraw with reentrancy — the reentrant call
+        // reverts with "ChallengeManager: reentrant", which causes the outer
+        // ETH transfer to fail, surfacing as TransferFailed().
+        vm.expectRevert(ChallengeManager.TransferFailed.selector);
+        attacker.attack();
+    }
+}
+
+/// @dev Contract that attempts reentrancy on ChallengeManager.withdraw().
+contract ReentrancyAttacker {
+    ChallengeManager public cm;
+    uint256 public attackCount;
+
+    constructor(address _cm) {
+        cm = ChallengeManager(payable(_cm));
+    }
+
+    function attack() external {
+        cm.withdraw();
+    }
+
+    receive() external payable {
+        if (attackCount == 0) {
+            attackCount++;
+            cm.withdraw(); // reentrant call
+        }
+    }
 }

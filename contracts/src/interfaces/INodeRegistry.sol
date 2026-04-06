@@ -92,4 +92,10 @@ interface INodeRegistry {
     /// @param nodeId The node to check.
     /// @return active True if the node is currently active.
     function isNodeActive(bytes32 nodeId) external view returns (bool active);
+
+    /// @notice Deactivate a node due to repeated liveness failures.
+    ///         Not a permanent ban — the operator can withdraw after cooldown
+    ///         and re-register.
+    /// @param nodeId The node to deactivate.
+    function deactivateForLiveness(bytes32 nodeId) external;
 }

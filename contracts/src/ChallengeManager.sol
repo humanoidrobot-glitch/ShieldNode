@@ -97,6 +97,9 @@ contract ChallengeManager {
     /// @notice Pull-payment: credited bond amounts awaiting withdrawal.
     mapping(address => uint256) public pendingWithdrawals;
 
+    /// @dev Reentrancy guard.
+    bool private _locked;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -152,6 +155,17 @@ contract ChallengeManager {
     error DeadlineNotPassed();
     error InvalidResponse();
     error TransferFailed();
+
+    // ──────────────────────────────────────────────────────────────
+    //  Modifiers
+    // ──────────────────────────────────────────────────────────────
+
+    modifier nonReentrant() {
+        require(!_locked, "ChallengeManager: reentrant");
+        _locked = true;
+        _;
+        _locked = false;
+    }
 
     // ──────────────────────────────────────────────────────────────
     //  Constructor
@@ -306,7 +320,7 @@ contract ChallengeManager {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Withdraw credited bond payments.
-    function withdraw() external {
+    function withdraw() external nonReentrant {
         uint256 amount = pendingWithdrawals[msg.sender];
         require(amount > 0, "ChallengeManager: nothing to withdraw");
         pendingWithdrawals[msg.sender] = 0;

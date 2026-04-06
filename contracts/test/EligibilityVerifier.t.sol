@@ -24,7 +24,14 @@ contract EligibilityVerifierTest is Test {
     function setUp() public {
         mock = new MockEligibilityVerifier();
         ev = new EligibilityVerifier(address(mock));
-        ev.updateRegistryRoot(12345);
+        _timelockUpdateRoot(ev, 12345);
+    }
+
+    /// @dev Propose + warp + execute a registry root update through the timelock.
+    function _timelockUpdateRoot(EligibilityVerifier _ev, uint256 newRoot) internal {
+        uint256 id = _ev.proposeRegistryRoot(newRoot);
+        vm.warp(block.timestamp + _ev.ROOT_TIMELOCK());
+        _ev.executeRegistryRoot(id);
     }
 
     function _dummyProof()
@@ -73,15 +80,12 @@ contract EligibilityVerifierTest is Test {
     // ── invalid proof ───────────────────────────────────────────
 
     function test_invalid_proof_reverts() public {
-        mock.setResult(false);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
 
-        // When mock returns false, contract should revert with InvalidProof.
-        // Use a fresh EligibilityVerifier with the mock already set to false.
         MockEligibilityVerifier freshMock = new MockEligibilityVerifier();
         freshMock.setResult(false);
         EligibilityVerifier freshEv = new EligibilityVerifier(address(freshMock));
-        freshEv.updateRegistryRoot(12345);
+        _timelockUpdateRoot(freshEv, 12345);
 
         uint256[6] memory signals = [
             uint256(12345),
@@ -120,17 +124,32 @@ contract EligibilityVerifierTest is Test {
         ev.verifyEligibility(a, b, c, signals);
     }
 
-    // ── admin ───────────────────────────────────────────────────
+    // ── admin (timelocked) ──────────────────────────────────────
 
-    function test_update_root() public {
-        ev.updateRegistryRoot(67890);
+    function test_update_root_timelocked() public {
+        _timelockUpdateRoot(ev, 67890);
         assertEq(ev.registryRoot(), 67890);
     }
 
-    function test_update_root_not_owner() public {
+    function test_propose_root_not_owner() public {
         vm.prank(makeAddr("random"));
         vm.expectRevert(EligibilityVerifier.NotOwner.selector);
-        ev.updateRegistryRoot(1);
+        ev.proposeRegistryRoot(1);
+    }
+
+    function test_execute_root_before_timelock_reverts() public {
+        uint256 id = ev.proposeRegistryRoot(99999);
+        vm.expectRevert("EligibilityVerifier: timelock active");
+        ev.executeRegistryRoot(id);
+    }
+
+    function test_execute_root_twice_reverts() public {
+        uint256 id = ev.proposeRegistryRoot(99999);
+        vm.warp(block.timestamp + ev.ROOT_TIMELOCK());
+        ev.executeRegistryRoot(id);
+
+        vm.expectRevert("EligibilityVerifier: already executed");
+        ev.executeRegistryRoot(id);
     }
 
     // ── constants ───────────────────────────────────────────────

@@ -498,4 +498,82 @@ contract SlashingOracleTest is Test {
         vm.expectRevert("NodeRegistry: node not found");
         oracle.executeSlash(0);
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  Treasury claim integration (Fix 1)
+    // ════════════════════════════════════════════════════════════
+
+    function test_treasury_claimFromOracle() public {
+        // Slash the node → treasury gets credited in SlashingOracle.
+        bytes memory evidence = _buildAttestation(NODE_ID, block.timestamp, keccak256("claim-test"));
+        _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);
+
+        uint256 treasuryPending = oracle.pendingWithdrawals(address(treasury));
+        assertGt(treasuryPending, 0);
+
+        // Treasury claims via claimFromOracle.
+        uint256 balBefore = address(treasury).balance;
+        vm.prank(deployer); // deployer is treasury owner
+        treasury.claimFromOracle(address(oracle));
+        assertEq(address(treasury).balance - balBefore, treasuryPending);
+        assertEq(oracle.pendingWithdrawals(address(treasury)), 0);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Liveness ban threshold (Fix 3)
+    // ════════════════════════════════════════════════════════════
+
+    function test_liveness_threshold_deactivates_node() public {
+        uint256 threshold = oracle.LIVENESS_BAN_THRESHOLD();
+
+        // Execute threshold liveness slashes, heartbeating between each
+        // to keep the node fresh (time warps for grace periods would
+        // otherwise make the heartbeat stale).
+        for (uint256 i; i < threshold; ++i) {
+            vm.prank(nodeAddr);
+            registry.heartbeat(NODE_ID);
+
+            bytes memory evidence = abi.encode(uint256(i + 1000));
+            uint256 pid = oracle.nextProposalId();
+
+            vm.prank(challAddr);
+            oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence);
+            vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
+            oracle.executeSlash(pid);
+        }
+
+        // Node should be deactivated (not permanently banned).
+        INodeRegistry.NodeInfo memory info = registry.getNode(NODE_ID);
+        assertFalse(info.isActive);
+        assertFalse(registry.permanentBan(NODE_ID));
+
+        // Liveness count should be reset.
+        assertEq(oracle.livenessFailureCount(NODE_ID), 0);
+    }
+
+    function test_liveness_below_threshold_stays_active() public {
+        uint256 threshold = oracle.LIVENESS_BAN_THRESHOLD();
+
+        // Execute threshold - 1 liveness slashes.
+        for (uint256 i; i < threshold - 1; ++i) {
+            vm.prank(nodeAddr);
+            registry.heartbeat(NODE_ID);
+
+            bytes memory evidence = abi.encode(uint256(i + 2000));
+            uint256 pid = oracle.nextProposalId();
+
+            vm.prank(challAddr);
+            oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence);
+            vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
+            oracle.executeSlash(pid);
+        }
+
+        // Heartbeat to stay fresh after final warp.
+        vm.prank(nodeAddr);
+        registry.heartbeat(NODE_ID);
+
+        // Node should still be active.
+        assertTrue(registry.isNodeActive(NODE_ID));
+        assertEq(oracle.livenessFailureCount(NODE_ID), threshold - 1);
+    }
 }

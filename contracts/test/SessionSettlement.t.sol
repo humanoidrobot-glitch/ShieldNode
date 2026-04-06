@@ -230,4 +230,22 @@ contract SessionSettlementTest is Test {
         vm.expectRevert("Session: already settled");
         settlement.settleSession(sessionId, receipt);
     }
+
+    // ────────────────────── cumulativeBytes cap (Fix 4) ──────────────────────
+
+    function test_settle_bytes_overflow_reverts() public {
+        vm.prank(client);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
+
+        uint256 sessionId = 0;
+        uint256 cumBytes   = 1e30 + 1; // exceeds MAX_CUMULATIVE_BYTES
+        uint256 ts         = block.timestamp;
+
+        bytes32 d = _digest(sessionId, cumBytes, ts);
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
+
+        vm.prank(client);
+        vm.expectRevert("Session: bytes overflow");
+        settlement.settleSession(sessionId, receipt);
+    }
 }

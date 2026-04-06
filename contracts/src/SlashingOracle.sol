@@ -47,6 +47,9 @@ contract SlashingOracle is ISlashingOracle {
     ///         escalate toward permanent ban at the same rate as proven fraud.
     uint256 private constant SLASH_PCT_LIVENESS = 5;
 
+    /// @notice Number of liveness failures before a node is auto-deactivated.
+    uint256 public constant LIVENESS_BAN_THRESHOLD = 5;
+
     /// @notice Reward split: 50 % to challenger, 50 % to treasury.
     uint256 private constant CHALLENGER_SHARE = 50;
 
@@ -128,6 +131,10 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Pull-payment: credited amounts awaiting withdrawal.
     mapping(address => uint256) public pendingWithdrawals;
 
+    /// @notice Cumulative liveness failure count per node. Resets when the
+    ///         node is deactivated at threshold.
+    mapping(bytes32 => uint256) public livenessFailureCount;
+
     /// @dev Timelocked challenger proposals.
     struct ChallengerProposal {
         address challenger;
@@ -156,6 +163,7 @@ contract SlashingOracle is ISlashingOracle {
     event ChallengerUpdated(address indexed challenger, bool authorised);
     event ChallengerProposed(uint256 indexed proposalId, address indexed challenger, bool authorised, uint256 readyAt);
     event SlashProposalExpired(uint256 indexed proposalId, bytes32 indexed nodeId);
+    event LivenessDeactivation(bytes32 indexed nodeId, uint256 failureCount);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -363,9 +371,21 @@ contract SlashingOracle is ISlashingOracle {
         // Call the registry to slash (funds are sent back to this contract).
         registry.slash(p.nodeId, slashAmount);
 
-        // If third offence (slashCount was 2 before this slash), permanently ban.
-        if (info.slashCount >= 2) {
+        // If third fraud offence (slashCount was 2 before this slash),
+        // permanently ban. Liveness failures don't escalate toward permanent
+        // ban — they are handled separately via LIVENESS_BAN_THRESHOLD.
+        if (p.reason != SlashReason.ChallengeFailure && info.slashCount >= 2) {
             registry.ban(p.nodeId);
+        }
+
+        // Track liveness failures separately; deactivate at threshold.
+        if (p.reason == SlashReason.ChallengeFailure) {
+            livenessFailureCount[p.nodeId]++;
+            if (livenessFailureCount[p.nodeId] >= LIVENESS_BAN_THRESHOLD) {
+                emit LivenessDeactivation(p.nodeId, livenessFailureCount[p.nodeId]);
+                livenessFailureCount[p.nodeId] = 0;
+                registry.deactivateForLiveness(p.nodeId);
+            }
         }
 
         // Distribute: 50 % challenger, 50 % treasury (pull-payment).

@@ -24,6 +24,9 @@ contract SessionSettlement is ISessionSettlement {
     uint256 public constant RELAY_SHARE = 25;
     uint256 public constant EXIT_SHARE  = 50;
 
+    /// @notice Maximum cumulative bytes per session (prevents overflow in settlement).
+    uint256 public constant MAX_CUMULATIVE_BYTES = 1e30;
+
     // ──────────────────────────────────────────────────────────────
     //  EIP-712
     // ──────────────────────────────────────────────────────────────
@@ -291,6 +294,7 @@ contract SessionSettlement is ISessionSettlement {
         uint256 cumulativeBytes,
         uint256 cap
     ) internal returns (uint256 totalPaid) {
+        require(cumulativeBytes <= MAX_CUMULATIVE_BYTES, "Session: bytes overflow");
         totalPaid = cumulativeBytes * s.pricePerByte;
         if (totalPaid > cap) {
             totalPaid = cap;

@@ -12,6 +12,22 @@ contract CommitmentTreeTest is Test {
         tree = new CommitmentTree();
     }
 
+    // ── helpers ─────────────────────────────────────────────────
+
+    /// @dev Propose + warp + execute an insert through the timelock.
+    function _timelockInsert(bytes32 commitment) internal {
+        uint256 id = tree.proposeInsert(commitment);
+        vm.warp(block.timestamp + tree.COMMITMENT_TIMELOCK());
+        tree.executeProposal(id);
+    }
+
+    /// @dev Propose + warp + execute a remove through the timelock.
+    function _timelockRemove(bytes32 commitment, bytes32 salt) internal {
+        uint256 id = tree.proposeRemove(commitment, salt);
+        vm.warp(block.timestamp + tree.COMMITMENT_TIMELOCK());
+        tree.executeProposal(id);
+    }
+
     // ── initialization ──────────────────────────────────────────
 
     function test_initialize_fills_all_slots() public {
@@ -43,17 +59,16 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
     }
 
-    // ── insert real node ────────────────────────────────────────
+    // ── insert real node (timelocked) ───────────────────────────
 
     function test_insert_real_replaces_dummy() public {
         tree.initialize(SALT, 512);
 
         bytes32 commitment = keccak256("real-node-1");
-        tree.insertReal(commitment);
+        _timelockInsert(commitment);
 
         assertEq(tree.realCount(), 1);
         assertEq(tree.dummyCount(), 511);
-        // isReal is now internal (Finding 4 fix) — verify via commitmentIndex instead.
         assertTrue(tree.commitmentIndex(commitment) != 0);
     }
 
@@ -61,7 +76,7 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
 
         for (uint256 i; i < 10; ++i) {
-            tree.insertReal(keccak256(abi.encode("node", i)));
+            _timelockInsert(keccak256(abi.encode("node", i)));
         }
 
         assertEq(tree.realCount(), 10);
@@ -72,29 +87,29 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
 
         vm.expectRevert(CommitmentTree.ZeroCommitment.selector);
-        tree.insertReal(bytes32(0));
+        tree.proposeInsert(bytes32(0));
     }
 
     function test_root_changes_on_insert() public {
         tree.initialize(SALT, 512);
         bytes32 rootBefore = tree.getRoot();
 
-        tree.insertReal(keccak256("new-node"));
+        _timelockInsert(keccak256("new-node"));
         bytes32 rootAfter = tree.getRoot();
 
         assertFalse(rootBefore == rootAfter);
     }
 
-    // ── remove real node ────────────────────────────────────────
+    // ── remove real node (timelocked) ───────────────────────────
 
     function test_remove_real_replaces_with_dummy() public {
         tree.initialize(SALT, 512);
 
         bytes32 commitment = keccak256("node-to-remove");
-        tree.insertReal(commitment);
+        _timelockInsert(commitment);
         assertEq(tree.realCount(), 1);
 
-        tree.removeReal(commitment, keccak256("remove-salt"));
+        _timelockRemove(commitment, keccak256("remove-salt"));
         assertEq(tree.realCount(), 0);
         assertEq(tree.dummyCount(), 512);
     }
@@ -102,8 +117,40 @@ contract CommitmentTreeTest is Test {
     function test_remove_nonexistent_reverts() public {
         tree.initialize(SALT, 512);
 
+        uint256 id = tree.proposeRemove(keccak256("nonexistent"), SALT);
+        vm.warp(block.timestamp + tree.COMMITMENT_TIMELOCK());
         vm.expectRevert(CommitmentTree.CommitmentNotFound.selector);
-        tree.removeReal(keccak256("nonexistent"), SALT);
+        tree.executeProposal(id);
+    }
+
+    // ── timelock enforcement ────────────────────────────────────
+
+    function test_execute_before_timelock_reverts() public {
+        tree.initialize(SALT, 512);
+
+        uint256 id = tree.proposeInsert(keccak256("too-early"));
+        // Don't warp — try to execute immediately.
+        vm.expectRevert("CommitmentTree: timelock active");
+        tree.executeProposal(id);
+    }
+
+    function test_execute_twice_reverts() public {
+        tree.initialize(SALT, 512);
+
+        uint256 id = tree.proposeInsert(keccak256("once-only"));
+        vm.warp(block.timestamp + tree.COMMITMENT_TIMELOCK());
+        tree.executeProposal(id);
+
+        vm.expectRevert("CommitmentTree: already executed");
+        tree.executeProposal(id);
+    }
+
+    function test_propose_only_owner() public {
+        tree.initialize(SALT, 512);
+
+        vm.prank(makeAddr("random"));
+        vm.expectRevert(CommitmentTree.NotOwner.selector);
+        tree.proposeInsert(keccak256("nope"));
     }
 
     // ── fork threshold ──────────────────────────────────────────
@@ -113,7 +160,7 @@ contract CommitmentTreeTest is Test {
 
         // Insert 256 real nodes (the threshold).
         for (uint256 i; i < 256; ++i) {
-            tree.insertReal(keccak256(abi.encode("fork-node", i)));
+            _timelockInsert(keccak256(abi.encode("fork-node", i)));
         }
 
         assertTrue(tree.forkReady());
@@ -124,7 +171,7 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
 
         for (uint256 i; i < 100; ++i) {
-            tree.insertReal(keccak256(abi.encode("node", i)));
+            _timelockInsert(keccak256(abi.encode("node", i)));
         }
 
         assertFalse(tree.forkReady());
@@ -137,8 +184,6 @@ contract CommitmentTreeTest is Test {
 
         bytes32[9] memory proof = tree.getMerkleProof(0);
 
-        // Should have 9 siblings (depth of the tree).
-        // All should be non-zero (tree is fully populated).
         for (uint256 i; i < 9; ++i) {
             assertTrue(proof[i] != bytes32(0));
         }
@@ -148,7 +193,7 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
 
         bytes32 commitment = keccak256("prove-me");
-        tree.insertReal(commitment);
+        _timelockInsert(commitment);
 
         uint256 slot = tree.commitmentIndex(commitment) - 1;
         bytes32[9] memory proof = tree.getMerkleProof(slot);
@@ -173,7 +218,6 @@ contract CommitmentTreeTest is Test {
     function test_dummies_are_unique() public {
         tree.initialize(SALT, 512);
 
-        // Check first 20 leaves are all different.
         for (uint256 i; i < 20; ++i) {
             for (uint256 j = i + 1; j < 20; ++j) {
                 assertFalse(tree.getLeaf(i) == tree.getLeaf(j));
@@ -187,7 +231,6 @@ contract CommitmentTreeTest is Test {
         tree.initialize(SALT, 512);
         tree2.initialize(keccak256("different-salt"), 512);
 
-        // Same index, different salt → different dummy.
         assertFalse(tree.getLeaf(0) == tree2.getLeaf(0));
         assertFalse(tree.getRoot() == tree2.getRoot());
     }
