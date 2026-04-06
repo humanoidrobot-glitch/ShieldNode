@@ -42,6 +42,18 @@ contract Treasury {
     /// @notice Next withdrawal-id.
     uint256 public nextWithdrawalId;
 
+    /// @notice Sum of all queued-but-unresolved withdrawal amounts.
+    uint256 public totalPending;
+
+    /// @dev Timelocked guardian proposals.
+    struct GuardianProposal {
+        address newGuardian;
+        uint256 readyAt;
+        bool    executed;
+    }
+    mapping(uint256 => GuardianProposal) public guardianProposals;
+    uint256 public nextGuardianProposalId;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -65,6 +77,9 @@ contract Treasury {
 
     /// @notice Emitted when the guardian is updated.
     event GuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+
+    /// @notice Emitted when a guardian change is proposed.
+    event GuardianProposed(uint256 indexed proposalId, address indexed newGuardian, uint256 readyAt);
 
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
@@ -115,8 +130,9 @@ contract Treasury {
     {
         require(to != address(0), "Treasury: zero address");
         require(amount > 0, "Treasury: zero amount");
-        require(amount <= address(this).balance, "Treasury: insufficient balance");
+        require(amount <= address(this).balance - totalPending, "Treasury: insufficient available balance");
 
+        totalPending += amount;
         withdrawalId = nextWithdrawalId++;
         uint256 readyAt = block.timestamp + TIMELOCK_DURATION;
 
@@ -140,6 +156,7 @@ contract Treasury {
         require(req.amount <= address(this).balance, "Treasury: insufficient balance");
 
         // Effects
+        totalPending -= req.amount;
         req.executed = true;
 
         // Interaction
@@ -165,6 +182,7 @@ contract Treasury {
         require(req.amount > 0, "Treasury: unknown withdrawal");
         require(!req.executed, "Treasury: already executed");
 
+        totalPending -= req.amount;
         delete withdrawals[withdrawalId];
 
         emit WithdrawalCancelled(withdrawalId);
@@ -174,10 +192,27 @@ contract Treasury {
     //  Admin
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Update the guardian address.
-    function setGuardian(address _guardian) external onlyOwner {
-        emit GuardianUpdated(guardian, _guardian);
-        guardian = _guardian;
+    /// @notice Propose a new guardian (48h timelock).
+    function proposeGuardian(address _guardian) external onlyOwner returns (uint256 proposalId) {
+        proposalId = nextGuardianProposalId++;
+        uint256 readyAt = block.timestamp + TIMELOCK_DURATION;
+        guardianProposals[proposalId] = GuardianProposal({
+            newGuardian: _guardian,
+            readyAt:     readyAt,
+            executed:    false
+        });
+        emit GuardianProposed(proposalId, _guardian, readyAt);
+    }
+
+    /// @notice Execute a timelocked guardian proposal.
+    function executeGuardian(uint256 proposalId) external onlyOwner {
+        GuardianProposal storage gp = guardianProposals[proposalId];
+        require(gp.readyAt > 0, "Treasury: unknown proposal");
+        require(!gp.executed, "Treasury: already executed");
+        require(block.timestamp >= gp.readyAt, "Treasury: timelock active");
+        gp.executed = true;
+        emit GuardianUpdated(guardian, gp.newGuardian);
+        guardian = gp.newGuardian;
     }
 
     // ──────────────────────────────────────────────────────────────

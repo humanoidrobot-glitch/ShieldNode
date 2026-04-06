@@ -30,8 +30,8 @@ contract NodeRegistryTest is Test {
         address predictedOracle = vm.computeCreateAddress(deployer, nonce + 2);
 
         registry = new NodeRegistry(predictedOracle);
-        SessionSettlement settlement = new SessionSettlement(address(registry));
-        oracle = new SlashingOracle(address(registry), address(treasury), address(settlement));
+        SessionSettlement settlement = new SessionSettlement(address(registry), deployer);
+        oracle = new SlashingOracle(address(registry), address(treasury), address(settlement), deployer);
         vm.stopPrank();
 
         require(address(oracle) == predictedOracle, "oracle address prediction failed");

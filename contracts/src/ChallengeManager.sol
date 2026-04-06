@@ -54,7 +54,8 @@ contract ChallengeManager {
         Active,
         Responded,
         Expired,
-        Slashed
+        Slashed,
+        SlashFailed
     }
 
     /// @dev Field order optimized for storage packing:
@@ -93,6 +94,9 @@ contract ChallengeManager {
     /// @dev Last challenge timestamp per challenger per node.
     mapping(bytes32 => mapping(address => uint256)) public lastChallenged;
 
+    /// @notice Pull-payment: credited bond amounts awaiting withdrawal.
+    mapping(address => uint256) public pendingWithdrawals;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -129,6 +133,11 @@ contract ChallengeManager {
         address indexed challenger,
         uint256 bondReturned,
         uint256 reward
+    );
+
+    event SlashProposalFailed(
+        uint256 indexed challengeId,
+        bytes32 indexed nodeId
     );
 
     // ──────────────────────────────────────────────────────────────
@@ -234,15 +243,14 @@ contract ChallengeManager {
 
         c.status = ChallengeStatus.Responded;
 
-        // Return bond to challenger — node proved honest.
+        // Credit bond to challenger via pull-payment — prevents DoS
+        // if challenger is a contract that reverts on ETH receive.
         uint256 bondAmount = c.bond;
         c.bond = 0;
+        pendingWithdrawals[c.challenger] += bondAmount;
 
         emit ChallengeResponded(challengeId, c.nodeId, responseHash);
         emit BondReturned(challengeId, c.challenger, bondAmount);
-
-        (bool ok, ) = c.challenger.call{value: bondAmount}("");
-        if (!ok) revert TransferFailed();
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -261,21 +269,48 @@ contract ChallengeManager {
         if (c.status != ChallengeStatus.Active) revert ChallengeNotActive();
         if (block.timestamp <= c.deadline) revert DeadlineNotPassed();
 
-        c.status = ChallengeStatus.Slashed;
-
         uint256 bondAmount = c.bond;
         c.bond = 0;
+        pendingWithdrawals[c.challenger] += bondAmount;
 
         emit ChallengeExpired(challengeId, c.nodeId);
         emit BondAndRewardPaid(challengeId, c.challenger, bondAmount, 0);
 
-        // Propose slash via the oracle — ChallengeManager must be registered
-        // as an authorized challenger on the SlashingOracle.
+        // Propose slash via the oracle. Status depends on success.
         bytes memory evidence = abi.encode(challengeId);
-        oracle.proposeSlash(c.nodeId, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence);
+        try oracle.proposeSlash(c.nodeId, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence) {
+            c.status = ChallengeStatus.Slashed;
+        } catch {
+            c.status = ChallengeStatus.SlashFailed;
+            emit SlashProposalFailed(challengeId, c.nodeId);
+        }
+    }
 
-        // Return bond to challenger.
-        (bool ok, ) = c.challenger.call{value: bondAmount}("");
+    /// @notice Retry a failed slash proposal. Only callable on challenges
+    ///         in SlashFailed status (oracle was unavailable at expire time).
+    function retrySlash(uint256 challengeId) external {
+        Challenge storage c = challenges[challengeId];
+        if (c.issuedAt == 0) revert ChallengeNotFound();
+        require(c.status == ChallengeStatus.SlashFailed, "ChallengeManager: not SlashFailed");
+
+        bytes memory evidence = abi.encode(challengeId);
+        try oracle.proposeSlash(c.nodeId, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence) {
+            c.status = ChallengeStatus.Slashed;
+        } catch {
+            emit SlashProposalFailed(challengeId, c.nodeId);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Pull-payment withdrawal
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Withdraw credited bond payments.
+    function withdraw() external {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "ChallengeManager: nothing to withdraw");
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
         if (!ok) revert TransferFailed();
     }
 

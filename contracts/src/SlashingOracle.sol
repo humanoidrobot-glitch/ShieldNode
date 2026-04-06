@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {ISlashingOracle}  from "./interfaces/ISlashingOracle.sol";
-import {INodeRegistry}    from "./interfaces/INodeRegistry.sol";
-import {NodeRegistry}     from "./NodeRegistry.sol";
-import {SessionSettlement} from "./SessionSettlement.sol";
-import {EIP712Utils}       from "./lib/EIP712Utils.sol";
+import {ISlashingOracle}    from "./interfaces/ISlashingOracle.sol";
+import {INodeRegistry}     from "./interfaces/INodeRegistry.sol";
+import {ISessionSettlement} from "./interfaces/ISessionSettlement.sol";
+import {NodeRegistry}      from "./NodeRegistry.sol";
+import {SessionSettlement}  from "./SessionSettlement.sol";
+import {EIP712Utils}        from "./lib/EIP712Utils.sol";
 
 /// @title SlashingOracle
 /// @notice Manages slash proposals with on-chain evidence verification,
@@ -31,11 +32,20 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Grace period before a proposal can be executed.
     uint256 public constant GRACE_PERIOD = 24 hours;
 
-    /// @notice Slash percentages by offence count.
+    /// @notice Maximum lifetime of a proposal. After this, it can be expired
+    ///         to free the node's pendingSlashCount and unblock withdrawals.
+    uint256 public constant PROPOSAL_EXPIRY = 14 days;
+
+    /// @notice Slash percentages by offence count (fraud track).
     ///         First = 10 %, second = 25 %, third+ = 100 %.
     uint256 private constant SLASH_PCT_FIRST  = 10;
     uint256 private constant SLASH_PCT_SECOND = 25;
     uint256 private constant SLASH_PCT_THIRD  = 100;
+
+    /// @notice Reduced penalty for liveness failures (ChallengeFailure).
+    ///         Separate from the fraud track — a network outage should not
+    ///         escalate toward permanent ban at the same rate as proven fraud.
+    uint256 private constant SLASH_PCT_LIVENESS = 5;
 
     /// @notice Reward split: 50 % to challenger, 50 % to treasury.
     uint256 private constant CHALLENGER_SHARE = 50;
@@ -111,11 +121,43 @@ contract SlashingOracle is ISlashingOracle {
     ///      NodeRegistry can check this to block withdrawals while slashes are pending.
     mapping(bytes32 => uint256) public pendingSlashCount;
 
+    /// @dev Timestamp of last slash execution per node — enforces cooldown
+    ///      between sequential slash executions to prevent batch bypass.
+    mapping(bytes32 => uint256) public lastSlashExecuted;
+
+    /// @notice Pull-payment: credited amounts awaiting withdrawal.
+    mapping(address => uint256) public pendingWithdrawals;
+
+    /// @dev Timelocked challenger proposals.
+    struct ChallengerProposal {
+        address challenger;
+        bool    authorised;
+        uint256 readyAt;
+        bool    executed;
+    }
+    mapping(uint256 => ChallengerProposal) public challengerProposals;
+    uint256 public nextChallengerProposalId;
+
+    uint256 public constant CHALLENGER_TIMELOCK = 48 hours;
+
+    /// @notice Emergency pause state.
+    bool public paused;
+
+    /// @notice Dedicated pauser address for emergency pause/unpause.
+    address public pauser;
+
+    /// @dev Reentrancy guard.
+    bool private _locked;
+
     // ──────────────────────────────────────────────────────────────
     //  Events (supplementary -- interface events are inherited)
     // ──────────────────────────────────────────────────────────────
 
     event ChallengerUpdated(address indexed challenger, bool authorised);
+    event ChallengerProposed(uint256 indexed proposalId, address indexed challenger, bool authorised, uint256 readyAt);
+    event SlashProposalExpired(uint256 indexed proposalId, bytes32 indexed nodeId);
+    event Paused(address account);
+    event Unpaused(address account);
 
     // ──────────────────────────────────────────────────────────────
     //  Errors
@@ -129,6 +171,7 @@ contract SlashingOracle is ISlashingOracle {
     error UnknownProposal();
     error AlreadyExecuted();
     error GracePeriodActive();
+    error NotExpired();
     error TransferFailed(string recipient);
 
     // ──────────────────────────────────────────────────────────────
@@ -145,6 +188,18 @@ contract SlashingOracle is ISlashingOracle {
         _;
     }
 
+    modifier whenNotPaused() {
+        require(!paused, "SlashingOracle: paused");
+        _;
+    }
+
+    modifier nonReentrant() {
+        require(!_locked, "SlashingOracle: reentrant");
+        _locked = true;
+        _;
+        _locked = false;
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  Constructor
     // ──────────────────────────────────────────────────────────────
@@ -153,14 +208,17 @@ contract SlashingOracle is ISlashingOracle {
     /// @param _treasury   Address of the Treasury.
     /// @param _settlement Address of the SessionSettlement contract (for
     ///                    BandwidthFraud EIP-712 domain matching).
-    constructor(address _registry, address _treasury, address _settlement) {
+    /// @param _pauser     Address authorised to pause/unpause.
+    constructor(address _registry, address _treasury, address _settlement, address _pauser) {
         if (_registry == address(0)) revert ZeroAddress();
         if (_treasury == address(0)) revert ZeroAddress();
         if (_settlement == address(0)) revert ZeroAddress();
+        require(_pauser != address(0), "SlashingOracle: zero pauser");
         registry   = NodeRegistry(_registry);
         treasury   = _treasury;
         settlement = _settlement;
         owner      = msg.sender;
+        pauser     = _pauser;
 
         // Read the EIP-712 domain directly from SessionSettlement so receipt
         // signatures produced for settlement are also valid here.
@@ -175,10 +233,49 @@ contract SlashingOracle is ISlashingOracle {
     //  Admin
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Add or remove an authorised challenger.
-    function setChallenger(address challenger, bool authorised) external onlyOwner {
-        challengers[challenger] = authorised;
-        emit ChallengerUpdated(challenger, authorised);
+    /// @notice Propose adding or removing an authorised challenger (48h timelock).
+    function proposeChallenger(address challenger, bool authorised) external onlyOwner returns (uint256 proposalId) {
+        proposalId = nextChallengerProposalId++;
+        uint256 readyAt = block.timestamp + CHALLENGER_TIMELOCK;
+        challengerProposals[proposalId] = ChallengerProposal({
+            challenger: challenger,
+            authorised: authorised,
+            readyAt:    readyAt,
+            executed:   false
+        });
+        emit ChallengerProposed(proposalId, challenger, authorised, readyAt);
+    }
+
+    /// @notice Execute a timelocked challenger proposal.
+    function executeChallenger(uint256 proposalId) external onlyOwner {
+        ChallengerProposal storage cp = challengerProposals[proposalId];
+        require(cp.readyAt > 0, "SlashingOracle: unknown proposal");
+        require(!cp.executed, "SlashingOracle: already executed");
+        require(block.timestamp >= cp.readyAt, "SlashingOracle: timelock active");
+        cp.executed = true;
+        challengers[cp.challenger] = cp.authorised;
+        emit ChallengerUpdated(cp.challenger, cp.authorised);
+    }
+
+    /// @notice Emergency revocation — instant, safe direction only (remove, not add).
+    function emergencyRevokeChallenger(address challenger) external onlyOwner {
+        require(challengers[challenger], "SlashingOracle: not a challenger");
+        challengers[challenger] = false;
+        emit ChallengerUpdated(challenger, false);
+    }
+
+    /// @notice Emergency pause — blocks proposeSlash and executeSlash.
+    function pause() external {
+        require(msg.sender == pauser, "SlashingOracle: not pauser");
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @notice Resume operations.
+    function unpause() external {
+        require(msg.sender == pauser, "SlashingOracle: not pauser");
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -190,7 +287,7 @@ contract SlashingOracle is ISlashingOracle {
         bytes32 nodeId,
         uint8 reason,
         bytes calldata evidence
-    ) external override onlyChallenger {
+    ) external override onlyChallenger whenNotPaused {
         if (reason > uint8(SlashReason.ChallengeFailure)) revert BadReason();
 
         // Prevent duplicate proposals from the same evidence.
@@ -231,21 +328,29 @@ contract SlashingOracle is ISlashingOracle {
     }
 
     /// @inheritdoc ISlashingOracle
-    function executeSlash(uint256 proposalId) external override {
+    function executeSlash(uint256 proposalId) external override whenNotPaused {
         Proposal storage p = proposals[proposalId];
         if (p.createdAt == 0) revert UnknownProposal();
         if (p.executed) revert AlreadyExecuted();
         if (block.timestamp < p.createdAt + GRACE_PERIOD) revert GracePeriodActive();
+        require(
+            block.timestamp >= lastSlashExecuted[p.nodeId] + GRACE_PERIOD,
+            "SlashingOracle: slash cooldown"
+        );
 
         p.executed = true;
+        lastSlashExecuted[p.nodeId] = block.timestamp;
         if (pendingSlashCount[p.nodeId] > 0) {
             pendingSlashCount[p.nodeId]--;
         }
 
-        // Determine slash percentage based on the node's current slash count.
+        // Determine slash percentage. Liveness failures use a reduced
+        // penalty separate from the fraud escalation track.
         INodeRegistry.NodeInfo memory info = registry.getNode(p.nodeId);
         uint256 pct;
-        if (info.slashCount == 0) {
+        if (p.reason == SlashReason.ChallengeFailure) {
+            pct = SLASH_PCT_LIVENESS;
+        } else if (info.slashCount == 0) {
             pct = SLASH_PCT_FIRST;
         } else if (info.slashCount == 1) {
             pct = SLASH_PCT_SECOND;
@@ -263,20 +368,44 @@ contract SlashingOracle is ISlashingOracle {
             registry.ban(p.nodeId);
         }
 
-        // Distribute: 50 % challenger, 50 % treasury.
+        // Distribute: 50 % challenger, 50 % treasury (pull-payment).
         uint256 challengerReward = (slashAmount * CHALLENGER_SHARE) / 100;
         uint256 treasuryReward   = slashAmount - challengerReward;
 
-        if (challengerReward > 0) {
-            (bool ok1, ) = p.challenger.call{value: challengerReward}("");
-            if (!ok1) revert TransferFailed("challenger");
-        }
-        if (treasuryReward > 0) {
-            (bool ok2, ) = treasury.call{value: treasuryReward}("");
-            if (!ok2) revert TransferFailed("treasury");
-        }
+        if (challengerReward > 0) pendingWithdrawals[p.challenger] += challengerReward;
+        if (treasuryReward > 0)   pendingWithdrawals[treasury]     += treasuryReward;
 
         emit SlashExecuted(proposalId, p.nodeId, slashAmount);
+    }
+
+    /// @notice Expire a stale proposal that was never executed within
+    ///         PROPOSAL_EXPIRY. Decrements pendingSlashCount so the node
+    ///         can withdraw its stake. Anyone can call.
+    function expireProposal(uint256 proposalId) external {
+        Proposal storage p = proposals[proposalId];
+        if (p.createdAt == 0) revert UnknownProposal();
+        if (p.executed) revert AlreadyExecuted();
+        if (block.timestamp < p.createdAt + PROPOSAL_EXPIRY) revert NotExpired();
+
+        p.executed = true;
+        if (pendingSlashCount[p.nodeId] > 0) {
+            pendingSlashCount[p.nodeId]--;
+        }
+
+        emit SlashProposalExpired(proposalId, p.nodeId);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Pull-payment withdrawal
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Withdraw credited slash rewards.
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "SlashingOracle: nothing to withdraw");
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "SlashingOracle: transfer failed");
     }
 
     /// @notice Accept ETH from the registry during slashing.
@@ -317,7 +446,9 @@ contract SlashingOracle is ISlashingOracle {
     }
 
     /// @dev Verify both fraud receipts: recover signers, check they match,
-    ///      and confirm the node signer is the accused node's owner.
+    ///      and confirm the node signer was a session participant.
+    ///      Uses session-snapshotted owners (not current registry owner) so
+    ///      evidence remains valid even after the node deregisters/re-registers.
     function _verifyFraudSigners(
         bytes32 nodeId,
         uint256 sessionId,
@@ -335,8 +466,19 @@ contract SlashingOracle is ISlashingOracle {
         if (client1 != client2) revert InvalidEvidence("client signers differ");
         if (node1 != node2)     revert InvalidEvidence("node signers differ");
 
-        INodeRegistry.NodeInfo memory info = registry.getNode(nodeId);
-        if (node1 != info.owner) revert InvalidEvidence("node signer is not accused node owner");
+        // Verify against session-snapshotted owners instead of current
+        // registry owner. This prevents evidence escape via deregister + re-register.
+        ISessionSettlement.SessionInfo memory session = SessionSettlement(payable(settlement)).getSession(sessionId);
+        require(session.client != address(0), "SlashingOracle: unknown session");
+
+        bool isSessionNode = false;
+        for (uint256 i; i < 3; ++i) {
+            if (node1 == session.nodeOwners[i]) {
+                isSessionNode = true;
+                break;
+            }
+        }
+        if (!isSessionNode) revert InvalidEvidence("node signer not in session");
     }
 
     /// @dev Verify a challenger-signed attestation for ProvableLogging or

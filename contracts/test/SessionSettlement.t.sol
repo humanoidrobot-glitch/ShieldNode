@@ -43,7 +43,7 @@ contract SessionSettlementTest is Test {
         vm.deal(client,  10 ether);
 
         registry   = new NodeRegistry(oracle);
-        settlement = new SessionSettlement(address(registry));
+        settlement = new SessionSettlement(address(registry), address(this));
 
         _registerNode(entryOp, entryId, "entry-pub", "1.1.1.1:51820");
         _registerNode(relayOp, relayId, "relay-pub", "2.2.2.2:51820");
@@ -91,7 +91,7 @@ contract SessionSettlementTest is Test {
 
     function test_open_session() public {
         vm.prank(client);
-        settlement.openSession{value: 0.01 ether}(nodeIds);
+        settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
 
         ISessionSettlement.SessionInfo memory s = settlement.getSession(0);
         assertEq(s.client, client);
@@ -106,7 +106,7 @@ contract SessionSettlementTest is Test {
     function test_open_session_insufficient_deposit() public {
         vm.prank(client);
         vm.expectRevert("Session: deposit too low");
-        settlement.openSession{value: 0.0001 ether}(nodeIds);
+        settlement.openSession{value: 0.0001 ether}(nodeIds, type(uint256).max);
     }
 
     function test_open_session_inactive_node() public {
@@ -114,7 +114,7 @@ contract SessionSettlementTest is Test {
         registry.deregister(relayId);
         vm.prank(client);
         vm.expectRevert("Session: node not active");
-        settlement.openSession{value: 0.01 ether}(nodeIds);
+        settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
     }
 
     function test_open_session_zero_price() public {
@@ -128,21 +128,21 @@ contract SessionSettlementTest is Test {
         bytes32[3] memory ids = [entryId, relayId, cheapId];
         vm.prank(client);
         vm.expectRevert("Session: zero price");
-        settlement.openSession{value: 0.01 ether}(ids);
+        settlement.openSession{value: 0.01 ether}(ids, type(uint256).max);
     }
 
     function test_open_session_duplicate_nodes() public {
         bytes32[3] memory dupes = [entryId, entryId, exitId];
         vm.prank(client);
         vm.expectRevert("Session: duplicate nodes");
-        settlement.openSession{value: 0.01 ether}(dupes);
+        settlement.openSession{value: 0.01 ether}(dupes, type(uint256).max);
     }
 
     // ────────────────────── Settle session (pull-payment) ──────────────────────
 
     function test_settle_session() public {
         vm.prank(client);
-        settlement.openSession{value: 1 ether}(nodeIds);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
 
         uint256 sessionId = 0;
         uint256 cumBytes   = 1000;
@@ -175,7 +175,7 @@ contract SessionSettlementTest is Test {
 
     function test_force_settle_after_timeout() public {
         vm.prank(client);
-        settlement.openSession{value: 1 ether}(nodeIds);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
 
         uint256 sessionId = 0;
         uint256 cumBytes   = 500;
@@ -196,7 +196,7 @@ contract SessionSettlementTest is Test {
 
     function test_force_settle_too_early() public {
         vm.prank(client);
-        settlement.openSession{value: 1 ether}(nodeIds);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
 
         uint256 sessionId = 0;
         uint256 cumBytes   = 500;
@@ -214,7 +214,7 @@ contract SessionSettlementTest is Test {
 
     function test_double_settle_reverts() public {
         vm.prank(client);
-        settlement.openSession{value: 1 ether}(nodeIds);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
 
         uint256 sessionId = 0;
         uint256 cumBytes   = 100;

@@ -50,14 +50,29 @@ contract SessionSettlement is ISessionSettlement {
     /// @dev Reentrancy guard.
     bool private _locked;
 
+    /// @notice Emergency pause state.
+    bool public paused;
+
+    /// @notice Address authorized to pause/unpause.
+    address public pauser;
+
+    // ──────────────────────────────────────────────────────────────
+    //  Events
+    // ──────────────────────────────────────────────────────────────
+
+    event Paused(address account);
+    event Unpaused(address account);
+
     // ──────────────────────────────────────────────────────────────
     //  Constructor
     // ──────────────────────────────────────────────────────────────
 
-    constructor(address _nodeRegistry) {
+    constructor(address _nodeRegistry, address _pauser) {
         require(_nodeRegistry != address(0), "Session: zero registry");
+        require(_pauser != address(0), "Session: zero pauser");
         nodeRegistry = NodeRegistry(_nodeRegistry);
         DOMAIN_SEPARATOR = EIP712Utils.computeDomainSeparator(address(this));
+        pauser = _pauser;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -71,12 +86,33 @@ contract SessionSettlement is ISessionSettlement {
         _locked = false;
     }
 
+    modifier whenNotPaused() {
+        require(!paused, "Session: paused");
+        _;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Emergency pause
+    // ──────────────────────────────────────────────────────────────
+
+    function pause() external {
+        require(msg.sender == pauser, "Session: not pauser");
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external {
+        require(msg.sender == pauser, "Session: not pauser");
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  Open session
     // ──────────────────────────────────────────────────────────────
 
     /// @inheritdoc ISessionSettlement
-    function openSession(bytes32[3] calldata nodeIds) external payable override {
+    function openSession(bytes32[3] calldata nodeIds, uint256 maxPricePerByte) external payable override whenNotPaused {
         require(msg.value >= MINIMUM_DEPOSIT, "Session: deposit too low");
 
         require(
@@ -88,14 +124,27 @@ contract SessionSettlement is ISessionSettlement {
 
         // Snapshot node owners and exit price at open time.
         address[3] memory owners;
+        uint256 exitPrice;
         for (uint256 i; i < 3; ++i) {
             require(nodeRegistry.isNodeActive(nodeIds[i]), "Session: node not active");
             INodeRegistry.NodeInfo memory info = nodeRegistry.getNode(nodeIds[i]);
             owners[i] = info.owner;
+            if (i == 2) exitPrice = info.pricePerByte;
         }
 
-        INodeRegistry.NodeInfo memory exitNode = nodeRegistry.getNode(nodeIds[2]);
-        require(exitNode.pricePerByte > 0, "Session: zero price");
+        // Prevent quorum bypass: node owners must be distinct and client
+        // must not own any of the session nodes.
+        require(
+            owners[0] != owners[1] && owners[1] != owners[2] && owners[0] != owners[2],
+            "Session: duplicate owners"
+        );
+        require(
+            msg.sender != owners[0] && msg.sender != owners[1] && msg.sender != owners[2],
+            "Session: client is node owner"
+        );
+
+        require(exitPrice > 0, "Session: zero price");
+        require(exitPrice <= maxPricePerByte, "Session: price exceeds max");
 
         uint256 sessionId = nextSessionId++;
 
@@ -107,7 +156,7 @@ contract SessionSettlement is ISessionSettlement {
             startTime:       block.timestamp,
             settled:         false,
             cumulativeBytes: 0,
-            pricePerByte:    exitNode.pricePerByte
+            pricePerByte:    exitPrice
         });
 
         emit SessionOpened(sessionId, msg.sender, nodeIds, msg.value);
@@ -121,10 +170,14 @@ contract SessionSettlement is ISessionSettlement {
     function settleSession(
         uint256 sessionId,
         bytes calldata signedReceipt
-    ) external override {
+    ) external override nonReentrant whenNotPaused {
         SessionInfo storage s = _sessions[sessionId];
         require(s.client != address(0), "Session: unknown");
         require(!s.settled, "Session: already settled");
+        require(
+            msg.sender == s.client || _isSessionOwner(s, msg.sender),
+            "Session: not participant"
+        );
 
         (
             uint256 rSessionId,
@@ -135,6 +188,8 @@ contract SessionSettlement is ISessionSettlement {
         ) = abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes));
 
         require(rSessionId == sessionId, "Session: id mismatch");
+        require(timestamp >= s.startTime, "Session: receipt before start");
+        require(timestamp <= block.timestamp, "Session: future receipt");
 
         bytes32 structHash = EIP712Utils.receiptStructHash(rSessionId, cumulativeBytes, timestamp);
         bytes32 digest = EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
@@ -158,7 +213,7 @@ contract SessionSettlement is ISessionSettlement {
     function forceSettle(
         uint256 sessionId,
         bytes calldata signedReceipt
-    ) external override {
+    ) external override nonReentrant whenNotPaused {
         SessionInfo storage s = _sessions[sessionId];
         require(s.client != address(0), "Session: unknown");
         require(!s.settled, "Session: already settled");
@@ -183,6 +238,8 @@ contract SessionSettlement is ISessionSettlement {
             abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes));
 
         require(rSessionId == sessionId, "Session: id mismatch");
+        require(timestamp >= s.startTime, "Session: receipt before start");
+        require(timestamp <= block.timestamp, "Session: future receipt");
 
         bytes32 digest = EIP712Utils.hashTypedData(
             DOMAIN_SEPARATOR,

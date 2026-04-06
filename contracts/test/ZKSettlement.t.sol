@@ -35,7 +35,10 @@ contract ZKSettlementTest is Test {
         mockVerifier = new MockVerifier();
         zk = new ZKSettlement(address(mockVerifier));
         vm.deal(client, 10 ether);
-        zk.updateRegistryRoot(12345);
+        // Timelocked root update: propose → warp → execute.
+        zk.proposeRegistryRoot(12345);
+        vm.warp(block.timestamp + zk.ROOT_TIMELOCK() + 1);
+        zk.executeRegistryRoot(0);
     }
 
     /// @dev Build 13 public signals with nullifier and depositId bound.
@@ -74,45 +77,47 @@ contract ZKSettlementTest is Test {
         c = [uint256(0), uint256(0)];
     }
 
+    /// @dev Helper to make a deposit and return the deterministic depositId.
+    function _deposit(address depositor, uint256 amount) internal returns (bytes32) {
+        vm.prank(depositor);
+        return zk.deposit{value: amount}();
+    }
+
     // ── Deposit tests ────────────────────────────────────────────
 
     function test_deposit() public {
-        bytes32 depositId = keccak256("deposit-1");
-        vm.prank(client);
-        zk.deposit{value: 0.01 ether}(depositId);
+        bytes32 depositId = _deposit(client, 0.01 ether);
         assertEq(zk.deposits(depositId), 0.01 ether);
     }
 
     function test_deposit_too_low() public {
         vm.prank(client);
         vm.expectRevert("ZKSettlement: deposit too low");
-        zk.deposit{value: 0.0001 ether}(keccak256("low"));
+        zk.deposit{value: 0.0001 ether}();
     }
 
-    function test_deposit_duplicate() public {
-        bytes32 depositId = keccak256("dup");
-        vm.prank(client);
-        zk.deposit{value: 0.01 ether}(depositId);
-        vm.prank(client);
-        vm.expectRevert("ZKSettlement: duplicate deposit");
-        zk.deposit{value: 0.01 ether}(depositId);
+    function test_deposit_ids_unique() public {
+        bytes32 id1 = _deposit(client, 0.01 ether);
+        bytes32 id2 = _deposit(client, 0.01 ether);
+        assertTrue(id1 != id2);
+    }
+
+    function test_deposit_deterministic() public {
+        // depositCount starts at 0 for the first deposit.
+        bytes32 expected = keccak256(abi.encode(client, 0.01 ether, uint256(0)));
+        bytes32 actual = _deposit(client, 0.01 ether);
+        assertEq(actual, expected);
     }
 
     // ── Settlement tests ─────────────────────────────────────────
 
     function test_settle_with_valid_proof() public {
-        bytes32 depositId = keccak256("session-zk-1");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-1");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         uint256 totalPayment = 1000;
         uint256[13] memory pub = _pubSignals(totalPayment, nullifier, depositId);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
-
-        uint256 entryBefore = entryOp.balance;
-        uint256 exitBefore  = exitOp.balance;
 
         zk.settleWithProof(
             a, b, c, pub,
@@ -120,18 +125,29 @@ contract ZKSettlementTest is Test {
             payable(entryOp), payable(relayOp), payable(exitOp), payable(refundTo)
         );
 
-        assertEq(entryOp.balance - entryBefore, 250);
-        assertEq(exitOp.balance - exitBefore, 500);
+        // Pull-payment: amounts credited, not yet transferred.
+        assertEq(zk.pendingWithdrawals(entryOp), 250);
+        assertEq(zk.pendingWithdrawals(relayOp), 250);
+        assertEq(zk.pendingWithdrawals(exitOp), 500);
+        assertEq(zk.pendingWithdrawals(refundTo), 1 ether - totalPayment);
         assertEq(zk.deposits(depositId), 0);
         assertTrue(zk.nullifiers(nullifier));
+
+        // Withdraw and verify final balances.
+        uint256 entryBefore = entryOp.balance;
+        vm.prank(entryOp);
+        zk.withdraw();
+        assertEq(entryOp.balance - entryBefore, 250);
+
+        uint256 exitBefore = exitOp.balance;
+        vm.prank(exitOp);
+        zk.withdraw();
+        assertEq(exitOp.balance - exitBefore, 500);
     }
 
     function test_double_settle_reverts() public {
-        bytes32 depositId = keccak256("session-ds");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-ds");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
@@ -145,11 +161,8 @@ contract ZKSettlementTest is Test {
     }
 
     function test_invalid_proof_reverts() public {
-        bytes32 depositId = keccak256("session-inv");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-inv");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
         mockVerifier.setResult(false);
 
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
@@ -161,11 +174,8 @@ contract ZKSettlementTest is Test {
     }
 
     function test_wrong_domain_reverts() public {
-        bytes32 depositId = keccak256("session-wd");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-wd");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
         pub[0] = 99999; // Wrong domain separator
@@ -177,11 +187,8 @@ contract ZKSettlementTest is Test {
     }
 
     function test_stale_registry_root_reverts() public {
-        bytes32 depositId = keccak256("session-sr");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-sr");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
         pub[6] = 99999; // Wrong registry root
@@ -193,11 +200,8 @@ contract ZKSettlementTest is Test {
     }
 
     function test_payment_exceeds_deposit_reverts() public {
-        bytes32 depositId = keccak256("session-pe");
+        bytes32 depositId = _deposit(client, 0.001 ether);
         bytes32 nullifier = keccak256("null-pe");
-
-        vm.prank(client);
-        zk.deposit{value: 0.001 ether}(depositId);
 
         uint256[13] memory pub = _pubSignals(2 ether, nullifier, depositId);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
@@ -208,12 +212,9 @@ contract ZKSettlementTest is Test {
     }
 
     function test_nullifier_mismatch_reverts() public {
-        bytes32 depositId = keccak256("session-nm");
+        bytes32 depositId = _deposit(client, 1 ether);
         bytes32 nullifier = keccak256("null-nm");
         bytes32 wrongNull = keccak256("wrong-null");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
         (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) = _dummyProof();
@@ -225,12 +226,9 @@ contract ZKSettlementTest is Test {
     }
 
     function test_deposit_id_mismatch_reverts() public {
-        bytes32 depositId = keccak256("session-dm");
+        bytes32 depositId = _deposit(client, 1 ether);
+        bytes32 wrongDep  = _deposit(client, 1 ether); // different depositId
         bytes32 nullifier = keccak256("null-dm");
-        bytes32 wrongDep  = keccak256("wrong-dep");
-
-        vm.prank(client);
-        zk.deposit{value: 1 ether}(depositId);
 
         // pubSignals bind to depositId, but we pass wrongDep.
         uint256[13] memory pub = _pubSignals(100, nullifier, depositId);
@@ -244,13 +242,21 @@ contract ZKSettlementTest is Test {
     // ── Admin tests ──────────────────────────────────────────────
 
     function test_update_registry_root() public {
-        zk.updateRegistryRoot(67890);
+        zk.proposeRegistryRoot(67890);
+        vm.warp(block.timestamp + zk.ROOT_TIMELOCK() + 1);
+        zk.executeRegistryRoot(1); // proposalId 1 (0 was setUp)
         assertEq(zk.registryRoot(), 67890);
     }
 
     function test_update_registry_root_unauthorized() public {
         vm.prank(client);
         vm.expectRevert("ZKSettlement: not owner");
-        zk.updateRegistryRoot(99999);
+        zk.proposeRegistryRoot(99999);
+    }
+
+    function test_registry_root_timelock_enforced() public {
+        zk.proposeRegistryRoot(99999);
+        vm.expectRevert("ZKSettlement: timelock active");
+        zk.executeRegistryRoot(1);
     }
 }

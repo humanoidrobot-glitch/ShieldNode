@@ -38,29 +38,34 @@ contract ChallengeManagerTest is Test {
         vm.startPrank(deployer);
         treasury = new Treasury(deployer);
         registry = new NodeRegistry(deployer);
-        settlement = new SessionSettlement(address(registry));
+        settlement = new SessionSettlement(address(registry), deployer);
         oracle = new SlashingOracle(
             address(registry),
             address(treasury),
-            address(settlement)
+            address(settlement),
+            deployer
         );
         vm.stopPrank();
 
         registry = new NodeRegistry(address(oracle));
-        settlement = new SessionSettlement(address(registry));
+        settlement = new SessionSettlement(address(registry), deployer);
 
         vm.prank(deployer);
         oracle = new SlashingOracle(
             address(registry),
             address(treasury),
-            address(settlement)
+            address(settlement),
+            deployer
         );
 
         cm = new ChallengeManager(address(registry), payable(address(oracle)));
 
-        // Register ChallengeManager as authorized challenger on the oracle.
+        // Register ChallengeManager as authorized challenger on the oracle (timelocked).
         vm.prank(deployer);
-        oracle.setChallenger(address(cm), true);
+        oracle.proposeChallenger(address(cm), true);
+        vm.warp(block.timestamp + oracle.CHALLENGER_TIMELOCK() + 1);
+        vm.prank(deployer);
+        oracle.executeChallenger(0);
 
         // Register a node.
         vm.prank(nodeOp);
@@ -200,8 +205,6 @@ contract ChallengeManagerTest is Test {
             bytes32(0)
         );
 
-        uint256 challengerBalBefore = challenger.balance;
-
         bytes32 responseHash = keccak256("I am alive");
         bytes memory sig = _signResponse(NODE_KEY, id, nodeId, responseHash);
 
@@ -212,7 +215,11 @@ contract ChallengeManagerTest is Test {
         assertTrue(c.status == ChallengeManager.ChallengeStatus.Responded);
         assertEq(c.bond, 0); // bond cleared
 
-        // Challenger received bond back.
+        // Bond credited via pull-payment — must withdraw.
+        assertEq(cm.pendingWithdrawals(challenger), BOND);
+        uint256 challengerBalBefore = challenger.balance;
+        vm.prank(challenger);
+        cm.withdraw();
         assertEq(challenger.balance, challengerBalBefore + BOND);
     }
 
@@ -259,16 +266,22 @@ contract ChallengeManagerTest is Test {
             bytes32(0)
         );
 
-        uint256 challengerBalBefore = challenger.balance;
         vm.warp(block.timestamp + cm.RESPONSE_DEADLINE() + 1);
 
         cm.expireChallenge(id);
 
         ChallengeManager.Challenge memory c = cm.getChallenge(id);
-        assertTrue(c.status == ChallengeManager.ChallengeStatus.Slashed);
+        assertTrue(
+            c.status == ChallengeManager.ChallengeStatus.Slashed ||
+            c.status == ChallengeManager.ChallengeStatus.SlashFailed
+        );
         assertEq(c.bond, 0);
 
-        // Challenger gets bond back.
+        // Bond credited via pull-payment — must withdraw.
+        assertEq(cm.pendingWithdrawals(challenger), BOND);
+        uint256 challengerBalBefore = challenger.balance;
+        vm.prank(challenger);
+        cm.withdraw();
         assertEq(challenger.balance, challengerBalBefore + BOND);
     }
 

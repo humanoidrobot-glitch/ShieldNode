@@ -34,14 +34,15 @@ contract Deploy is Script {
         console.log("NodeRegistry deployed at:", address(registry));
 
         // 3. SessionSettlement
-        SessionSettlement settlement = new SessionSettlement(address(registry));
+        SessionSettlement settlement = new SessionSettlement(address(registry), deployer);
         console.log("SessionSettlement deployed at:", address(settlement));
 
         // 4. SlashingOracle
         SlashingOracle oracle = new SlashingOracle(
             address(registry),
             address(treasury),
-            address(settlement)
+            address(settlement),
+            deployer
         );
         console.log("SlashingOracle deployed at:", address(oracle));
         require(address(oracle) == predictedOracle, "Deploy: oracle address mismatch");

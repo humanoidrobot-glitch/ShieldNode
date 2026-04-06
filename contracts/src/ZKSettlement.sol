@@ -92,6 +92,25 @@ contract ZKSettlement {
     /// @notice Minimum time before a deposit can be refunded.
     uint256 public constant REFUND_TIMEOUT = 7 days;
 
+    /// @notice Pull-payment: credited amounts awaiting withdrawal.
+    mapping(address => uint256) public pendingWithdrawals;
+
+    /// @notice Auto-incrementing deposit counter for deterministic depositId generation.
+    uint256 public depositCount;
+
+    /// @dev Reentrancy guard.
+    bool private _locked;
+
+    /// @dev Timelocked registry root proposals.
+    struct RootProposal {
+        uint256 newRoot;
+        uint256 readyAt;
+        bool    executed;
+    }
+    mapping(uint256 => RootProposal) public rootProposals;
+    uint256 public nextRootProposalId;
+    uint256 public constant ROOT_TIMELOCK = 48 hours;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -108,6 +127,9 @@ contract ZKSettlement {
     );
 
     event RegistryRootUpdated(uint256 newRoot);
+    event RegistryRootProposed(uint256 indexed proposalId, uint256 newRoot, uint256 readyAt);
+
+    event DepositRefunded(bytes32 indexed depositId, address indexed depositor, uint256 amount);
 
     // ──────────────────────────────────────────────────────────────
     //  Constructor
@@ -123,14 +145,40 @@ contract ZKSettlement {
     }
 
     // ──────────────────────────────────────────────────────────────
+    //  Modifiers
+    // ──────────────────────────────────────────────────────────────
+
+    modifier nonReentrant() {
+        require(!_locked, "ZKSettlement: reentrant");
+        _locked = true;
+        _;
+        _locked = false;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Pull-payment withdrawal
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Withdraw credited settlement payments or refunds.
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "ZKSettlement: nothing to withdraw");
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "ZKSettlement: transfer failed");
+    }
+
+    // ──────────────────────────────────────────────────────────────
     //  Deposit
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Deposit ETH for a future ZK-settled session.
-    /// @param depositId A unique identifier (e.g., hash of session params).
-    ///        The depositor knows this; it is NOT revealed during settlement.
-    function deposit(bytes32 depositId) external payable {
+    /// @return depositId Deterministic identifier derived from sender, value, and counter.
+    ///         The depositor reads this from the DepositMade event or return value.
+    function deposit() external payable returns (bytes32 depositId) {
         require(msg.value >= MINIMUM_DEPOSIT, "ZKSettlement: deposit too low");
+
+        depositId = keccak256(abi.encode(msg.sender, msg.value, depositCount++));
         require(deposits[depositId] == 0, "ZKSettlement: duplicate deposit");
 
         deposits[depositId] = msg.value;
@@ -141,6 +189,7 @@ contract ZKSettlement {
     }
 
     /// @notice Refund a deposit after the timeout (e.g., proof became invalid).
+    ///         Credits pendingWithdrawals — call withdraw() to collect.
     function refundDeposit(bytes32 depositId) external {
         require(depositors[depositId] == msg.sender, "ZKSettlement: not depositor");
         require(
@@ -151,9 +200,9 @@ contract ZKSettlement {
         require(amount > 0, "ZKSettlement: no deposit");
 
         deposits[depositId] = 0;
+        pendingWithdrawals[msg.sender] += amount;
 
-        (bool ok, ) = msg.sender.call{value: amount}("");
-        require(ok, "ZKSettlement: refund failed");
+        emit DepositRefunded(depositId, msg.sender, amount);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -211,6 +260,19 @@ contract ZKSettlement {
         require(entryPay + relayPay + exitPay == totalPayment, "ZKSettlement: split mismatch");
         require(refund + totalPayment == depositAmount, "ZKSettlement: refund mismatch");
 
+        // Enforce payment split ratios on-chain as defense-in-depth
+        // in case the ZK circuit has a bug allowing arbitrary splits.
+        if (totalPayment > 0) {
+            require(
+                entryPay == (totalPayment * ENTRY_SHARE) / 100,
+                "ZKSettlement: entry share mismatch"
+            );
+            require(
+                relayPay == (totalPayment * RELAY_SHARE) / 100,
+                "ZKSettlement: relay share mismatch"
+            );
+        }
+
         // 7. Verify address commitments — prevents front-running.
         //    The circuit proves Poseidon(addr, amount) == commitment.
         //    On-chain we verify the caller-supplied addresses match the
@@ -232,26 +294,14 @@ contract ZKSettlement {
         nullifiers[nullifier] = true;
         deposits[depositId] = 0;
 
-        // 9. Interactions — distribute payments.
+        // 9. Credit payments (pull-payment pattern).
         //    Addresses are trusted because the circuit proves they match
         //    the commitment public signals. An attacker cannot substitute
         //    different addresses without invalidating the proof.
-        if (entryPay > 0) {
-            (bool ok, ) = entryAddr.call{value: entryPay}("");
-            require(ok, "ZKSettlement: entry payment failed");
-        }
-        if (relayPay > 0) {
-            (bool ok, ) = relayAddr.call{value: relayPay}("");
-            require(ok, "ZKSettlement: relay payment failed");
-        }
-        if (exitPay > 0) {
-            (bool ok, ) = exitAddr.call{value: exitPay}("");
-            require(ok, "ZKSettlement: exit payment failed");
-        }
-        if (refund > 0) {
-            (bool ok, ) = refundAddr.call{value: refund}("");
-            require(ok, "ZKSettlement: refund failed");
-        }
+        if (entryPay > 0) pendingWithdrawals[entryAddr] += entryPay;
+        if (relayPay > 0) pendingWithdrawals[relayAddr] += relayPay;
+        if (exitPay > 0)  pendingWithdrawals[exitAddr]  += exitPay;
+        if (refund > 0)   pendingWithdrawals[refundAddr] += refund;
 
         emit ZKSessionSettled(
             nullifier,
@@ -267,10 +317,28 @@ contract ZKSettlement {
     //  Admin (temporary — replace with on-chain registry read)
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Update the Merkle root of registered nodes.
-    function updateRegistryRoot(uint256 newRoot) external {
+    /// @notice Propose a new registry root (48h timelock).
+    function proposeRegistryRoot(uint256 newRoot) external returns (uint256 proposalId) {
         require(msg.sender == owner, "ZKSettlement: not owner");
-        registryRoot = newRoot;
-        emit RegistryRootUpdated(newRoot);
+        proposalId = nextRootProposalId++;
+        uint256 readyAt = block.timestamp + ROOT_TIMELOCK;
+        rootProposals[proposalId] = RootProposal({
+            newRoot:  newRoot,
+            readyAt:  readyAt,
+            executed: false
+        });
+        emit RegistryRootProposed(proposalId, newRoot, readyAt);
+    }
+
+    /// @notice Execute a timelocked registry root proposal.
+    function executeRegistryRoot(uint256 proposalId) external {
+        require(msg.sender == owner, "ZKSettlement: not owner");
+        RootProposal storage rp = rootProposals[proposalId];
+        require(rp.readyAt > 0, "ZKSettlement: unknown proposal");
+        require(!rp.executed, "ZKSettlement: already executed");
+        require(block.timestamp >= rp.readyAt, "ZKSettlement: timelock active");
+        rp.executed = true;
+        registryRoot = rp.newRoot;
+        emit RegistryRootUpdated(rp.newRoot);
     }
 }

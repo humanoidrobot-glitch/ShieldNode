@@ -40,7 +40,7 @@ contract StressTest is Test {
         vm.deal(exitOp,  100 ether);
 
         registry   = new NodeRegistry(oracle);
-        settlement = new SessionSettlement(address(registry));
+        settlement = new SessionSettlement(address(registry), address(this));
 
         _registerNode(entryOp, entryId, "entry-stress", "10.0.0.1:51820");
         _registerNode(relayOp, relayId, "relay-stress", "10.0.0.2:51820");
@@ -81,7 +81,7 @@ contract StressTest is Test {
             vm.deal(c, 1 ether);
             vm.prank(c);
             uint256 g = gasleft();
-            settlement.openSession{value: 0.01 ether}(nodeIds);
+            settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
             gasTotal += g - gasleft();
         }
         assertEq(settlement.nextSessionId(), NUM_SESSIONS);
@@ -99,7 +99,7 @@ contract StressTest is Test {
             vm.deal(c, 1 ether);
             vm.prank(c);
             uint256 g = gasleft();
-            settlement.openSession{value: 0.01 ether}(nodeIds);
+            settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
             openGas += g - gasleft();
         }
 
@@ -133,7 +133,7 @@ contract StressTest is Test {
             uint256 ck = 0xC000 + i + 1;
             vm.deal(c, 1 ether);
             vm.prank(c);
-            settlement.openSession{value: 0.01 ether}(nodeIds);
+            settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
 
             uint256 cb = 1000;
             totalBytes += cb;
@@ -161,7 +161,7 @@ contract StressTest is Test {
             address c = vm.addr(0xD000 + i + 1);
             vm.deal(c, 1 ether);
             vm.prank(c);
-            settlement.openSession{value: 0.01 ether}(nodeIds);
+            settlement.openSession{value: 0.01 ether}(nodeIds, type(uint256).max);
         }
 
         vm.warp(block.timestamp + 2 hours);

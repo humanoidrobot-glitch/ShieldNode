@@ -40,6 +40,14 @@ contract SlashingOracleTest is Test {
     string  constant ENDPOINT      = "192.168.1.1:51820";
     bytes32 constant UNKNOWN_NODE  = keccak256("non-existent-node");
 
+    // Extra node operators for session creation.
+    uint256 internal entryPk = 0xE001;
+    uint256 internal relayPk = 0xE002;
+    address internal entryAddr;
+    address internal relayAddr;
+    bytes32 constant ENTRY_ID = keccak256("entry-node");
+    bytes32 constant RELAY_ID = keccak256("relay-node");
+
     // EIP-712 constants — read from deployed contracts in setUp().
     bytes32 internal domainSep;
     bytes32 internal attestationDomainSep;
@@ -50,6 +58,8 @@ contract SlashingOracleTest is Test {
         clientAddr = vm.addr(clientPk);
         nodeAddr   = vm.addr(nodePk);
         challAddr  = vm.addr(challPk);
+        entryAddr  = vm.addr(entryPk);
+        relayAddr  = vm.addr(relayPk);
 
         vm.startPrank(deployer);
 
@@ -61,16 +71,19 @@ contract SlashingOracleTest is Test {
         address predictedOracle = vm.computeCreateAddress(deployer, nonce + 2);
 
         registry   = new NodeRegistry(predictedOracle);
-        settlement = new SessionSettlement(address(registry));
+        settlement = new SessionSettlement(address(registry), deployer);
         oracle     = new SlashingOracle(
             address(registry),
             address(treasury),
-            address(settlement)
+            address(settlement),
+            deployer
         );
         require(address(oracle) == predictedOracle, "oracle address mismatch");
 
-        // Authorise the challenger.
-        oracle.setChallenger(challAddr, true);
+        // Authorise the challenger (timelocked: propose → warp → execute).
+        oracle.proposeChallenger(challAddr, true);
+        vm.warp(block.timestamp + oracle.CHALLENGER_TIMELOCK() + 1);
+        oracle.executeChallenger(0);
 
         vm.stopPrank();
 
@@ -78,10 +91,23 @@ contract SlashingOracleTest is Test {
         vm.deal(nodeAddr, 10 ether);
         vm.deal(clientAddr, 10 ether);
         vm.deal(challAddr, 10 ether);
+        vm.deal(entryAddr, 10 ether);
+        vm.deal(relayAddr, 10 ether);
 
-        // Register a node as `nodeAddr` (using nodeAddr as the operator).
+        // Register nodes for 3-hop session.
+        vm.prank(entryAddr);
+        registry.register{value: 0.1 ether}(ENTRY_ID, keccak256("entry-pub"), "1.1.1.1:51820");
+        vm.prank(relayAddr);
+        registry.register{value: 0.1 ether}(RELAY_ID, keccak256("relay-pub"), "2.2.2.2:51820");
         vm.prank(nodeAddr);
         registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+
+        // Set exit price (NODE_ID as exit) and open a session for fraud tests.
+        vm.prank(nodeAddr);
+        registry.updatePricePerByte(NODE_ID, 1);
+        bytes32[3] memory sNodeIds = [ENTRY_ID, RELAY_ID, NODE_ID];
+        vm.prank(clientAddr);
+        settlement.openSession{value: 1 ether}(sNodeIds, type(uint256).max);
 
         // Read EIP-712 constants from the deployed contracts.
         domainSep = oracle.DOMAIN_SEPARATOR();
@@ -171,7 +197,7 @@ contract SlashingOracleTest is Test {
     // ════════════════════════════════════════════════════════════
 
     function test_bandwidthFraud_validEvidence() public {
-        bytes memory evidence = _buildFraudEvidence(42, 1000, 100, 2000, 200);
+        bytes memory evidence = _buildFraudEvidence(0, 1000, 100, 2000, 200);
 
         vm.prank(challAddr);
         oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.BandwidthFraud), evidence);
@@ -184,7 +210,7 @@ contract SlashingOracleTest is Test {
 
     function test_bandwidthFraud_sameBytes_reverts() public {
         // Two receipts with identical byte counts — not fraud.
-        bytes memory evidence = _buildFraudEvidence(42, 1000, 100, 1000, 200);
+        bytes memory evidence = _buildFraudEvidence(0, 1000, 100, 1000, 200);
 
         vm.prank(challAddr);
         vm.expectRevert(abi.encodeWithSelector(
@@ -194,34 +220,34 @@ contract SlashingOracleTest is Test {
     }
 
     function test_bandwidthFraud_wrongNodeSigner_reverts() public {
-        // Build evidence where node sigs come from a different key.
+        // Build evidence where node sigs come from a different key (not in session).
         uint256 wrongPk = 0xDEAD;
-        bytes memory cSig1 = _signReceipt(clientPk, 42, 1000, 100);
-        bytes memory nSig1 = _signReceipt(wrongPk, 42, 1000, 100);
-        bytes memory cSig2 = _signReceipt(clientPk, 42, 2000, 200);
-        bytes memory nSig2 = _signReceipt(wrongPk, 42, 2000, 200);
+        bytes memory cSig1 = _signReceipt(clientPk, 0, 1000, 100);
+        bytes memory nSig1 = _signReceipt(wrongPk, 0, 1000, 100);
+        bytes memory cSig2 = _signReceipt(clientPk, 0, 2000, 200);
+        bytes memory nSig2 = _signReceipt(wrongPk, 0, 2000, 200);
 
         SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(1000, 100, cSig1, nSig1);
         SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(2000, 200, cSig2, nSig2);
-        bytes memory evidence = abi.encode(uint256(42), r1, r2);
+        bytes memory evidence = abi.encode(uint256(0), r1, r2);
 
         vm.prank(challAddr);
         vm.expectRevert(abi.encodeWithSelector(
-            SlashingOracle.InvalidEvidence.selector, "node signer is not accused node owner"
+            SlashingOracle.InvalidEvidence.selector, "node signer not in session"
         ));
         oracle.proposeSlash(NODE_ID, uint8(ISlashingOracle.SlashReason.BandwidthFraud), evidence);
     }
 
     function test_bandwidthFraud_differentClients_reverts() public {
         uint256 otherClientPk = 0xF00D;
-        bytes memory cSig1 = _signReceipt(clientPk, 42, 1000, 100);
-        bytes memory nSig1 = _signReceipt(nodePk, 42, 1000, 100);
-        bytes memory cSig2 = _signReceipt(otherClientPk, 42, 2000, 200);
-        bytes memory nSig2 = _signReceipt(nodePk, 42, 2000, 200);
+        bytes memory cSig1 = _signReceipt(clientPk, 0, 1000, 100);
+        bytes memory nSig1 = _signReceipt(nodePk, 0, 1000, 100);
+        bytes memory cSig2 = _signReceipt(otherClientPk, 0, 2000, 200);
+        bytes memory nSig2 = _signReceipt(nodePk, 0, 2000, 200);
 
         SlashingOracle.FraudReceipt memory r1 = SlashingOracle.FraudReceipt(1000, 100, cSig1, nSig1);
         SlashingOracle.FraudReceipt memory r2 = SlashingOracle.FraudReceipt(2000, 200, cSig2, nSig2);
-        bytes memory evidence = abi.encode(uint256(42), r1, r2);
+        bytes memory evidence = abi.encode(uint256(0), r1, r2);
 
         vm.prank(challAddr);
         vm.expectRevert(abi.encodeWithSelector(
@@ -345,9 +371,6 @@ contract SlashingOracleTest is Test {
         INodeRegistry.NodeInfo memory before_ = registry.getNode(NODE_ID);
         uint256 expectedSlash = (before_.stake * 10) / 100; // 10%
 
-        uint256 challBefore = challAddr.balance;
-        uint256 treasuryBefore = address(treasury).balance;
-
         bytes memory evidence = _buildAttestation(NODE_ID, block.timestamp, keccak256("first"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);
 
@@ -355,8 +378,19 @@ contract SlashingOracleTest is Test {
         assertEq(after_.stake, before_.stake - expectedSlash);
         assertEq(after_.slashCount, 1);
 
-        // 50/50 split.
+        // Pull-payment: 50/50 split credited to pendingWithdrawals.
+        assertEq(oracle.pendingWithdrawals(challAddr), expectedSlash / 2);
+        assertEq(oracle.pendingWithdrawals(address(treasury)), expectedSlash - expectedSlash / 2);
+
+        // Withdraw and verify.
+        uint256 challBefore = challAddr.balance;
+        vm.prank(challAddr);
+        oracle.withdraw();
         assertEq(challAddr.balance - challBefore, expectedSlash / 2);
+
+        uint256 treasuryBefore = address(treasury).balance;
+        vm.prank(address(treasury));
+        oracle.withdraw();
         assertEq(address(treasury).balance - treasuryBefore, expectedSlash - expectedSlash / 2);
     }
 
@@ -368,8 +402,8 @@ contract SlashingOracleTest is Test {
         INodeRegistry.NodeInfo memory mid = registry.getNode(NODE_ID);
         uint256 expectedSlash = (mid.stake * 25) / 100; // 25%
 
-        // Second slash.
-        vm.warp(block.timestamp + 1); // new timestamp for attestation
+        // Second slash — warp past slash cooldown.
+        vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
         bytes memory ev2 = _buildAttestation(NODE_ID, block.timestamp, keccak256("second"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.SelectiveDenial), ev2);
 
@@ -383,13 +417,13 @@ contract SlashingOracleTest is Test {
         bytes memory ev1 = _buildAttestation(NODE_ID, block.timestamp, keccak256("first"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), ev1);
 
-        // Second slash (25%).
-        vm.warp(block.timestamp + 1);
+        // Second slash (25%) — warp past slash cooldown.
+        vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
         bytes memory ev2 = _buildAttestation(NODE_ID, block.timestamp, keccak256("second"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.SelectiveDenial), ev2);
 
-        // Third slash (100% + ban) — use attestation to test all three paths.
-        vm.warp(block.timestamp + 1);
+        // Third slash (100% + ban) — warp past slash cooldown.
+        vm.warp(block.timestamp + oracle.GRACE_PERIOD() + 1);
         bytes memory ev3 = _buildAttestation(NODE_ID, block.timestamp, keccak256("third"));
         _proposeAndExecute(NODE_ID, uint8(ISlashingOracle.SlashReason.ProvableLogging), ev3);
 
@@ -404,16 +438,33 @@ contract SlashingOracleTest is Test {
     //  Admin tests
     // ════════════════════════════════════════════════════════════
 
-    function test_setChallenger_onlyOwner() public {
+    function test_proposeChallenger_onlyOwner() public {
         vm.prank(rando);
         vm.expectRevert(SlashingOracle.NotOwner.selector);
-        oracle.setChallenger(rando, true);
+        oracle.proposeChallenger(rando, true);
     }
 
-    function test_setChallenger_works() public {
+    function test_proposeChallenger_works() public {
         vm.prank(deployer);
-        oracle.setChallenger(rando, true);
+        oracle.proposeChallenger(rando, true);
+        vm.warp(block.timestamp + oracle.CHALLENGER_TIMELOCK() + 1);
+        vm.prank(deployer);
+        oracle.executeChallenger(1); // proposalId 1 (0 was setUp)
         assertTrue(oracle.challengers(rando));
+    }
+
+    function test_challenger_timelock_enforced() public {
+        vm.prank(deployer);
+        oracle.proposeChallenger(rando, true);
+        vm.prank(deployer);
+        vm.expectRevert("SlashingOracle: timelock active");
+        oracle.executeChallenger(1);
+    }
+
+    function test_emergencyRevokeChallenger() public {
+        vm.prank(deployer);
+        oracle.emergencyRevokeChallenger(challAddr);
+        assertFalse(oracle.challengers(challAddr));
     }
 
     // ════════════════════════════════════════════════════════════

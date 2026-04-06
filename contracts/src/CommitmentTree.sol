@@ -43,7 +43,7 @@ contract CommitmentTree {
     bytes32[1024] internal nodes;
 
     /// @notice Whether each leaf slot is a real node (true) or dummy (false).
-    bool[512] public isReal;
+    bool[512] internal isReal;
 
     /// @notice Total real node commitments in the tree.
     uint256 public realCount;
@@ -54,8 +54,11 @@ contract CommitmentTree {
     /// @notice Current Merkle root.
     bytes32 public root;
 
-    /// @notice Whether the tree has been initialized with dummies.
+    /// @notice Whether the tree has been fully initialized with dummies.
     bool public initialized;
+
+    /// @notice Number of leaf slots initialized so far (for batched init).
+    uint256 public initProgress;
 
     /// @notice Whether the fork threshold has been reached.
     bool public forkReady;
@@ -81,6 +84,7 @@ contract CommitmentTree {
     error TreeFull();
     error CommitmentNotFound();
     error ZeroCommitment();
+    error DuplicateCommitment();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -105,32 +109,41 @@ contract CommitmentTree {
     //  Initialize with dummies
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Fill all empty slots with dummy commitments and build the
-    ///         full internal node tree.
-    ///         Dummy commitments are keccak256(abi.encode("dummy", index, salt))
-    ///         where salt is provided by the deployer. In production, salt
-    ///         should come from a VDF or commit-reveal scheme so even the
-    ///         deployer can't later prove which were dummies.
-    /// @param salt Random salt for dummy generation.
-    function initialize(bytes32 salt) external onlyOwner {
+    /// @notice Fill leaf slots with dummy commitments in batches to avoid
+    ///         exceeding the block gas limit. Call repeatedly until
+    ///         `initialized` is true.
+    ///
+    ///         Dummy commitments are keccak256(abi.encode("dummy", index, salt)).
+    ///         In production, salt should come from a VDF or commit-reveal
+    ///         scheme so even the deployer can't later prove which were dummies.
+    /// @param salt       Random salt for dummy generation.
+    /// @param batchSize  Number of leaves to fill in this call.
+    function initialize(bytes32 salt, uint256 batchSize) external onlyOwner {
         if (initialized) revert AlreadyInitialized();
+        require(batchSize > 0, "CommitmentTree: zero batch");
+
+        uint256 start = initProgress;
+        uint256 end = start + batchSize;
+        if (end > TREE_SIZE) end = TREE_SIZE;
 
         // Fill leaves (1-indexed at TREE_SIZE .. 2*TREE_SIZE-1).
-        for (uint256 i; i < TREE_SIZE; ++i) {
+        for (uint256 i = start; i < end; ++i) {
             bytes32 leaf = keccak256(abi.encode("dummy", i, salt));
             nodes[TREE_SIZE + i] = leaf;
             dummyCount++;
         }
 
-        // Build internal nodes bottom-up.
-        for (uint256 idx = TREE_SIZE - 1; idx >= 1; --idx) {
-            nodes[idx] = keccak256(abi.encodePacked(nodes[2 * idx], nodes[2 * idx + 1]));
+        initProgress = end;
+
+        // Once all leaves are written, build internal nodes and finalize.
+        if (end == TREE_SIZE) {
+            for (uint256 idx = TREE_SIZE - 1; idx >= 1; --idx) {
+                nodes[idx] = keccak256(abi.encodePacked(nodes[2 * idx], nodes[2 * idx + 1]));
+            }
+            initialized = true;
+            root = nodes[1];
+            emit TreeInitialized(dummyCount, root);
         }
-
-        initialized = true;
-        root = nodes[1];
-
-        emit TreeInitialized(dummyCount, root);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -141,6 +154,7 @@ contract CommitmentTree {
     /// @param commitment The node's Poseidon commitment (from NodeRegistry).
     function insertReal(bytes32 commitment) external onlyOwner {
         if (commitment == bytes32(0)) revert ZeroCommitment();
+        if (commitmentIndex[commitment] != 0) revert DuplicateCommitment();
 
         // Find the next dummy slot.
         uint256 slot = _findDummySlot();
@@ -195,8 +209,9 @@ contract CommitmentTree {
     //  Views
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Read a leaf by its 0-based index.
-    function getLeaf(uint256 index) external view returns (bytes32) {
+    /// @notice Read a leaf by its 0-based index. Restricted to owner to
+    ///         prevent enumeration of real vs dummy slots.
+    function getLeaf(uint256 index) external view onlyOwner returns (bytes32) {
         return nodes[TREE_SIZE + index];
     }
 
@@ -205,11 +220,12 @@ contract CommitmentTree {
     }
 
     /// @notice Get the Merkle proof for a leaf at the given 0-based index.
-    ///         Reads siblings directly from stored internal nodes — O(log n).
+    ///         Restricted to owner to prevent enumeration.
     /// @return siblings The sibling hashes along the path from leaf to root.
     function getMerkleProof(uint256 index)
         external
         view
+        onlyOwner
         returns (bytes32[9] memory siblings)
     {
         uint256 idx = TREE_SIZE + index;

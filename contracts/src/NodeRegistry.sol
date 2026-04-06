@@ -51,9 +51,17 @@ contract NodeRegistry is INodeRegistry {
     /// @dev Permanent ban — survives withdrawStake.
     mapping(bytes32 => bool) public permanentBan;
 
+    /// @dev Owner-level slash count — prevents re-registering with new nodeId
+    ///      to reset progressive penalties.
+    mapping(address => uint256) public permanentSlashCountByOwner;
+
     /// @dev Ordered list of every node ID that has been registered (including
     ///      deregistered ones; filtering is done at read time).
     bytes32[] private _allNodeIds;
+
+    /// @dev Tracks whether a nodeId has ever been added to _allNodeIds,
+    ///      preventing duplicate entries on re-registration.
+    mapping(bytes32 => bool) private _everRegistered;
 
     // ──────────────────────────────────────────────────────────────
     //  Constructor
@@ -93,6 +101,7 @@ contract NodeRegistry is INodeRegistry {
     ) external payable override {
         require(_nodes[nodeId].owner == address(0), "NodeRegistry: already registered");
         require(!permanentBan[nodeId], "NodeRegistry: permanently banned");
+        require(permanentSlashCountByOwner[msg.sender] < 3, "NodeRegistry: owner permanently banned");
         require(msg.value >= MINIMUM_STAKE, "NodeRegistry: insufficient stake");
         require(nodeId != bytes32(0), "NodeRegistry: zero nodeId");
         require(publicKey != bytes32(0), "NodeRegistry: zero publicKey");
@@ -111,7 +120,10 @@ contract NodeRegistry is INodeRegistry {
             commitment:    bytes32(0)
         });
 
-        _allNodeIds.push(nodeId);
+        if (!_everRegistered[nodeId]) {
+            _everRegistered[nodeId] = true;
+            _allNodeIds.push(nodeId);
+        }
 
         emit NodeRegistered(nodeId, msg.sender, publicKey, endpoint, msg.value);
     }
@@ -274,6 +286,7 @@ contract NodeRegistry is INodeRegistry {
         node.stake -= actual;
         node.slashCount += 1;
         permanentSlashCount[nodeId] = node.slashCount;
+        permanentSlashCountByOwner[node.owner] += 1;
 
         emit StakeUpdated(nodeId, node.stake);
 

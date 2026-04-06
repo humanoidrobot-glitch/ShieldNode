@@ -53,8 +53,9 @@ interface ISessionSettlement {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Open a 3-hop VPN session.
-    /// @param nodeIds Entry, relay, and exit node IDs (in order).
-    function openSession(bytes32[3] calldata nodeIds) external payable;
+    /// @param nodeIds         Entry, relay, and exit node IDs (in order).
+    /// @param maxPricePerByte Maximum acceptable price per byte (prevents front-running).
+    function openSession(bytes32[3] calldata nodeIds, uint256 maxPricePerByte) external payable;
 
     /// @notice Cooperatively settle a session with a co-signed bandwidth receipt.
     /// @param sessionId     The session to settle.
