@@ -242,6 +242,9 @@ contract SlashingOracle is ISlashingOracle {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Propose adding or removing an authorised challenger (48h timelock).
+    /// @param challenger Address of the challenger to add or remove.
+    /// @param authorised True to authorise, false to revoke.
+    /// @return proposalId The ID of the created timelock proposal.
     function proposeChallenger(address challenger, bool authorised) external onlyOwner returns (uint256 proposalId) {
         proposalId = nextChallengerProposalId++;
         uint256 readyAt = block.timestamp + CHALLENGER_TIMELOCK;
@@ -255,6 +258,7 @@ contract SlashingOracle is ISlashingOracle {
     }
 
     /// @notice Execute a timelocked challenger proposal.
+    /// @param proposalId The ID of the challenger proposal to execute.
     function executeChallenger(uint256 proposalId) external onlyOwner {
         ChallengerProposal storage cp = challengerProposals[proposalId];
         require(cp.readyAt > 0, "SlashingOracle: unknown proposal");
@@ -266,6 +270,7 @@ contract SlashingOracle is ISlashingOracle {
     }
 
     /// @notice Emergency revocation — instant, safe direction only (remove, not add).
+    /// @param challenger Address of the challenger to immediately revoke.
     function emergencyRevokeChallenger(address challenger) external onlyOwner {
         require(challengers[challenger], "SlashingOracle: not a challenger");
         challengers[challenger] = false;
@@ -401,6 +406,7 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Expire a stale proposal that was never executed within
     ///         PROPOSAL_EXPIRY. Decrements pendingSlashCount so the node
     ///         can withdraw its stake. Anyone can call.
+    /// @param proposalId The ID of the expired proposal to clean up.
     function expireProposal(uint256 proposalId) external {
         Proposal storage p = proposals[proposalId];
         if (p.createdAt == 0) revert UnknownProposal();
@@ -446,6 +452,8 @@ contract SlashingOracle is ISlashingOracle {
     ///      uint256 bytes2,  uint256 ts2,  bytes clientSig2, bytes nodeSig2
     ///  )
     ///  ```
+    /// @param nodeId   The accused node's identifier.
+    /// @param evidence ABI-encoded pair of conflicting dual-signed receipts.
     function _verifyBandwidthFraud(
         bytes32 nodeId,
         bytes calldata evidence
@@ -469,6 +477,10 @@ contract SlashingOracle is ISlashingOracle {
     ///      and confirm the node signer was a session participant.
     ///      Uses session-snapshotted owners (not current registry owner) so
     ///      evidence remains valid even after the node deregisters/re-registers.
+    /// @param nodeId    The accused node's identifier.
+    /// @param sessionId The session both receipts must belong to.
+    /// @param r1        First dual-signed receipt.
+    /// @param r2        Second dual-signed receipt with divergent byte count.
     function _verifyFraudSigners(
         bytes32 nodeId,
         uint256 sessionId,
@@ -513,6 +525,9 @@ contract SlashingOracle is ISlashingOracle {
     ///      bytes   challengerSig
     ///  )
     ///  ```
+    /// @param nodeId              The accused node's identifier.
+    /// @param evidence            ABI-encoded attestation with challenger signature.
+    /// @param expectedChallenger  Address that must have signed the attestation.
     function _verifyChallengerAttestation(
         bytes32 nodeId,
         bytes calldata evidence,
@@ -556,6 +571,10 @@ contract SlashingOracle is ISlashingOracle {
     // ──────────────────────────────────────────────────────────────
 
     /// @dev Compute the EIP-712 digest for a BandwidthReceipt.
+    /// @param sessionId       The session identifier.
+    /// @param cumulativeBytes Total bytes reported in the receipt.
+    /// @param timestamp       Timestamp of the receipt.
+    /// @return The EIP-712 typed data hash ready for ecrecover.
     function _receiptDigest(
         uint256 sessionId,
         uint256 cumulativeBytes,

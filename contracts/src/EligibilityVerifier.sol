@@ -143,8 +143,8 @@ contract EligibilityVerifier {
     /// @param proof_a Groth16 proof point A.
     /// @param proof_b Groth16 proof point B.
     /// @param proof_c Groth16 proof point C.
-    /// @param pubSignals The 5 public inputs (registryRoot, minStake,
-    ///        maxSlashCount, minUptimeScaled, nullifier).
+    /// @param pubSignals The 6 public inputs: registryRoot, minStake,
+    ///        maxSlashCount, minUptimeScaled, epoch, nullifier.
     function verifyEligibility(
         uint256[2] calldata proof_a,
         uint256[2][2] calldata proof_b,

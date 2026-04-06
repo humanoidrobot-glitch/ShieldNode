@@ -190,6 +190,7 @@ contract ZKSettlement {
 
     /// @notice Refund a deposit after the timeout (e.g., proof became invalid).
     ///         Credits pendingWithdrawals — call withdraw() to collect.
+    /// @param depositId The identifier of the deposit to refund.
     function refundDeposit(bytes32 depositId) external {
         require(depositors[depositId] == msg.sender, "ZKSettlement: not depositor");
         require(
@@ -212,6 +213,16 @@ contract ZKSettlement {
     /// @notice Settle a session using a Groth16 ZK proof.
     ///         The proof binds nullifier, depositId, and address commitments
     ///         so that no replay, deposit swap, or address front-running is possible.
+    /// @param proof_a    Groth16 proof point A.
+    /// @param proof_b    Groth16 proof point B.
+    /// @param proof_c    Groth16 proof point C.
+    /// @param pubSignals The 13 public signals (9 inputs + 4 output amounts).
+    /// @param nullifier  Unique nullifier preventing double-settlement.
+    /// @param depositId  The deposit to consume.
+    /// @param entryAddr  Payment address for the entry node.
+    /// @param relayAddr  Payment address for the relay node.
+    /// @param exitAddr   Payment address for the exit node.
+    /// @param refundAddr Address to receive the unused deposit remainder.
     function settleWithProof(
         uint256[2] calldata proof_a,
         uint256[2][2] calldata proof_b,
@@ -318,6 +329,8 @@ contract ZKSettlement {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Propose a new registry root (48h timelock).
+    /// @param newRoot The new Merkle root value to propose.
+    /// @return proposalId The ID of the created timelock proposal.
     function proposeRegistryRoot(uint256 newRoot) external returns (uint256 proposalId) {
         require(msg.sender == owner, "ZKSettlement: not owner");
         proposalId = nextRootProposalId++;
@@ -331,6 +344,7 @@ contract ZKSettlement {
     }
 
     /// @notice Execute a timelocked registry root proposal.
+    /// @param proposalId The ID of the root proposal to execute.
     function executeRegistryRoot(uint256 proposalId) external {
         require(msg.sender == owner, "ZKSettlement: not owner");
         RootProposal storage rp = rootProposals[proposalId];

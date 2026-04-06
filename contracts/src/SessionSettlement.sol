@@ -228,6 +228,11 @@ contract SessionSettlement is ISessionSettlement {
     }
 
     /// @dev Decode, verify 2-of-3 sigs, and settle with force cap. Extracted to avoid stack-too-deep.
+    /// @param sessionId The session to force-settle.
+    /// @param s Storage reference to the session info.
+    /// @param signedReceipt ABI-encoded receipt with two node signatures.
+    /// @return cumBytes Cumulative bytes from the receipt.
+    /// @return actualPaid Actual ETH distributed to nodes.
     function _verifyAndSettleForce(
         uint256 sessionId,
         SessionInfo storage s,
@@ -287,6 +292,10 @@ contract SessionSettlement is ISessionSettlement {
     // ──────────────────────────────────────────────────────────────
 
     /// @dev Settle a session: credit node payments and client refund.
+    /// @param sessionId The session to settle.
+    /// @param s Storage reference to the session info.
+    /// @param cumulativeBytes Total bytes consumed in the session.
+    /// @param cap Maximum ETH that may be distributed to nodes.
     /// @return totalPaid The actual amount distributed to nodes.
     function _settle(
         uint256 sessionId,
@@ -320,6 +329,9 @@ contract SessionSettlement is ISessionSettlement {
     }
 
     /// @dev Check if an address is one of the snapshotted session node owners.
+    /// @param s Storage reference to the session info.
+    /// @param addr The address to check.
+    /// @return True if addr matches any of the three node owners.
     function _isSessionOwner(SessionInfo storage s, address addr) internal view returns (bool) {
         return addr == s.nodeOwners[0] || addr == s.nodeOwners[1] || addr == s.nodeOwners[2];
     }

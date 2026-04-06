@@ -187,6 +187,7 @@ contract ChallengeManager {
     /// @param nodeId The node to challenge.
     /// @param challengeType The type of challenge.
     /// @param challengeData Hash of the challenge-specific payload.
+    /// @return challengeId The ID of the newly created challenge.
     function issueChallenge(
         bytes32 nodeId,
         ChallengeType challengeType,
@@ -302,6 +303,7 @@ contract ChallengeManager {
 
     /// @notice Retry a failed slash proposal. Only callable on challenges
     ///         in SlashFailed status (oracle was unavailable at expire time).
+    /// @param challengeId The ID of the SlashFailed challenge to retry.
     function retrySlash(uint256 challengeId) external {
         Challenge storage c = challenges[challengeId];
         if (c.issuedAt == 0) revert ChallengeNotFound();
@@ -332,16 +334,25 @@ contract ChallengeManager {
     //  Views
     // ──────────────────────────────────────────────────────────────
 
+    /// @notice Return the full Challenge struct for a given ID.
+    /// @param challengeId The challenge to look up.
+    /// @return The Challenge struct.
     function getChallenge(uint256 challengeId) external view returns (Challenge memory) {
         return challenges[challengeId];
     }
 
+    /// @notice Check whether an active challenge has passed its deadline.
+    /// @param challengeId The challenge to check.
+    /// @return True if the challenge is active and past its deadline.
     function isExpired(uint256 challengeId) external view returns (bool) {
         Challenge storage c = challenges[challengeId];
         return c.status == ChallengeStatus.Active && block.timestamp > c.deadline;
     }
 
     /// @notice Check if a challenger can issue a new challenge to a node.
+    /// @param nodeId      The target node.
+    /// @param _challenger The prospective challenger address.
+    /// @return True if the node is active and the cooldown has elapsed.
     function canChallenge(bytes32 nodeId, address _challenger) external view returns (bool) {
         if (!registry.isNodeActive(nodeId)) return false;
         return block.timestamp >= lastChallenged[nodeId][_challenger] + CHALLENGE_COOLDOWN;

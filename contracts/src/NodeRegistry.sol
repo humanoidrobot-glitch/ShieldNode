@@ -216,6 +216,7 @@ contract NodeRegistry is INodeRegistry {
     }
 
     /// @notice Add more stake to an active node without deregistering.
+    /// @param nodeId The node to top up.
     function topUpStake(bytes32 nodeId) external payable onlyNodeOwner(nodeId) {
         require(_nodes[nodeId].isActive, "NodeRegistry: not active");
         require(msg.value > 0, "NodeRegistry: zero top-up");

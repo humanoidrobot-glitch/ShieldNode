@@ -79,6 +79,9 @@ contract ExecutionTraceVerifier {
     /// @notice Verify a full execution trace proof.
     /// @param seal The RISC Zero proof.
     /// @param journal The public outputs (forwarding outputs + trace metadata).
+    /// @return nextHop The proven routing destination.
+    /// @return payloadHash SHA-256 of the forwarded payload.
+    /// @return inputHash SHA-256 of the encrypted input packet.
     function verifyExecutionTrace(
         bytes calldata seal,
         bytes calldata journal

@@ -116,6 +116,7 @@ contract CommitmentTree {
     }
 
     /// @notice Transfer ownership (e.g., to NodeRegistry after deployment).
+    /// @param newOwner The address that will become the new owner.
     function transferOwnership(address newOwner) external onlyOwner {
         require(newOwner != address(0), "CommitmentTree: zero owner");
         owner = newOwner;
@@ -170,6 +171,7 @@ contract CommitmentTree {
     /// @param commitment The node's Poseidon commitment.
     /// @return proposalId The ID of the created proposal.
     function proposeInsert(bytes32 commitment) external onlyOwner returns (uint256 proposalId) {
+        require(initialized, "CommitmentTree: not initialized");
         if (commitment == bytes32(0)) revert ZeroCommitment();
         proposalId = nextProposalId++;
         uint256 readyAt = block.timestamp + COMMITMENT_TIMELOCK;
@@ -188,6 +190,7 @@ contract CommitmentTree {
     /// @param salt Salt for the replacement dummy.
     /// @return proposalId The ID of the created proposal.
     function proposeRemove(bytes32 commitment, bytes32 salt) external onlyOwner returns (uint256 proposalId) {
+        require(initialized, "CommitmentTree: not initialized");
         proposalId = nextProposalId++;
         uint256 readyAt = block.timestamp + COMMITMENT_TIMELOCK;
         commitmentProposals[proposalId] = CommitmentProposal({
@@ -217,6 +220,7 @@ contract CommitmentTree {
     }
 
     /// @dev Replace a dummy slot with a real node commitment.
+    /// @param commitment The node's Poseidon commitment to insert.
     function _insertReal(bytes32 commitment) internal {
         if (commitmentIndex[commitment] != 0) revert DuplicateCommitment();
 
@@ -245,6 +249,8 @@ contract CommitmentTree {
     }
 
     /// @dev Replace a real node's commitment with a fresh dummy.
+    /// @param commitment The commitment to remove from the tree.
+    /// @param salt        Salt used to generate the replacement dummy.
     function _removeReal(bytes32 commitment, bytes32 salt) internal {
         uint256 raw = commitmentIndex[commitment];
         if (raw == 0) revert CommitmentNotFound();
@@ -269,10 +275,14 @@ contract CommitmentTree {
 
     /// @notice Read a leaf by its 0-based index. Restricted to owner to
     ///         prevent enumeration of real vs dummy slots.
+    /// @param index The 0-based leaf index.
+    /// @return The leaf commitment at the given index.
     function getLeaf(uint256 index) external view onlyOwner returns (bytes32) {
         return nodes[TREE_SIZE + index];
     }
 
+    /// @notice Return the current Merkle root of the commitment tree.
+    /// @return The current root hash.
     function getRoot() external view returns (bytes32) {
         return root;
     }

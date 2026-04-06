@@ -178,6 +178,7 @@ contract Treasury {
 
     /// @notice Cancel a queued withdrawal during the timelock period.
     ///         Callable by either the owner or the guardian.
+    /// @param withdrawalId The withdrawal to cancel.
     function cancelWithdrawal(uint256 withdrawalId) external {
         require(
             msg.sender == owner || msg.sender == guardian,
@@ -210,6 +211,8 @@ contract Treasury {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Propose a new guardian (48h timelock).
+    /// @param _guardian Address of the proposed new guardian.
+    /// @return proposalId The ID of the created proposal.
     function proposeGuardian(address _guardian) external onlyOwner returns (uint256 proposalId) {
         proposalId = nextGuardianProposalId++;
         uint256 readyAt = block.timestamp + TIMELOCK_DURATION;
@@ -222,6 +225,7 @@ contract Treasury {
     }
 
     /// @notice Execute a timelocked guardian proposal.
+    /// @param proposalId The guardian proposal to execute.
     function executeGuardian(uint256 proposalId) external onlyOwner {
         GuardianProposal storage gp = guardianProposals[proposalId];
         require(gp.readyAt > 0, "Treasury: unknown proposal");

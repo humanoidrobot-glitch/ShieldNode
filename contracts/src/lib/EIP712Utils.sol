@@ -19,6 +19,7 @@ library EIP712Utils {
 
     /// @notice Compute the EIP-712 domain separator for a ShieldNode contract.
     /// @param contractAddr The verifyingContract address (typically address(this)).
+    /// @return The EIP-712 domain separator.
     function computeDomainSeparator(address contractAddr) internal view returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -34,6 +35,10 @@ library EIP712Utils {
     }
 
     /// @notice Compute the EIP-712 struct hash for a bandwidth receipt.
+    /// @param sessionId The session identifier.
+    /// @param cumulativeBytes Total bytes transferred in the session so far.
+    /// @param timestamp The receipt timestamp.
+    /// @return The EIP-712 struct hash of the bandwidth receipt.
     function receiptStructHash(
         uint256 sessionId,
         uint256 cumulativeBytes,
@@ -45,6 +50,9 @@ library EIP712Utils {
     }
 
     /// @notice Compute the full EIP-712 digest.
+    /// @param domainSeparator The EIP-712 domain separator.
+    /// @param structHash The EIP-712 struct hash.
+    /// @return The final EIP-712 typed data hash.
     function hashTypedData(
         bytes32 domainSeparator,
         bytes32 structHash
@@ -59,6 +67,7 @@ library EIP712Utils {
     /// @notice Recover the signer of an ECDSA signature.
     /// @param digest The EIP-712 digest that was signed.
     /// @param sig    The 65-byte signature (r || s || v).
+    /// @return The recovered signer address.
     function recoverSigner(
         bytes32 digest,
         bytes memory sig

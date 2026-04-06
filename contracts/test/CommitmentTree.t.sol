@@ -123,6 +123,19 @@ contract CommitmentTreeTest is Test {
         tree.executeProposal(id);
     }
 
+    // ── initialization window guard ────────────────────────────
+
+    function test_propose_insert_before_init_reverts() public {
+        // Tree not yet initialized — proposals must be blocked.
+        vm.expectRevert("CommitmentTree: not initialized");
+        tree.proposeInsert(keccak256("too-early"));
+    }
+
+    function test_propose_remove_before_init_reverts() public {
+        vm.expectRevert("CommitmentTree: not initialized");
+        tree.proposeRemove(keccak256("too-early"), SALT);
+    }
+
     // ── timelock enforcement ────────────────────────────────────
 
     function test_execute_before_timelock_reverts() public {
