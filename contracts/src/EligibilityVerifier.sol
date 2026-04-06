@@ -59,6 +59,9 @@ contract EligibilityVerifier {
 
     address public owner;
 
+    /// @notice Pending owner for two-step transfer.
+    address public pendingOwner;
+
     /// @notice Tracks used nullifiers to prevent double-proof.
     mapping(uint256 => bool) public usedNullifiers;
 
@@ -78,6 +81,8 @@ contract EligibilityVerifier {
     event EligibilityProven(uint256 indexed nullifier);
     event RegistryRootUpdated(uint256 newRoot);
     event RegistryRootProposed(uint256 indexed proposalId, uint256 newRoot, uint256 readyAt);
+    event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ──────────────────────────────────────────────────────────────
     //  Errors
@@ -133,6 +138,26 @@ contract EligibilityVerifier {
         rp.executed = true;
         registryRoot = rp.newRoot;
         emit RegistryRootUpdated(rp.newRoot);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Ownership transfer (two-step)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Propose a new owner. The new owner must call acceptOwnership().
+    /// @param newOwner Address of the proposed new owner.
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "EligibilityVerifier: zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending ownership transfer. Only callable by pendingOwner.
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "EligibilityVerifier: not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -41,6 +41,9 @@ contract CommitmentTree {
 
     address public owner;
 
+    /// @notice Pending owner for two-step transfer.
+    address public pendingOwner;
+
     /// @notice 1-indexed binary tree: nodes[1] = root, leaves at [512..1023].
     ///         Index 0 is unused. Total storage: 1023 slots.
     bytes32[1024] internal nodes;
@@ -90,6 +93,8 @@ contract CommitmentTree {
     event ForkThresholdReached(uint256 realCount);
     event InsertProposed(uint256 indexed proposalId, bytes32 indexed commitment, uint256 readyAt);
     event RemoveProposed(uint256 indexed proposalId, bytes32 indexed commitment, uint256 readyAt);
+    event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ──────────────────────────────────────────────────────────────
     //  Errors
@@ -115,11 +120,20 @@ contract CommitmentTree {
         owner = msg.sender;
     }
 
-    /// @notice Transfer ownership (e.g., to NodeRegistry after deployment).
-    /// @param newOwner The address that will become the new owner.
+    /// @notice Propose a new owner. The new owner must call acceptOwnership().
+    /// @param newOwner Address of the proposed new owner.
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "CommitmentTree: zero owner");
-        owner = newOwner;
+        require(newOwner != address(0), "CommitmentTree: zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending ownership transfer. Only callable by pendingOwner.
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "CommitmentTree: not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ──────────────────────────────────────────────────────────────

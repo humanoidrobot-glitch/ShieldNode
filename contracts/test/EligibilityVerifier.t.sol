@@ -152,6 +152,25 @@ contract EligibilityVerifierTest is Test {
         ev.executeRegistryRoot(id);
     }
 
+    // ── two-step ownership ───────────────────────────────────
+
+    function test_transferOwnership_twoStep() public {
+        address newOwner = makeAddr("newOwner");
+        ev.transferOwnership(newOwner);
+        assertEq(ev.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        ev.acceptOwnership();
+        assertEq(ev.owner(), newOwner);
+        assertEq(ev.pendingOwner(), address(0));
+    }
+
+    function test_acceptOwnership_notPending_reverts() public {
+        vm.prank(makeAddr("random"));
+        vm.expectRevert("EligibilityVerifier: not pending owner");
+        ev.acceptOwnership();
+    }
+
     // ── constants ───────────────────────────────────────────────
 
     function test_default_thresholds() public view {

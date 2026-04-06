@@ -24,6 +24,9 @@ contract Treasury {
     /// @notice Contract owner (deployer).
     address public owner;
 
+    /// @notice Pending owner for two-step transfer.
+    address public pendingOwner;
+
     /// @notice Guardian address that can veto queued withdrawals during timelock.
     address public guardian;
 
@@ -85,6 +88,9 @@ contract Treasury {
 
     /// @notice Emitted when a guardian change is proposed.
     event GuardianProposed(uint256 indexed proposalId, address indexed newGuardian, uint256 readyAt);
+
+    event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
@@ -234,6 +240,26 @@ contract Treasury {
         gp.executed = true;
         emit GuardianUpdated(guardian, gp.newGuardian);
         guardian = gp.newGuardian;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Ownership transfer (two-step)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Propose a new owner. The new owner must call acceptOwnership().
+    /// @param newOwner Address of the proposed new owner.
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Treasury: zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending ownership transfer. Only callable by pendingOwner.
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "Treasury: not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ──────────────────────────────────────────────────────────────

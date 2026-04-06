@@ -52,21 +52,25 @@ contract CrossContractHandler is Test {
     uint256 public ghostTotalWithdrawn;      // ETH withdrawn from all contracts
     uint256 public openCount;
     uint256 public slashProposalCount;
-    uint256 public challengeCount;
     uint256 public ghostLivenessSlashCount;  // liveness slashes on exit node
+
+    /// @dev Treasury owner — stored so treasuryClaim can use the correct address.
+    address public treasuryOwner;
 
     constructor(
         NodeRegistry _registry,
         SessionSettlement _settlement,
         SlashingOracle _oracle,
         ChallengeManager _cm,
-        Treasury _treasury
+        Treasury _treasury,
+        address _treasuryOwner
     ) {
         registry   = _registry;
         settlement = _settlement;
         oracle     = _oracle;
         cm         = _cm;
         treasury   = _treasury;
+        treasuryOwner = _treasuryOwner;
 
         entryOp  = vm.addr(ENTRY_KEY);
         relayOp  = vm.addr(RELAY_KEY);
@@ -234,10 +238,10 @@ contract CrossContractHandler is Test {
     }
 
     /// @notice Treasury claims slash proceeds from oracle.
-    function treasuryClaim(address deployer) external {
+    function treasuryClaim() external {
         uint256 pending = oracle.pendingWithdrawals(address(treasury));
         if (pending == 0) return;
-        vm.prank(deployer);
+        vm.prank(treasuryOwner);
         try treasury.claimFromOracle(address(oracle)) {} catch {}
     }
 }
@@ -277,7 +281,7 @@ contract CrossContractInvariantTest is Test {
 
         cm = new ChallengeManager(address(registry), payable(address(oracle)));
 
-        handler = new CrossContractHandler(registry, settlement, oracle, cm, treasury);
+        handler = new CrossContractHandler(registry, settlement, oracle, cm, treasury, deployer);
 
         // Authorise the challenger (timelocked).
         oracle.proposeChallenger(handler.challAddr(), true);

@@ -238,6 +238,28 @@ contract CommitmentTreeTest is Test {
         }
     }
 
+    // ── two-step ownership ───────────────────────────────────
+
+    function test_transferOwnership_twoStep() public {
+        address newOwner = makeAddr("newOwner");
+        tree.transferOwnership(newOwner);
+        assertEq(tree.pendingOwner(), newOwner);
+        assertEq(tree.owner(), address(this)); // not yet transferred
+
+        vm.prank(newOwner);
+        tree.acceptOwnership();
+        assertEq(tree.owner(), newOwner);
+        assertEq(tree.pendingOwner(), address(0));
+    }
+
+    function test_acceptOwnership_notPending_reverts() public {
+        vm.prank(makeAddr("random"));
+        vm.expectRevert("CommitmentTree: not pending owner");
+        tree.acceptOwnership();
+    }
+
+    // ── dummy indistinguishability ──────────────────────────
+
     function test_different_salts_produce_different_trees() public {
         CommitmentTree tree2 = new CommitmentTree();
 

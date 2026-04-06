@@ -80,6 +80,9 @@ contract ZKSettlement {
     ///         the root is read directly from NodeRegistry.
     address public owner;
 
+    /// @notice Pending owner for two-step transfer.
+    address public pendingOwner;
+
     /// @notice Tracks which proof nullifiers have been used.
     mapping(bytes32 => bool) public nullifiers;
 
@@ -128,6 +131,8 @@ contract ZKSettlement {
 
     event RegistryRootUpdated(uint256 newRoot);
     event RegistryRootProposed(uint256 indexed proposalId, uint256 newRoot, uint256 readyAt);
+    event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     event DepositRefunded(bytes32 indexed depositId, address indexed depositor, uint256 amount);
 
@@ -354,5 +359,26 @@ contract ZKSettlement {
         rp.executed = true;
         registryRoot = rp.newRoot;
         emit RegistryRootUpdated(rp.newRoot);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Ownership transfer (two-step)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Propose a new owner. The new owner must call acceptOwnership().
+    /// @param newOwner Address of the proposed new owner.
+    function transferOwnership(address newOwner) external {
+        require(msg.sender == owner, "ZKSettlement: not owner");
+        require(newOwner != address(0), "ZKSettlement: zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending ownership transfer. Only callable by pendingOwner.
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "ZKSettlement: not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 }

@@ -551,6 +551,36 @@ contract SlashingOracleTest is Test {
         assertEq(oracle.livenessFailureCount(NODE_ID), 0);
     }
 
+    // ════════════════════════════════════════════════════════════
+    //  Two-step ownership transfer
+    // ════════════════════════════════════════════════════════════
+
+    function test_transferOwnership_twoStep() public {
+        address newOwner = makeAddr("newOwner");
+
+        vm.prank(deployer);
+        oracle.transferOwnership(newOwner);
+        assertEq(oracle.pendingOwner(), newOwner);
+        assertEq(oracle.owner(), deployer); // not yet transferred
+
+        vm.prank(newOwner);
+        oracle.acceptOwnership();
+        assertEq(oracle.owner(), newOwner);
+        assertEq(oracle.pendingOwner(), address(0));
+    }
+
+    function test_acceptOwnership_notPending_reverts() public {
+        vm.prank(rando);
+        vm.expectRevert("SlashingOracle: not pending owner");
+        oracle.acceptOwnership();
+    }
+
+    function test_transferOwnership_onlyOwner() public {
+        vm.prank(rando);
+        vm.expectRevert();
+        oracle.transferOwnership(rando);
+    }
+
     function test_liveness_below_threshold_stays_active() public {
         uint256 threshold = oracle.LIVENESS_BAN_THRESHOLD();
 

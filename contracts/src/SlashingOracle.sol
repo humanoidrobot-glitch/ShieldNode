@@ -93,6 +93,9 @@ contract SlashingOracle is ISlashingOracle {
     /// @notice Contract owner.
     address public owner;
 
+    /// @notice Pending owner for two-step transfer.
+    address public pendingOwner;
+
     /// @notice Authorised challengers.
     mapping(address => bool) public challengers;
 
@@ -164,6 +167,8 @@ contract SlashingOracle is ISlashingOracle {
     event ChallengerProposed(uint256 indexed proposalId, address indexed challenger, bool authorised, uint256 readyAt);
     event SlashProposalExpired(uint256 indexed proposalId, bytes32 indexed nodeId);
     event LivenessDeactivation(bytes32 indexed nodeId, uint256 failureCount);
+    event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -289,6 +294,26 @@ contract SlashingOracle is ISlashingOracle {
         require(msg.sender == pauser, "SlashingOracle: not pauser");
         paused = false;
         emit Unpaused(msg.sender);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Ownership transfer (two-step)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Propose a new owner. The new owner must call acceptOwnership().
+    /// @param newOwner Address of the proposed new owner.
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "SlashingOracle: zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferProposed(owner, newOwner);
+    }
+
+    /// @notice Accept a pending ownership transfer. Only callable by pendingOwner.
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "SlashingOracle: not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ──────────────────────────────────────────────────────────────
