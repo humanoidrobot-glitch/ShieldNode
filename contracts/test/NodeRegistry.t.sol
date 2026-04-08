@@ -16,11 +16,13 @@ contract NodeRegistryTest is Test {
     address public operator = makeAddr("operator");
     address public rando    = makeAddr("rando");
 
-    bytes32 constant NODE_ID    = keccak256("node-1");
+    bytes32 public   NODE_ID;
     bytes32 constant PUB_KEY    = keccak256("pubkey-1");
     string  constant ENDPOINT   = "192.168.1.1:51820";
 
     function setUp() public {
+        NODE_ID = keccak256(abi.encode(operator, PUB_KEY));
+
         vm.startPrank(deployer);
         Treasury treasury = new Treasury(deployer);
 
@@ -138,11 +140,12 @@ contract NodeRegistryTest is Test {
         // Register 5 nodes
         bytes32[5] memory ids;
         for (uint256 i; i < 5; i++) {
-            ids[i] = keccak256(abi.encodePacked("node", i));
+            bytes32 pubKey = keccak256(abi.encodePacked("pub", i));
+            ids[i] = keccak256(abi.encode(operator, pubKey));
             vm.prank(operator);
             registry.register{value: 0.1 ether}(
                 ids[i],
-                keccak256(abi.encodePacked("pub", i)),
+                pubKey,
                 "1.2.3.4:51820"
             );
         }
@@ -174,7 +177,7 @@ contract NodeRegistryTest is Test {
         uint256 oracleBalBefore = address(oracle).balance;
 
         vm.prank(address(oracle));
-        registry.slash(NODE_ID, 0.1 ether);
+        registry.slash(NODE_ID, 0.1 ether, true);
 
         INodeRegistry.NodeInfo memory info = registry.getNode(NODE_ID);
         assertEq(info.stake, 0.9 ether);
@@ -190,7 +193,7 @@ contract NodeRegistryTest is Test {
 
         vm.prank(rando);
         vm.expectRevert("NodeRegistry: not oracle");
-        registry.slash(NODE_ID, 0.1 ether);
+        registry.slash(NODE_ID, 0.1 ether, true);
     }
 
     // ────────────────────── Endpoint update ──────────────────────

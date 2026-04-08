@@ -23,7 +23,7 @@ contract ChallengeManagerTest is Test {
 
     uint256 constant NODE_KEY = 0xA101;
     address public nodeOp;
-    bytes32 public nodeId = keccak256("test-node");
+    bytes32 public nodeId; // derived in setUp
 
     uint256 constant BOND = 0.01 ether;
 
@@ -31,6 +31,7 @@ contract ChallengeManagerTest is Test {
         vm.warp(1_700_000_000);
 
         nodeOp = vm.addr(NODE_KEY);
+        nodeId = keccak256(abi.encode(nodeOp, keccak256("pubkey")));
         vm.deal(nodeOp, 10 ether);
         vm.deal(challenger, 10 ether);
         vm.deal(anyone, 10 ether);

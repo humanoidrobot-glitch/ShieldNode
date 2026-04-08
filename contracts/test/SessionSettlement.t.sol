@@ -23,9 +23,13 @@ contract SessionSettlementTest is Test {
     address public exitOp;
     address public client;
 
-    bytes32 public entryId = keccak256("entry");
-    bytes32 public relayId = keccak256("relay");
-    bytes32 public exitId  = keccak256("exit");
+    bytes32 public entryPub;
+    bytes32 public relayPub;
+    bytes32 public exitPub;
+
+    bytes32 public entryId;
+    bytes32 public relayId;
+    bytes32 public exitId;
 
     bytes32[3] public nodeIds;
 
@@ -42,16 +46,28 @@ contract SessionSettlementTest is Test {
         vm.deal(exitOp,  10 ether);
         vm.deal(client,  10 ether);
 
+        // Derive nodeIds from operator + publicKey (Finding 14).
+        entryPub = keccak256(bytes("entry-pub"));
+        relayPub = keccak256(bytes("relay-pub"));
+        exitPub  = keccak256(bytes("exit-pub"));
+        entryId  = keccak256(abi.encode(entryOp, entryPub));
+        relayId  = keccak256(abi.encode(relayOp, relayPub));
+        exitId   = keccak256(abi.encode(exitOp,  exitPub));
+
         registry   = new NodeRegistry(oracle);
         settlement = new SessionSettlement(address(registry), address(this));
 
-        _registerNode(entryOp, entryId, "entry-pub", "1.1.1.1:51820");
-        _registerNode(relayOp, relayId, "relay-pub", "2.2.2.2:51820");
-        _registerNode(exitOp,  exitId,  "exit-pub",  "3.3.3.3:51820");
+        _registerNode(entryOp, entryId, entryPub, "1.1.1.1:51820");
+        _registerNode(relayOp, relayId, relayPub, "2.2.2.2:51820");
+        _registerNode(exitOp,  exitId,  exitPub,  "3.3.3.3:51820");
 
-        // Set a price per byte on the exit node (required: non-zero).
+        // Set price on all nodes (Finding 11: per-node prices).
+        vm.prank(entryOp);
+        registry.updatePricePerByte(entryId, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(relayId, 1);
         vm.prank(exitOp);
-        registry.updatePricePerByte(exitId, 1); // 1 wei per byte
+        registry.updatePricePerByte(exitId, 1);
 
         nodeIds = [entryId, relayId, exitId];
     }
@@ -59,10 +75,10 @@ contract SessionSettlementTest is Test {
     // ────────────────────── Helpers ──────────────────────
 
     function _registerNode(
-        address op, bytes32 id, string memory pubSeed, string memory endpoint
+        address op, bytes32 id, bytes32 pubKey, string memory endpoint
     ) internal {
         vm.prank(op);
-        registry.register{value: 0.1 ether}(id, keccak256(bytes(pubSeed)), endpoint);
+        registry.register{value: 0.1 ether}(id, pubKey, endpoint);
     }
 
     function _domainSeparator() internal view returns (bytes32) {
@@ -87,6 +103,29 @@ contract SessionSettlementTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev Build a cooperative settlement receipt (client + 3 node sigs).
+    function _coopReceipt(uint256 sid, uint256 cb, uint256 ts) internal view returns (bytes memory) {
+        bytes32 d = _digest(sid, cb, ts);
+        return abi.encode(
+            sid, cb, ts,
+            _sign(CLIENT_KEY, d),
+            _sign(ENTRY_KEY, d),
+            _sign(RELAY_KEY, d),
+            _sign(EXIT_KEY, d)
+        );
+    }
+
+    /// @dev Build a force-settle receipt (3 node sigs, no client sig).
+    function _forceReceipt(uint256 sid, uint256 cb, uint256 ts) internal view returns (bytes memory) {
+        bytes32 d = _digest(sid, cb, ts);
+        return abi.encode(
+            sid, cb, ts,
+            _sign(ENTRY_KEY, d),
+            _sign(RELAY_KEY, d),
+            _sign(EXIT_KEY, d)
+        );
+    }
+
     // ────────────────────── Open session ──────────────────────
 
     function test_open_session() public {
@@ -100,7 +139,9 @@ contract SessionSettlementTest is Test {
         assertEq(s.nodeOwners[0], entryOp);
         assertEq(s.nodeOwners[1], relayOp);
         assertEq(s.nodeOwners[2], exitOp);
-        assertEq(s.pricePerByte, 1);
+        assertEq(s.nodePrices[0], 1);
+        assertEq(s.nodePrices[1], 1);
+        assertEq(s.nodePrices[2], 1);
     }
 
     function test_open_session_insufficient_deposit() public {
@@ -118,12 +159,13 @@ contract SessionSettlementTest is Test {
     }
 
     function test_open_session_zero_price() public {
-        // Exit node has pricePerByte = 0 by default on a new node.
-        bytes32 cheapId = keccak256("cheap");
+        // A node with pricePerByte = 0 should be rejected.
+        bytes32 cheapPub = keccak256("cheapPub");
         address cheapOp = makeAddr("cheapOp");
         vm.deal(cheapOp, 1 ether);
+        bytes32 cheapId = keccak256(abi.encode(cheapOp, cheapPub));
         vm.prank(cheapOp);
-        registry.register{value: 0.1 ether}(cheapId, keccak256("cheapPub"), "4.4.4.4:51820");
+        registry.register{value: 0.1 ether}(cheapId, cheapPub, "4.4.4.4:51820");
         // Don't set pricePerByte — defaults to 0.
         bytes32[3] memory ids = [entryId, relayId, cheapId];
         vm.prank(client);
@@ -148,13 +190,13 @@ contract SessionSettlementTest is Test {
         uint256 cumBytes   = 1000;
         uint256 ts         = block.timestamp;
 
-        bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
-
         vm.prank(client);
-        settlement.settleSession(sessionId, receipt);
+        settlement.settleSession(sessionId, _coopReceipt(sessionId, cumBytes, ts));
 
-        // Pull-payment: check credited amounts.
+        // Per-node prices are all 1 wei/byte.
+        // entryPay = 1000 * 1 * 25 / 100 = 250
+        // relayPay = 1000 * 1 * 25 / 100 = 250
+        // exitPay  = 1000 * 1 * 50 / 100 = 500
         assertEq(settlement.pendingWithdrawals(entryOp), 250);
         assertEq(settlement.pendingWithdrawals(relayOp), 250);
         assertEq(settlement.pendingWithdrawals(exitOp),  500);
@@ -171,7 +213,7 @@ contract SessionSettlementTest is Test {
         assertEq(s.cumulativeBytes, cumBytes);
     }
 
-    // ────────────────────── Force settle (2-of-3 sigs) ──────────────────────
+    // ────────────────────── Force settle (3 node sigs) ──────────────────────
 
     function test_force_settle_after_timeout() public {
         vm.prank(client);
@@ -183,12 +225,8 @@ contract SessionSettlementTest is Test {
 
         vm.warp(block.timestamp + 2 hours);
 
-        bytes32 d = _digest(sessionId, cumBytes, ts);
-        // 2-of-3: exit + relay sign.
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(EXIT_KEY, d), _sign(RELAY_KEY, d));
-
         vm.prank(exitOp);
-        settlement.forceSettle(sessionId, receipt);
+        settlement.forceSettle(sessionId, _forceReceipt(sessionId, cumBytes, ts));
 
         ISessionSettlement.SessionInfo memory s = settlement.getSession(sessionId);
         assertTrue(s.settled);
@@ -202,12 +240,9 @@ contract SessionSettlementTest is Test {
         uint256 cumBytes   = 500;
         uint256 ts         = block.timestamp;
 
-        bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(EXIT_KEY, d), _sign(RELAY_KEY, d));
-
         vm.prank(exitOp);
         vm.expectRevert("Session: too early");
-        settlement.forceSettle(sessionId, receipt);
+        settlement.forceSettle(sessionId, _forceReceipt(sessionId, cumBytes, ts));
     }
 
     // ────────────────────── Double settle guard ──────────────────────
@@ -219,9 +254,7 @@ contract SessionSettlementTest is Test {
         uint256 sessionId = 0;
         uint256 cumBytes   = 100;
         uint256 ts         = block.timestamp;
-
-        bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
+        bytes memory receipt = _coopReceipt(sessionId, cumBytes, ts);
 
         vm.prank(client);
         settlement.settleSession(sessionId, receipt);
@@ -241,11 +274,8 @@ contract SessionSettlementTest is Test {
         uint256 cumBytes   = 1e30 + 1; // exceeds MAX_CUMULATIVE_BYTES
         uint256 ts         = block.timestamp;
 
-        bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
-
         vm.prank(client);
         vm.expectRevert("Session: bytes overflow");
-        settlement.settleSession(sessionId, receipt);
+        settlement.settleSession(sessionId, _coopReceipt(sessionId, cumBytes, ts));
     }
 }

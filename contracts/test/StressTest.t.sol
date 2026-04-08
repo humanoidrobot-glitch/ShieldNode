@@ -21,9 +21,9 @@ contract StressTest is Test {
     address public relayOp;
     address public exitOp;
 
-    bytes32 public entryId = keccak256("stress-entry");
-    bytes32 public relayId = keccak256("stress-relay");
-    bytes32 public exitId  = keccak256("stress-exit");
+    bytes32 public entryId;
+    bytes32 public relayId;
+    bytes32 public exitId;
 
     bytes32[3] public nodeIds;
 
@@ -34,6 +34,11 @@ contract StressTest is Test {
         entryOp = vm.addr(ENTRY_KEY);
         relayOp = vm.addr(RELAY_KEY);
         exitOp  = vm.addr(EXIT_KEY);
+
+        // Finding 14: nodeId = keccak256(abi.encode(operator, publicKey))
+        entryId = keccak256(abi.encode(entryOp, keccak256(bytes("entry-stress"))));
+        relayId = keccak256(abi.encode(relayOp, keccak256(bytes("relay-stress"))));
+        exitId  = keccak256(abi.encode(exitOp,  keccak256(bytes("exit-stress"))));
 
         vm.deal(entryOp, 100 ether);
         vm.deal(relayOp, 100 ether);
@@ -46,6 +51,11 @@ contract StressTest is Test {
         _registerNode(relayOp, relayId, "relay-stress", "10.0.0.2:51820");
         _registerNode(exitOp,  exitId,  "exit-stress",  "10.0.0.3:51820");
 
+        // Finding 11: all 3 nodes need a price for openSession
+        vm.prank(entryOp);
+        registry.updatePricePerByte(entryId, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(relayId, 1);
         vm.prank(exitOp);
         registry.updatePricePerByte(exitId, 1);
 
@@ -87,8 +97,8 @@ contract StressTest is Test {
         assertEq(settlement.nextSessionId(), NUM_SESSIONS);
         uint256 avg = gasTotal / NUM_SESSIONS;
         emit log_named_uint("open_session avg gas", avg);
-        // Budget increased: now snapshots 3 owners + reads price.
-        assertLt(avg, 300_000, "open_session gas exceeded budget");
+        // Budget increased: snapshots 3 owners + reads 3 prices (Finding 11).
+        assertLt(avg, 320_000, "open_session gas exceeded budget");
     }
 
     function test_open_and_settle_120_sessions() public {
@@ -108,7 +118,7 @@ contract StressTest is Test {
             uint256 ck = 0xC000 + i + 1;
             uint256 cb = 1000 + i;
             bytes32 d = _digest(i, cb, block.timestamp);
-            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(ck, d), _sign(EXIT_KEY, d));
+            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(ck, d), _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
             vm.prank(c);
             uint256 g = gasleft();
             settlement.settleSession(i, receipt);
@@ -121,8 +131,8 @@ contract StressTest is Test {
 
         emit log_named_uint("open avg gas", openGas / NUM_SESSIONS);
         emit log_named_uint("settle avg gas", settleGas / NUM_SESSIONS);
-        assertLt(openGas / NUM_SESSIONS, 300_000, "open gas exceeded budget");
-        assertLt(settleGas / NUM_SESSIONS, 200_000, "settle gas exceeded budget");
+        assertLt(openGas / NUM_SESSIONS, 320_000, "open gas exceeded budget");
+        assertLt(settleGas / NUM_SESSIONS, 300_000, "settle gas exceeded budget");
     }
 
     function test_payment_distribution_at_scale() public {
@@ -138,7 +148,7 @@ contract StressTest is Test {
             uint256 cb = 1000;
             totalBytes += cb;
             bytes32 d = _digest(i, cb, block.timestamp);
-            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(ck, d), _sign(EXIT_KEY, d));
+            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(ck, d), _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
             vm.prank(c);
             settlement.settleSession(i, receipt);
         }
@@ -170,8 +180,8 @@ contract StressTest is Test {
         for (uint256 i; i < count; ++i) {
             uint256 cb = 500;
             bytes32 d = _digest(i, cb, block.timestamp);
-            // 2-of-3 sigs: exit + relay.
-            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(EXIT_KEY, d), _sign(RELAY_KEY, d));
+            // All 3 node sigs: entry + relay + exit (Finding 8).
+            bytes memory receipt = abi.encode(i, cb, block.timestamp, _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
             vm.prank(exitOp);
             uint256 g = gasleft();
             settlement.forceSettle(i, receipt);

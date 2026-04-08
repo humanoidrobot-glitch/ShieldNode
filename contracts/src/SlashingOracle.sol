@@ -138,6 +138,10 @@ contract SlashingOracle is ISlashingOracle {
     ///         node is deactivated at threshold.
     mapping(bytes32 => uint256) public livenessFailureCount;
 
+    /// @notice Fraud-specific slash count per node. Used for progressive
+    ///         penalty escalation independently of liveness failures.
+    mapping(bytes32 => uint256) public fraudSlashCount;
+
     /// @dev Timelocked challenger proposals.
     struct ChallengerProposal {
         address challenger;
@@ -388,23 +392,25 @@ contract SlashingOracle is ISlashingOracle {
         uint256 pct;
         if (p.reason == SlashReason.ChallengeFailure) {
             pct = SLASH_PCT_LIVENESS;
-        } else if (info.slashCount == 0) {
-            pct = SLASH_PCT_FIRST;
-        } else if (info.slashCount == 1) {
-            pct = SLASH_PCT_SECOND;
         } else {
-            pct = SLASH_PCT_THIRD;
+            // Use fraud-specific counter instead of shared slashCount
+            uint256 fsc = fraudSlashCount[p.nodeId];
+            if (fsc == 0) pct = SLASH_PCT_FIRST;
+            else if (fsc == 1) pct = SLASH_PCT_SECOND;
+            else pct = SLASH_PCT_THIRD;
+            fraudSlashCount[p.nodeId]++;
         }
 
         uint256 slashAmount = (info.stake * pct) / 100;
 
         // Call the registry to slash (funds are sent back to this contract).
-        registry.slash(p.nodeId, slashAmount);
+        bool isFraud = p.reason != SlashReason.ChallengeFailure;
+        registry.slash(p.nodeId, slashAmount, isFraud);
 
-        // If third fraud offence (slashCount was 2 before this slash),
+        // If third fraud offence (fraudSlashCount was 2 before this slash),
         // permanently ban. Liveness failures don't escalate toward permanent
         // ban — they are handled separately via LIVENESS_BAN_THRESHOLD.
-        if (p.reason != SlashReason.ChallengeFailure && info.slashCount >= 2) {
+        if (p.reason != SlashReason.ChallengeFailure && fraudSlashCount[p.nodeId] >= 3) {
             registry.ban(p.nodeId);
         }
 
@@ -528,9 +534,14 @@ contract SlashingOracle is ISlashingOracle {
         ISessionSettlement.SessionInfo memory session = SessionSettlement(payable(settlement)).getSession(sessionId);
         require(session.client != address(0), "SlashingOracle: unknown session");
 
+        // Verify recovered client signer matches actual session client.
+        if (client1 != session.client) revert InvalidEvidence("client signer not session client");
+
         bool isSessionNode = false;
         for (uint256 i; i < 3; ++i) {
             if (node1 == session.nodeOwners[i]) {
+                // Bind the recovered signer to the accused nodeId.
+                if (session.nodeIds[i] != nodeId) revert InvalidEvidence("signer not accused node");
                 isSessionNode = true;
                 break;
             }
@@ -581,9 +592,7 @@ contract SlashingOracle is ISlashingOracle {
         bytes32 structHash = keccak256(
             abi.encode(ATTESTATION_TYPEHASH, attestedNodeId, timestamp, descriptionHash)
         );
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", ATTESTATION_DOMAIN_SEPARATOR, structHash)
-        );
+        bytes32 digest = EIP712Utils.hashTypedData(ATTESTATION_DOMAIN_SEPARATOR, structHash);
 
         address signer = EIP712Utils.recoverSigner(digest, challengerSig);
         if (signer != expectedChallenger) {

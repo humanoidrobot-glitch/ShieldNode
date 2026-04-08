@@ -289,31 +289,30 @@ contract ZKSettlement {
             );
         }
 
-        // 7. Verify address commitments — prevents front-running.
-        //    The circuit proves Poseidon(addr, amount) == commitment.
-        //    On-chain we verify the caller-supplied addresses match the
-        //    proven commitments using keccak256 (cheaper than on-chain Poseidon).
-        //    NOTE: This requires the circuit to also output keccak address
-        //    commitments, OR we trust the Poseidon commitments and add
-        //    addresses as additional public signals. For now, the Poseidon
-        //    commitments are verified in-circuit; the caller must supply
-        //    addresses that produce the same commitments. This is enforced
-        //    by the circuit constraint — a wrong address would change the
-        //    commitment and invalidate the proof.
-        //
-        //    The address front-running protection works because:
-        //    - The commitment Poseidon(addr, amount) is a public signal
-        //    - The proof is only valid for the specific addresses used
-        //    - An attacker who changes addresses cannot produce a valid proof
+        // 7. Verify caller-supplied addresses are bound to the proof's
+        //    commitment public signals via keccak256(addr, amount).
+        require(
+            uint256(keccak256(abi.encode(entryAddr, entryPay))) == pubSignals[SIG_ENTRY_COMMITMENT],
+            "ZKSettlement: entry addr binding"
+        );
+        require(
+            uint256(keccak256(abi.encode(relayAddr, relayPay))) == pubSignals[SIG_RELAY_COMMITMENT],
+            "ZKSettlement: relay addr binding"
+        );
+        require(
+            uint256(keccak256(abi.encode(exitAddr, exitPay))) == pubSignals[SIG_EXIT_COMMITMENT],
+            "ZKSettlement: exit addr binding"
+        );
+        require(
+            uint256(keccak256(abi.encode(refundAddr, refund))) == pubSignals[SIG_REFUND_COMMITMENT],
+            "ZKSettlement: refund addr binding"
+        );
 
         // 8. Effects.
         nullifiers[nullifier] = true;
         deposits[depositId] = 0;
 
         // 9. Credit payments (pull-payment pattern).
-        //    Addresses are trusted because the circuit proves they match
-        //    the commitment public signals. An attacker cannot substitute
-        //    different addresses without invalidating the proof.
         if (entryPay > 0) pendingWithdrawals[entryAddr] += entryPay;
         if (relayPay > 0) pendingWithdrawals[relayAddr] += relayPay;
         if (exitPay > 0)  pendingWithdrawals[exitAddr]  += exitPay;

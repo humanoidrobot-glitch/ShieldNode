@@ -10,14 +10,14 @@ interface ISessionSettlement {
 
     /// @notice On-chain state for a VPN session.
     struct SessionInfo {
-        address    client;
-        bytes32[3] nodeIds;
-        address[3] nodeOwners;
-        uint256    deposit;
-        uint256    startTime;
-        bool       settled;
-        uint256    cumulativeBytes;
-        uint256    pricePerByte;
+        address      client;
+        bytes32[3]   nodeIds;
+        address[3]   nodeOwners;
+        uint256      deposit;
+        uint256      startTime;
+        bool         settled;
+        uint256      cumulativeBytes;
+        uint256[3]   nodePrices;
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -144,14 +144,16 @@ contract CommitmentTree {
     ///         exceeding the block gas limit. Call repeatedly until
     ///         `initialized` is true.
     ///
-    ///         Dummy commitments are keccak256(abi.encode("dummy", index, salt)).
-    ///         In production, salt should come from a VDF or commit-reveal
-    ///         scheme so even the deployer can't later prove which were dummies.
-    /// @param salt       Random salt for dummy generation.
-    /// @param batchSize  Number of leaves to fill in this call.
-    function initialize(bytes32 salt, uint256 batchSize) external onlyOwner {
+    ///         The caller-supplied salt is mixed with blockhash(block.number - 1)
+    ///         so the actual dummy entropy is not reconstructable from calldata.
+    /// @param saltCommitment  Caller-supplied entropy (mixed with blockhash).
+    /// @param batchSize       Number of leaves to fill in this call.
+    function initialize(bytes32 saltCommitment, uint256 batchSize) external onlyOwner {
         if (initialized) revert AlreadyInitialized();
         require(batchSize > 0, "CommitmentTree: zero batch");
+
+        // Derive effective salt from caller input + on-chain entropy
+        bytes32 salt = keccak256(abi.encode(saltCommitment, blockhash(block.number - 1)));
 
         uint256 start = initProgress;
         uint256 end = start + batchSize;

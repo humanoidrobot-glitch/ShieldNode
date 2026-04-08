@@ -34,9 +34,9 @@ contract CrossContractHandler is Test {
     address public exitOp;
     address public client;
 
-    bytes32 public entryId = keccak256("entry");
-    bytes32 public relayId = keccak256("relay");
-    bytes32 public exitId  = keccak256("exit");
+    bytes32 public entryId;
+    bytes32 public relayId;
+    bytes32 public exitId;
     bytes32[3] public nodeIds;
 
     // ── Challenger for SlashingOracle ──────────────────────────
@@ -78,6 +78,9 @@ contract CrossContractHandler is Test {
         client   = vm.addr(CLIENT_KEY);
         challAddr = vm.addr(challPk);
 
+        entryId = keccak256(abi.encode(entryOp, keccak256("entry-pub")));
+        relayId = keccak256(abi.encode(relayOp, keccak256("relay-pub")));
+        exitId  = keccak256(abi.encode(exitOp,  keccak256("exit-pub")));
         nodeIds = [entryId, relayId, exitId];
     }
 
@@ -137,7 +140,7 @@ contract CrossContractHandler is Test {
 
         uint256 ts = block.timestamp;
         bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
 
         vm.prank(client);
         try settlement.settleSession(sessionId, receipt) {} catch {}
@@ -153,7 +156,7 @@ contract CrossContractHandler is Test {
 
         uint256 ts = block.timestamp;
         bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(EXIT_KEY, d), _sign(RELAY_KEY, d));
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
 
         vm.prank(exitOp);
         try settlement.forceSettle(sessionId, receipt) {} catch {}
@@ -291,23 +294,31 @@ contract CrossContractInvariantTest is Test {
         vm.stopPrank();
 
         // Register 3 nodes with meaningful stake.
+        // Cache IDs before pranking (vm.prank is consumed by the next external call).
         address entryOp = handler.entryOp();
         address relayOp = handler.relayOp();
         address exitOp  = handler.exitOp();
+        bytes32 eid = handler.entryId();
+        bytes32 rid = handler.relayId();
+        bytes32 xid = handler.exitId();
 
         vm.deal(entryOp, 10 ether);
         vm.deal(relayOp, 10 ether);
         vm.deal(exitOp, 10 ether);
 
         vm.prank(entryOp);
-        registry.register{value: 1 ether}(handler.entryId(), keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820");
         vm.prank(relayOp);
-        registry.register{value: 1 ether}(handler.relayId(), keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820");
         vm.prank(exitOp);
-        registry.register{value: 1 ether}(handler.exitId(), keccak256("exit-pub"), "3.3.3.3:51820");
+        registry.register{value: 1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820");
 
+        vm.prank(entryOp);
+        registry.updatePricePerByte(eid, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(rid, 1);
         vm.prank(exitOp);
-        registry.updatePricePerByte(handler.exitId(), 1);
+        registry.updatePricePerByte(xid, 1);
 
         targetContract(address(handler));
     }

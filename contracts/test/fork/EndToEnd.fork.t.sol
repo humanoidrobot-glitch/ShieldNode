@@ -38,9 +38,9 @@ contract EndToEndForkTest is Test {
     address client;
     address challAddr;
 
-    bytes32 entryId = keccak256("fork-entry");
-    bytes32 relayId = keccak256("fork-relay");
-    bytes32 exitId  = keccak256("fork-exit");
+    bytes32 entryId;
+    bytes32 relayId;
+    bytes32 exitId;
 
     modifier onlyFork() {
         // Skip if not running on a fork (no RPC URL set).
@@ -64,6 +64,11 @@ contract EndToEndForkTest is Test {
         vm.deal(relayOp, 10 ether);
         vm.deal(exitOp, 10 ether);
         vm.deal(client, 10 ether);
+
+        // Derive nodeIds from (operator, publicKey) per Finding 14.
+        entryId = keccak256(abi.encode(entryOp, keccak256("e-pub")));
+        relayId = keccak256(abi.encode(relayOp, keccak256("r-pub")));
+        exitId  = keccak256(abi.encode(exitOp,  keccak256("x-pub")));
 
         // Deploy full protocol.
         vm.startPrank(deployer);
@@ -100,6 +105,11 @@ contract EndToEndForkTest is Test {
         vm.prank(exitOp);
         registry.register{value: 1 ether}(exitId, keccak256("x-pub"), "3.3.3.3:51820");
 
+        // Set per-node prices on all 3 nodes (Finding 11: openSession requires all prices > 0).
+        vm.prank(entryOp);
+        registry.updatePricePerByte(entryId, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(relayId, 1);
         vm.prank(exitOp);
         registry.updatePricePerByte(exitId, 1);
     }
@@ -109,7 +119,7 @@ contract EndToEndForkTest is Test {
     function test_gas_register() public onlyFork {
         address newOp = makeAddr("newOp");
         vm.deal(newOp, 1 ether);
-        bytes32 newId = keccak256("gas-test-node");
+        bytes32 newId = keccak256(abi.encode(newOp, keccak256("pub")));
 
         vm.prank(newOp);
         uint256 gasBefore = gasleft();
@@ -140,8 +150,8 @@ contract EndToEndForkTest is Test {
         settlement.openSession{value: 1 ether}(ids, type(uint256).max);
         uint256 gasUsed = gasBefore - gasleft();
 
-        // CLAUDE.md estimate: ~100K. Actual higher with via_ir optimizer.
-        assertLt(gasUsed, 400_000, "openSession gas too high");
+        // CLAUDE.md estimate: ~100K. Actual higher with via_ir optimizer and per-node price checks.
+        assertLt(gasUsed, 500_000, "openSession gas too high");
         console.log("openSession gas:", gasUsed);
     }
 
@@ -165,10 +175,17 @@ contract EndToEndForkTest is Test {
         (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(CLIENT_KEY, digest);
         bytes memory clientSig = abi.encodePacked(r1, s1, v1);
 
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(EXIT_KEY, digest);
-        bytes memory nodeSig = abi.encodePacked(r2, s2, v2);
+        // Findings 8, 9: receipt needs client + all 3 node signatures.
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(ENTRY_KEY, digest);
+        bytes memory entrySig = abi.encodePacked(r2, s2, v2);
 
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, clientSig, nodeSig);
+        (uint8 v3, bytes32 r3, bytes32 s3) = vm.sign(RELAY_KEY, digest);
+        bytes memory relaySig = abi.encodePacked(r3, s3, v3);
+
+        (uint8 v4, bytes32 r4, bytes32 s4) = vm.sign(EXIT_KEY, digest);
+        bytes memory exitSig = abi.encodePacked(r4, s4, v4);
+
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, clientSig, entrySig, relaySig, exitSig);
 
         uint256 gasBefore = gasleft();
         vm.prank(client);
@@ -180,7 +197,7 @@ contract EndToEndForkTest is Test {
         console.log("settleSession gas:", settleGas);
 
         // Verify payment distribution.
-        uint256 totalPaid = cumBytes * 1; // pricePerByte = 1
+        uint256 totalPaid = cumBytes * 1; // all per-node prices = 1
         uint256 entryPay = (totalPaid * 25) / 100;
         uint256 relayPay = (totalPaid * 25) / 100;
         uint256 exitPay  = totalPaid - entryPay - relayPay;

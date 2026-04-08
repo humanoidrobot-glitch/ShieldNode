@@ -92,11 +92,11 @@ contract SlashingOracleInvariantTest is Test {
     Treasury          public treasury;
     SlashHandler      public handler;
 
-    bytes32 constant NODE_ID = keccak256("inv-node");
-
     function setUp() public {
         address deployer = makeAddr("deployer");
         address nodeOp   = makeAddr("nodeOp");
+        bytes32 pubKey   = keccak256("pk");
+        bytes32 nodeId   = keccak256(abi.encode(nodeOp, pubKey));
 
         vm.deal(nodeOp, 10 ether);
 
@@ -116,7 +116,7 @@ contract SlashingOracleInvariantTest is Test {
         );
         require(address(oracle) == predictedOracle, "oracle mismatch");
 
-        handler = new SlashHandler(oracle, registry, NODE_ID, nodeOp);
+        handler = new SlashHandler(oracle, registry, nodeId, nodeOp);
 
         oracle.proposeChallenger(handler.challAddr(), true);
         vm.warp(block.timestamp + oracle.CHALLENGER_TIMELOCK() + 1);
@@ -125,7 +125,7 @@ contract SlashingOracleInvariantTest is Test {
         vm.stopPrank();
 
         vm.prank(nodeOp);
-        registry.register{value: 1 ether}(NODE_ID, keccak256("pk"), "10.0.0.1:51820");
+        registry.register{value: 1 ether}(nodeId, pubKey, "10.0.0.1:51820");
 
         targetContract(address(handler));
     }
@@ -133,7 +133,7 @@ contract SlashingOracleInvariantTest is Test {
     /// @notice pendingSlashCount matches our ghost variable.
     function invariant_pendingSlashCount_consistent() public view {
         assertEq(
-            oracle.pendingSlashCount(NODE_ID),
+            oracle.pendingSlashCount(handler.nodeId()),
             handler.ghostPendingCount(),
             "pendingSlashCount inconsistent with ghost"
         );

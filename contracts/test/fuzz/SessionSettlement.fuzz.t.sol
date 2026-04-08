@@ -24,9 +24,9 @@ contract SessionSettlementFuzzTest is Test {
     address public exitOp;
     address public client;
 
-    bytes32 public entryId = keccak256("entry");
-    bytes32 public relayId = keccak256("relay");
-    bytes32 public exitId  = keccak256("exit");
+    bytes32 public entryId;
+    bytes32 public relayId;
+    bytes32 public exitId;
 
     bytes32[3] public nodeIds;
 
@@ -35,6 +35,11 @@ contract SessionSettlementFuzzTest is Test {
         relayOp = vm.addr(RELAY_KEY);
         exitOp  = vm.addr(EXIT_KEY);
         client  = vm.addr(CLIENT_KEY);
+
+        // Finding 14: nodeId = keccak256(abi.encode(msg.sender, publicKey))
+        entryId = keccak256(abi.encode(entryOp, keccak256("entry-pub")));
+        relayId = keccak256(abi.encode(relayOp, keccak256("relay-pub")));
+        exitId  = keccak256(abi.encode(exitOp,  keccak256("exit-pub")));
 
         vm.deal(entryOp, 100 ether);
         vm.deal(relayOp, 100 ether);
@@ -87,7 +92,11 @@ contract SessionSettlementFuzzTest is Test {
         pricePerByte = bound(pricePerByte, 1, 1e12);
         cumBytes = bound(cumBytes, 0, 1e18);
 
-        // Set exit node price.
+        // Finding 11: set price on all 3 nodes (openSession requires non-zero prices).
+        vm.prank(entryOp);
+        registry.updatePricePerByte(entryId, pricePerByte);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(relayId, pricePerByte);
         vm.prank(exitOp);
         registry.updatePricePerByte(exitId, pricePerByte);
 
@@ -98,8 +107,15 @@ contract SessionSettlementFuzzTest is Test {
         uint256 sessionId = 0;
         uint256 ts = block.timestamp;
 
+        // Findings 8/9: receipt needs client sig + 3 node sigs.
         bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
+        bytes memory receipt = abi.encode(
+            sessionId, cumBytes, ts,
+            _sign(CLIENT_KEY, d),
+            _sign(ENTRY_KEY, d),
+            _sign(RELAY_KEY, d),
+            _sign(EXIT_KEY, d)
+        );
 
         vm.prank(client);
         settlement.settleSession(sessionId, receipt);
@@ -120,7 +136,11 @@ contract SessionSettlementFuzzTest is Test {
         deposit = bound(deposit, 0.001 ether, 10 ether);
         cumBytes = bound(cumBytes, 0, 1e18);
 
-        // Set exit node price.
+        // Finding 11: set price on all 3 nodes (openSession requires non-zero prices).
+        vm.prank(entryOp);
+        registry.updatePricePerByte(entryId, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(relayId, 1);
         vm.prank(exitOp);
         registry.updatePricePerByte(exitId, 1);
 
@@ -134,8 +154,9 @@ contract SessionSettlementFuzzTest is Test {
         // Warp past timeout.
         vm.warp(block.timestamp + 2 hours);
 
+        // Finding 8: forceSettle now requires all 3 node sigs.
         bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(EXIT_KEY, d), _sign(RELAY_KEY, d));
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
 
         vm.prank(exitOp);
         settlement.forceSettle(sessionId, receipt);

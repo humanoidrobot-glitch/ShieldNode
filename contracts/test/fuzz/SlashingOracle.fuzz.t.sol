@@ -83,12 +83,13 @@ contract SlashingOracleFuzzTest is Test {
     function testFuzz_slash_bounded(uint256 stake) public {
         stake = bound(stake, 0.1 ether, 100 ether);
 
-        bytes32 nodeId = keccak256(abi.encode("fuzz-node", stake));
         address nodeOp = makeAddr(string(abi.encode("op", stake)));
+        bytes32 pubKey = keccak256("pk");
+        bytes32 nodeId = keccak256(abi.encode(nodeOp, pubKey));
         vm.deal(nodeOp, stake + 1 ether);
 
         vm.prank(nodeOp);
-        registry.register{value: stake}(nodeId, keccak256("pk"), "10.0.0.1:51820");
+        registry.register{value: stake}(nodeId, pubKey, "10.0.0.1:51820");
 
         INodeRegistry.NodeInfo memory before_ = registry.getNode(nodeId);
 
@@ -111,12 +112,13 @@ contract SlashingOracleFuzzTest is Test {
     function testFuzz_progressive_slashing(uint256 stake) public {
         stake = bound(stake, 0.1 ether, 50 ether);
 
-        bytes32 nodeId = keccak256(abi.encode("prog-node", stake));
         address nodeOp = makeAddr(string(abi.encode("prog-op", stake)));
+        bytes32 pubKey = keccak256("pk");
+        bytes32 nodeId = keccak256(abi.encode(nodeOp, pubKey));
         vm.deal(nodeOp, stake + 1 ether);
 
         vm.prank(nodeOp);
-        registry.register{value: stake}(nodeId, keccak256("pk"), "10.0.0.2:51820");
+        registry.register{value: stake}(nodeId, pubKey, "10.0.0.2:51820");
 
         // First slash: 10%.
         uint256 stakeBefore = registry.getNode(nodeId).stake;

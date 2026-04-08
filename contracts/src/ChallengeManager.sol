@@ -246,6 +246,12 @@ contract ChallengeManager {
         if (c.status != ChallengeStatus.Active) revert ChallengeNotActive();
         if (block.timestamp > c.deadline) revert ChallengeNotActive();
 
+        // Reject empty responses for verification challenges.
+        if (c.challengeType == ChallengeType.BandwidthVerification ||
+            c.challengeType == ChallengeType.PacketIntegrity) {
+            require(responseHash != bytes32(0), "ChallengeManager: empty response");
+        }
+
         // Verify the response is signed by the node operator.
         bytes32 structHash = keccak256(
             abi.encode(RESPONSE_TYPEHASH, challengeId, c.nodeId, responseHash)
@@ -290,6 +296,13 @@ contract ChallengeManager {
 
         emit ChallengeExpired(challengeId, c.nodeId);
         emit BondAndRewardPaid(challengeId, c.challenger, bondAmount, 0);
+
+        // Verify this contract is an authorized challenger before
+        // attempting slash, so misconfigured deployments fail loudly.
+        require(
+            oracle.challengers(address(this)),
+            "ChallengeManager: not authorized as challenger in oracle"
+        );
 
         // Propose slash via the oracle. Status depends on success.
         bytes memory evidence = abi.encode(challengeId);

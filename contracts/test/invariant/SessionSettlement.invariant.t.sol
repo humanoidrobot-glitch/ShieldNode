@@ -22,9 +22,9 @@ contract SettlementHandler is Test {
     address public exitOp;
     address public client;
 
-    bytes32 public entryId = keccak256("entry");
-    bytes32 public relayId = keccak256("relay");
-    bytes32 public exitId  = keccak256("exit");
+    bytes32 public entryId;
+    bytes32 public relayId;
+    bytes32 public exitId;
     bytes32[3] public nodeIds;
 
     uint256 public openCount;
@@ -39,6 +39,9 @@ contract SettlementHandler is Test {
         exitOp  = vm.addr(EXIT_KEY);
         client  = vm.addr(CLIENT_KEY);
 
+        entryId = keccak256(abi.encode(entryOp, keccak256("entry-pub")));
+        relayId = keccak256(abi.encode(relayOp, keccak256("relay-pub")));
+        exitId  = keccak256(abi.encode(exitOp,  keccak256("exit-pub")));
         nodeIds = [entryId, relayId, exitId];
         knownAddresses.push(entryOp);
         knownAddresses.push(relayOp);
@@ -85,7 +88,7 @@ contract SettlementHandler is Test {
 
         uint256 ts = block.timestamp;
         bytes32 d = _digest(sessionId, cumBytes, ts);
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(EXIT_KEY, d));
+        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, _sign(CLIENT_KEY, d), _sign(ENTRY_KEY, d), _sign(RELAY_KEY, d), _sign(EXIT_KEY, d));
 
         vm.prank(client);
         try settlement.settleSession(sessionId, receipt) {} catch {}
@@ -113,24 +116,31 @@ contract SessionSettlementInvariantTest is Test {
 
         handler = new SettlementHandler(registry, settlement);
 
-        // Register nodes.
+        // Register nodes. Cache IDs before pranking.
         address entryOp = handler.entryOp();
         address relayOp = handler.relayOp();
         address exitOp  = handler.exitOp();
+        bytes32 eid = handler.entryId();
+        bytes32 rid = handler.relayId();
+        bytes32 xid = handler.exitId();
 
         vm.deal(entryOp, 10 ether);
         vm.deal(relayOp, 10 ether);
         vm.deal(exitOp, 10 ether);
 
         vm.prank(entryOp);
-        registry.register{value: 0.1 ether}(handler.entryId(), keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 0.1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820");
         vm.prank(relayOp);
-        registry.register{value: 0.1 ether}(handler.relayId(), keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 0.1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820");
         vm.prank(exitOp);
-        registry.register{value: 0.1 ether}(handler.exitId(), keccak256("exit-pub"), "3.3.3.3:51820");
+        registry.register{value: 0.1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820");
 
+        vm.prank(entryOp);
+        registry.updatePricePerByte(eid, 1);
+        vm.prank(relayOp);
+        registry.updatePricePerByte(rid, 1);
         vm.prank(exitOp);
-        registry.updatePricePerByte(handler.exitId(), 1);
+        registry.updatePricePerByte(xid, 1);
 
         targetContract(address(handler));
     }

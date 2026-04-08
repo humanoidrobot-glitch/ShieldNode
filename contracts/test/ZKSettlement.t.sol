@@ -41,7 +41,8 @@ contract ZKSettlementTest is Test {
         zk.executeRegistryRoot(0);
     }
 
-    /// @dev Build 13 public signals with nullifier and depositId bound.
+    /// @dev Build 13 public signals with nullifier, depositId, and address
+    ///      commitments bound (Finding 2: keccak address binding).
     function _pubSignals(
         uint256 totalPayment,
         bytes32 nullifier,
@@ -52,19 +53,19 @@ contract ZKSettlementTest is Test {
         uint256 exitPay  = totalPayment - entryPay - relayPay;
         uint256 refund   = totalPayment <= 1 ether ? 1 ether - totalPayment : 0;
         return [
-            uint256(zk.DOMAIN_SEPARATOR()),  // [0] domainSeparator
-            totalPayment,                     // [1] totalPayment
-            uint256(1),                       // [2] entryCommitment (dummy)
-            uint256(2),                       // [3] relayCommitment (dummy)
-            uint256(3),                       // [4] exitCommitment (dummy)
-            uint256(4),                       // [5] refundCommitment (dummy)
-            uint256(12345),                   // [6] registryRoot
-            uint256(nullifier),               // [7] nullifier
-            uint256(depositId),               // [8] depositId
-            entryPay,                         // [9] entryPayOut
-            relayPay,                         // [10] relayPayOut
-            exitPay,                          // [11] exitPayOut
-            refund                            // [12] refundOut
+            uint256(zk.DOMAIN_SEPARATOR()),                              // [0] domainSeparator
+            totalPayment,                                                 // [1] totalPayment
+            uint256(keccak256(abi.encode(entryOp, entryPay))),           // [2] entryCommitment
+            uint256(keccak256(abi.encode(relayOp, relayPay))),           // [3] relayCommitment
+            uint256(keccak256(abi.encode(exitOp, exitPay))),             // [4] exitCommitment
+            uint256(keccak256(abi.encode(refundTo, refund))),            // [5] refundCommitment
+            uint256(12345),                                               // [6] registryRoot
+            uint256(nullifier),                                           // [7] nullifier
+            uint256(depositId),                                           // [8] depositId
+            entryPay,                                                     // [9] entryPayOut
+            relayPay,                                                     // [10] relayPayOut
+            exitPay,                                                      // [11] exitPayOut
+            refund                                                        // [12] refundOut
         ];
     }
 

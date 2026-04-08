@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 import {SlashingOracle} from "./SlashingOracle.sol";
+import {SessionSettlement} from "./SessionSettlement.sol";
 
 /// @title NodeRegistry
 /// @notice On-chain registry of ShieldNode VPN operators.  Handles staking,
@@ -109,6 +110,11 @@ contract NodeRegistry is INodeRegistry {
         require(nodeId != bytes32(0), "NodeRegistry: zero nodeId");
         require(publicKey != bytes32(0), "NodeRegistry: zero publicKey");
         require(bytes(endpoint).length > 0, "NodeRegistry: empty endpoint");
+        // Bind nodeId to registrant to prevent namespace squatting.
+        require(
+            nodeId == keccak256(abi.encode(msg.sender, publicKey)),
+            "NodeRegistry: nodeId not derived from sender+pubkey"
+        );
 
         _nodes[nodeId] = NodeInfo({
             owner:         msg.sender,
@@ -117,7 +123,7 @@ contract NodeRegistry is INodeRegistry {
             stake:         msg.value,
             registeredAt:  block.timestamp,
             lastHeartbeat: block.timestamp,
-            slashCount:    permanentSlashCount[nodeId],
+            slashCount:    permanentSlashCountByOwner[msg.sender],
             isActive:      true,
             pricePerByte:  0,
             commitment:    bytes32(0)
@@ -159,6 +165,12 @@ contract NodeRegistry is INodeRegistry {
         require(
             SlashingOracle(payable(slashingOracle)).pendingSlashCount(nodeId) == 0,
             "NodeRegistry: pending slash"
+        );
+        // Block withdrawal if node has open (unsettled) sessions.
+        address _settlement = SlashingOracle(payable(slashingOracle)).settlement();
+        require(
+            SessionSettlement(payable(_settlement)).openSessionCount(nodeId) == 0,
+            "NodeRegistry: open sessions"
         );
 
         uint256 amount = _nodes[nodeId].stake;
@@ -279,11 +291,14 @@ contract NodeRegistry is INodeRegistry {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Slash a node's stake.  Only the SlashingOracle may call this.
-    /// @param nodeId The node to slash.
-    /// @param amount The amount of ETH to slash from the node's stake.
-    function slash(bytes32 nodeId, uint256 amount) external onlyOracle {
+    /// @param nodeId  The node to slash.
+    /// @param amount  The amount of ETH to slash from the node's stake.
+    /// @param isFraud True for fraud slashes; false for liveness. Only fraud
+    ///                increments the owner-level counter toward permanent ban.
+    function slash(bytes32 nodeId, uint256 amount, bool isFraud) external onlyOracle {
         NodeInfo storage node = _nodes[nodeId];
         require(node.owner != address(0), "NodeRegistry: node not found");
+        require(amount > 0, "NodeRegistry: zero slash");
 
         uint256 actual = amount > node.stake ? node.stake : amount;
 
@@ -291,7 +306,9 @@ contract NodeRegistry is INodeRegistry {
         node.stake -= actual;
         node.slashCount += 1;
         permanentSlashCount[nodeId] = node.slashCount;
-        permanentSlashCountByOwner[node.owner] += 1;
+        if (isFraud) {
+            permanentSlashCountByOwner[node.owner] += 1;
+        }
 
         emit StakeUpdated(nodeId, node.stake);
 

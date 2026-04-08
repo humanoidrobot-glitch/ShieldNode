@@ -35,7 +35,7 @@ contract SlashingOracleTest is Test {
     uint256 internal challPk   = 0xC0DE;
     address internal challAddr;
 
-    bytes32 constant NODE_ID       = keccak256("node-1");
+    bytes32 internal NODE_ID;
     bytes32 constant PUB_KEY       = keccak256("pubkey-1");
     string  constant ENDPOINT      = "192.168.1.1:51820";
     bytes32 constant UNKNOWN_NODE  = keccak256("non-existent-node");
@@ -45,8 +45,8 @@ contract SlashingOracleTest is Test {
     uint256 internal relayPk = 0xE002;
     address internal entryAddr;
     address internal relayAddr;
-    bytes32 constant ENTRY_ID = keccak256("entry-node");
-    bytes32 constant RELAY_ID = keccak256("relay-node");
+    bytes32 internal ENTRY_ID;
+    bytes32 internal RELAY_ID;
 
     // EIP-712 constants — read from deployed contracts in setUp().
     bytes32 internal domainSep;
@@ -60,6 +60,11 @@ contract SlashingOracleTest is Test {
         challAddr  = vm.addr(challPk);
         entryAddr  = vm.addr(entryPk);
         relayAddr  = vm.addr(relayPk);
+
+        // Finding 14: derive nodeIds from operator address + publicKey.
+        ENTRY_ID = keccak256(abi.encode(entryAddr, keccak256("entry-pub")));
+        RELAY_ID = keccak256(abi.encode(relayAddr, keccak256("relay-pub")));
+        NODE_ID  = keccak256(abi.encode(nodeAddr, PUB_KEY));
 
         vm.startPrank(deployer);
 
@@ -102,7 +107,11 @@ contract SlashingOracleTest is Test {
         vm.prank(nodeAddr);
         registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
 
-        // Set exit price (NODE_ID as exit) and open a session for fraud tests.
+        // Set per-node prices (Finding 11: all 3 nodes must have non-zero price).
+        vm.prank(entryAddr);
+        registry.updatePricePerByte(ENTRY_ID, 1);
+        vm.prank(relayAddr);
+        registry.updatePricePerByte(RELAY_ID, 1);
         vm.prank(nodeAddr);
         registry.updatePricePerByte(NODE_ID, 1);
         bytes32[3] memory sNodeIds = [ENTRY_ID, RELAY_ID, NODE_ID];

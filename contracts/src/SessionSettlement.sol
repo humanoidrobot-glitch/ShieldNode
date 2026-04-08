@@ -50,6 +50,9 @@ contract SessionSettlement is ISessionSettlement {
     /// @notice Pull-payment: credited amounts awaiting withdrawal.
     mapping(address => uint256) public pendingWithdrawals;
 
+    /// @notice Open (unsettled) session count per nodeId.
+    mapping(bytes32 => uint256) public openSessionCount;
+
     /// @dev Reentrancy guard.
     bool private _locked;
 
@@ -125,14 +128,16 @@ contract SessionSettlement is ISessionSettlement {
             "Session: duplicate nodes"
         );
 
-        // Snapshot node owners and exit price at open time.
+        // Snapshot node owners and per-node prices at open time.
         address[3] memory owners;
-        uint256 exitPrice;
+        uint256[3] memory prices;
         for (uint256 i; i < 3; ++i) {
             require(nodeRegistry.isNodeActive(nodeIds[i]), "Session: node not active");
             INodeRegistry.NodeInfo memory info = nodeRegistry.getNode(nodeIds[i]);
             owners[i] = info.owner;
-            if (i == 2) exitPrice = info.pricePerByte;
+            prices[i] = info.pricePerByte;
+            require(prices[i] > 0, "Session: zero price");
+            require(prices[i] <= maxPricePerByte, "Session: price exceeds max");
         }
 
         // Prevent quorum bypass: node owners must be distinct and client
@@ -146,9 +151,6 @@ contract SessionSettlement is ISessionSettlement {
             "Session: client is node owner"
         );
 
-        require(exitPrice > 0, "Session: zero price");
-        require(exitPrice <= maxPricePerByte, "Session: price exceeds max");
-
         uint256 sessionId = nextSessionId++;
 
         _sessions[sessionId] = SessionInfo({
@@ -159,8 +161,13 @@ contract SessionSettlement is ISessionSettlement {
             startTime:       block.timestamp,
             settled:         false,
             cumulativeBytes: 0,
-            pricePerByte:    exitPrice
+            nodePrices:      prices
         });
+
+        // Track open sessions per node.
+        for (uint256 i; i < 3; ++i) {
+            openSessionCount[nodeIds[i]]++;
+        }
 
         emit SessionOpened(sessionId, msg.sender, nodeIds, msg.value);
     }
@@ -187,23 +194,20 @@ contract SessionSettlement is ISessionSettlement {
             uint256 cumulativeBytes,
             uint256 timestamp,
             bytes memory clientSig,
-            bytes memory nodeSig
-        ) = abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes));
+            bytes memory nodeSig0,
+            bytes memory nodeSig1,
+            bytes memory nodeSig2
+        ) = abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes, bytes, bytes));
 
         require(rSessionId == sessionId, "Session: id mismatch");
-        require(timestamp >= s.startTime, "Session: receipt before start");
-        require(timestamp <= block.timestamp, "Session: future receipt");
 
-        bytes32 structHash = EIP712Utils.receiptStructHash(rSessionId, cumulativeBytes, timestamp);
-        bytes32 digest = EIP712Utils.hashTypedData(DOMAIN_SEPARATOR, structHash);
+        bytes32 digest = _verifyReceiptAndNodeSigs(
+            s, rSessionId, cumulativeBytes, timestamp, nodeSig0, nodeSig1, nodeSig2
+        );
 
         // Verify client signature against snapshotted client.
         address clientSigner = EIP712Utils.recoverSigner(digest, clientSig);
         require(clientSigner == s.client, "Session: bad client sig");
-
-        // Verify exit node signature against snapshotted owner.
-        address nodeSigner = EIP712Utils.recoverSigner(digest, nodeSig);
-        require(nodeSigner == s.nodeOwners[2], "Session: bad node sig");
 
         _settle(sessionId, s, cumulativeBytes, s.deposit);
     }
@@ -227,10 +231,11 @@ contract SessionSettlement is ISessionSettlement {
         emit SessionForceSettled(sessionId, msg.sender, cumBytes, actualPaid);
     }
 
-    /// @dev Decode, verify 2-of-3 sigs, and settle with force cap. Extracted to avoid stack-too-deep.
+    /// @dev Decode, verify all 3 node sigs, and settle with force cap.
+    ///      Requires all 3 node signatures.
     /// @param sessionId The session to force-settle.
     /// @param s Storage reference to the session info.
-    /// @param signedReceipt ABI-encoded receipt with two node signatures.
+    /// @param signedReceipt ABI-encoded receipt with three node signatures.
     /// @return cumBytes Cumulative bytes from the receipt.
     /// @return actualPaid Actual ETH distributed to nodes.
     function _verifyAndSettleForce(
@@ -240,24 +245,17 @@ contract SessionSettlement is ISessionSettlement {
     ) internal returns (uint256 cumBytes, uint256 actualPaid) {
         uint256 rSessionId;
         uint256 timestamp;
+        bytes memory nodeSig0;
         bytes memory nodeSig1;
         bytes memory nodeSig2;
-        (rSessionId, cumBytes, timestamp, nodeSig1, nodeSig2) =
-            abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes));
+        (rSessionId, cumBytes, timestamp, nodeSig0, nodeSig1, nodeSig2) =
+            abi.decode(signedReceipt, (uint256, uint256, uint256, bytes, bytes, bytes));
 
         require(rSessionId == sessionId, "Session: id mismatch");
-        require(timestamp >= s.startTime, "Session: receipt before start");
-        require(timestamp <= block.timestamp, "Session: future receipt");
 
-        bytes32 digest = EIP712Utils.hashTypedData(
-            DOMAIN_SEPARATOR,
-            EIP712Utils.receiptStructHash(rSessionId, cumBytes, timestamp)
+        _verifyReceiptAndNodeSigs(
+            s, rSessionId, cumBytes, timestamp, nodeSig0, nodeSig1, nodeSig2
         );
-
-        address signer1 = EIP712Utils.recoverSigner(digest, nodeSig1);
-        address signer2 = EIP712Utils.recoverSigner(digest, nodeSig2);
-        require(signer1 != signer2, "Session: duplicate signers");
-        require(_isSessionOwner(s, signer1) && _isSessionOwner(s, signer2), "Session: bad node sigs");
 
         uint256 cap = (s.deposit * FORCE_SETTLE_CAP_BPS) / 10000;
         actualPaid = _settle(sessionId, s, cumBytes, cap);
@@ -291,7 +289,31 @@ contract SessionSettlement is ISessionSettlement {
     //  Internal helpers
     // ──────────────────────────────────────────────────────────────
 
+    /// @dev Validate receipt timestamps and verify all 3 node EIP-712 sigs.
+    function _verifyReceiptAndNodeSigs(
+        SessionInfo storage s,
+        uint256 sessionId,
+        uint256 cumulativeBytes,
+        uint256 timestamp,
+        bytes memory nodeSig0,
+        bytes memory nodeSig1,
+        bytes memory nodeSig2
+    ) internal view returns (bytes32 digest) {
+        require(timestamp >= s.startTime, "Session: receipt before start");
+        require(timestamp <= block.timestamp, "Session: future receipt");
+
+        digest = EIP712Utils.hashTypedData(
+            DOMAIN_SEPARATOR,
+            EIP712Utils.receiptStructHash(sessionId, cumulativeBytes, timestamp)
+        );
+
+        require(EIP712Utils.recoverSigner(digest, nodeSig0) == s.nodeOwners[0], "Session: bad entry sig");
+        require(EIP712Utils.recoverSigner(digest, nodeSig1) == s.nodeOwners[1], "Session: bad relay sig");
+        require(EIP712Utils.recoverSigner(digest, nodeSig2) == s.nodeOwners[2], "Session: bad exit sig");
+    }
+
     /// @dev Settle a session: credit node payments and client refund.
+    ///      Each node is paid at its own price * share.
     /// @param sessionId The session to settle.
     /// @param s Storage reference to the session info.
     /// @param cumulativeBytes Total bytes consumed in the session.
@@ -304,8 +326,18 @@ contract SessionSettlement is ISessionSettlement {
         uint256 cap
     ) internal returns (uint256 totalPaid) {
         require(cumulativeBytes <= MAX_CUMULATIVE_BYTES, "Session: bytes overflow");
-        totalPaid = cumulativeBytes * s.pricePerByte;
+
+        // Compute per-node payments using individual prices and share weights.
+        uint256 entryPay = (cumulativeBytes * s.nodePrices[0] * ENTRY_SHARE) / 100;
+        uint256 relayPay = (cumulativeBytes * s.nodePrices[1] * RELAY_SHARE) / 100;
+        uint256 exitPay  = (cumulativeBytes * s.nodePrices[2] * EXIT_SHARE) / 100;
+        totalPaid = entryPay + relayPay + exitPay;
+
         if (totalPaid > cap) {
+            // Scale proportionally to stay within cap
+            entryPay = (entryPay * cap) / totalPaid;
+            relayPay = (relayPay * cap) / totalPaid;
+            exitPay  = cap - entryPay - relayPay;
             totalPaid = cap;
         }
 
@@ -313,11 +345,14 @@ contract SessionSettlement is ISessionSettlement {
         s.settled = true;
         s.cumulativeBytes = cumulativeBytes;
 
-        // Split payments (pull-payment: credit, don't transfer).
-        uint256 entryPay = (totalPaid * ENTRY_SHARE) / 100;
-        uint256 relayPay = (totalPaid * RELAY_SHARE) / 100;
-        uint256 exitPay  = totalPaid - entryPay - relayPay;
+        // Decrement open session count per node.
+        for (uint256 i; i < 3; ++i) {
+            if (openSessionCount[s.nodeIds[i]] > 0) {
+                openSessionCount[s.nodeIds[i]]--;
+            }
+        }
 
+        // Credit payments (pull-payment pattern).
         if (entryPay > 0) pendingWithdrawals[s.nodeOwners[0]] += entryPay;
         if (relayPay > 0) pendingWithdrawals[s.nodeOwners[1]] += relayPay;
         if (exitPay > 0)  pendingWithdrawals[s.nodeOwners[2]] += exitPay;
