@@ -5,14 +5,19 @@
 //! receipt data. The proof + public signals are submitted to ZKSettlement.sol.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use ark_bn254::{Bn254, Fr};
 use ark_circom::{CircomBuilder, CircomConfig, CircomReduction};
-use ark_groth16::Groth16;
+use ark_groth16::{Groth16, ProvingKey};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::thread_rng;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
+
+/// Cached proving key. Stores (zkey_path, ProvingKey) so we can detect
+/// path changes and reload if necessary.
+static PROVING_KEY_CACHE: Mutex<Option<(String, Arc<ProvingKey<Bn254>>)>> = Mutex::new(None);
 
 /// Paths to the compiled circuit artifacts.
 pub struct CircuitArtifacts {
@@ -110,17 +115,13 @@ pub fn generate_proof(
         .get_public_inputs()
         .ok_or_else(|| "failed to get public inputs from witness".to_string())?;
 
-    // 4. Load the proving key from zkey file.
-    let zkey_file = std::fs::File::open(&artifacts.zkey_path)
-        .map_err(|e| format!("failed to open zkey: {e}"))?;
-    let mut zkey_reader = std::io::BufReader::new(zkey_file);
-    let (pk, _matrices) =
-        ark_circom::read_zkey(&mut zkey_reader).map_err(|e| format!("failed to read zkey: {e}"))?;
+    // 4. Load the proving key (cached after first load).
+    let pk = get_or_load_proving_key(&artifacts.zkey_path)?;
 
     // 5. Generate the proof.
     let mut rng = thread_rng();
     let proof =
-        Groth16::<Bn254, CircomReduction>::create_random_proof_with_reduction(circom, &pk, &mut rng)
+        Groth16::<Bn254, CircomReduction>::create_random_proof_with_reduction(circom, &*pk, &mut rng)
             .map_err(|e| format!("proof generation failed: {e}"))?;
 
     // 6. Format proof for Solidity.
@@ -132,6 +133,39 @@ pub fn artifacts_exist(artifacts: &CircuitArtifacts) -> bool {
     Path::new(&artifacts.wasm_path).exists()
         && Path::new(&artifacts.r1cs_path).exists()
         && Path::new(&artifacts.zkey_path).exists()
+}
+
+/// Load the proving key from cache, or read from disk on first call.
+/// Reloads if the zkey path changes. Disk I/O happens outside the lock
+/// so concurrent callers aren't blocked by the (potentially slow) read.
+fn get_or_load_proving_key(zkey_path: &str) -> Result<Arc<ProvingKey<Bn254>>, String> {
+    // Fast path: check cache under lock, release immediately.
+    {
+        let cache = PROVING_KEY_CACHE
+            .lock()
+            .map_err(|e| format!("proving key cache lock poisoned: {e}"))?;
+        if let Some((ref cached_path, ref pk)) = *cache {
+            if cached_path == zkey_path {
+                return Ok(Arc::clone(pk));
+            }
+        }
+    }
+
+    // Slow path: read from disk without holding the lock.
+    let zkey_file = std::fs::File::open(zkey_path)
+        .map_err(|e| format!("failed to open zkey: {e}"))?;
+    let mut zkey_reader = std::io::BufReader::new(zkey_file);
+    let (pk, _matrices) =
+        ark_circom::read_zkey(&mut zkey_reader)
+            .map_err(|e| format!("failed to read zkey: {e}"))?;
+
+    // Re-acquire lock to store result.
+    let pk = Arc::new(pk);
+    let mut cache = PROVING_KEY_CACHE
+        .lock()
+        .map_err(|e| format!("proving key cache lock poisoned: {e}"))?;
+    *cache = Some((zkey_path.to_string(), Arc::clone(&pk)));
+    Ok(pk)
 }
 
 // ── input population ──────────────────────────────────────────────────
@@ -238,4 +272,16 @@ fn g2_to_strings(point: &ark_bn254::G2Affine) -> [[String; 2]; 2] {
         [field_to_decimal(&point.x.c0), field_to_decimal(&point.x.c1)],
         [field_to_decimal(&point.y.c0), field_to_decimal(&point.y.c1)],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_returns_err_for_nonexistent_path() {
+        let result = get_or_load_proving_key("/nonexistent/path.zkey");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to open zkey"));
+    }
 }

@@ -19,6 +19,7 @@ use crypto::keys::NodeKeyPair;
 use metrics::bandwidth::BandwidthTracker;
 use network::chain::ChainService;
 use network::heartbeat::HeartbeatService;
+use network::link_padding::{link_padding_loop, LinkPaddingManager};
 use network::relay::RelayService;
 use network::relay_listener::RelayListener;
 use tunnel::listener::TunnelListener;
@@ -288,6 +289,14 @@ async fn main() -> Result<()> {
 
     let relay_service = Arc::new(tokio::sync::RwLock::new(RelayService::new(bandwidth.clone())));
 
+    let link_padding_mgr = if cfg.link_padding_enabled {
+        Some(Arc::new(tokio::sync::Mutex::new(
+            LinkPaddingManager::new(cfg.link_padding_pps),
+        )))
+    } else {
+        None
+    };
+
     // Build operator signer and settlement address for EIP-712 receipt
     // co-signing (all three must be present to enable the feature).
     let operator_signer: Option<PrivateKeySigner> = cfg
@@ -318,7 +327,7 @@ async fn main() -> Result<()> {
                 .ok()
         });
 
-    let relay_listener = RelayListener::bind(
+    let (relay_listener, relay_socket) = RelayListener::bind(
         cfg.relay_port,
         relay_service,
         tun,
@@ -326,6 +335,7 @@ async fn main() -> Result<()> {
         operator_signer,
         Some(cfg.chain_id),
         settlement_address,
+        link_padding_mgr.clone(),
     )
     .await
     .context("failed to bind relay listener")?;
@@ -335,6 +345,14 @@ async fn main() -> Result<()> {
             error!(error = %e, "relay listener exited with error");
         }
     });
+
+    let link_padding_state = if let Some(mgr) = link_padding_mgr {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let handle = tokio::spawn(link_padding_loop(stop.clone(), relay_socket, mgr));
+        Some((stop, handle))
+    } else {
+        None
+    };
 
     // ── libp2p discovery (best-effort) ────────────────────────────────
 
@@ -363,8 +381,12 @@ async fn main() -> Result<()> {
 
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
+    if let Some((ref stop, _)) = link_padding_state {
+        stop.notify_one();
+    }
 
     // Give tasks a chance to finish gracefully, then abort stragglers.
+    let padding_handle = link_padding_state.map(|(_, h)| h);
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
     tokio::select! {
         _ = metrics_handle => {}
@@ -372,6 +394,7 @@ async fn main() -> Result<()> {
         _ = tunnel_handle => {}
         _ = relay_handle => {}
         _ = discovery_handle => {}
+        _ = async { if let Some(h) = padding_handle { let _ = h.await; } } => {}
         _ = timeout => {
             warn!("graceful shutdown timed out, aborting remaining tasks");
         }

@@ -629,4 +629,167 @@ mod tests {
         let selected = [Some(a), None, None];
         assert!(!is_diverse(&b, &selected));
     }
+
+    #[test]
+    fn diverse_circuit_respects_subnet_separation() {
+        // 9 nodes across 3 subnets: 10.0.1.x, 10.0.2.x, 10.0.3.x
+        let mut nodes = Vec::new();
+        let subnets = [1, 2, 3];
+        let mut op_counter = 1;
+        for &subnet in &subnets {
+            for host in 1..=3 {
+                let id = format!("subnet{}-{}", subnet, host);
+                let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+                n.node_id = id;
+                n.endpoint = format!("10.0.{}.{}:51820", subnet, host);
+                n.operator_address = format!("0xOp{}", op_counter);
+                op_counter += 1;
+                nodes.push(n);
+            }
+        }
+
+        for _ in 0..100 {
+            let circuit =
+                select_circuit_with_pins(&nodes, &[], &["", "", ""]).unwrap();
+            let prefixes: Vec<Option<String>> = circuit
+                .iter()
+                .map(|n| subnet_prefix(&n.endpoint))
+                .collect();
+            // All 3 nodes must have different subnet prefixes.
+            assert_ne!(prefixes[0], prefixes[1], "entry and relay share subnet");
+            assert_ne!(prefixes[1], prefixes[2], "relay and exit share subnet");
+            assert_ne!(prefixes[0], prefixes[2], "entry and exit share subnet");
+        }
+    }
+
+    #[test]
+    fn fallback_when_all_same_asn() {
+        // 6 nodes on different subnets but all sharing ASN 13335.
+        let mut nodes = Vec::new();
+        for i in 1..=6 {
+            let id = format!("asn-node-{}", i);
+            let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+            n.node_id = id;
+            n.endpoint = format!("10.0.{}.1:51820", i);
+            n.operator_address = format!("0xOp{}", i);
+            n.asn = Some(13335);
+            nodes.push(n);
+        }
+
+        // Should succeed via fallback (relaxed diversity when no diverse candidates exist).
+        let result = select_circuit_with_pins(&nodes, &[], &["", "", ""]);
+        assert!(result.is_ok(), "expected Ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn diversity_rejects_same_operator_in_circuit() {
+        // 6 nodes on 6 different subnets. 3 share operator "0xSame", 3 are unique.
+        let mut nodes = Vec::new();
+        for i in 1..=3 {
+            let id = format!("same-op-{}", i);
+            let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+            n.node_id = id;
+            n.endpoint = format!("10.0.{}.1:51820", i);
+            n.operator_address = "0xSame".to_string();
+            nodes.push(n);
+        }
+        for i in 4..=6 {
+            let id = format!("unique-op-{}", i);
+            let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+            n.node_id = id;
+            n.endpoint = format!("10.0.{}.1:51820", i);
+            n.operator_address = format!("0xOp{}", i);
+            nodes.push(n);
+        }
+
+        for _ in 0..50 {
+            let circuit =
+                select_circuit_with_pins(&nodes, &[], &["", "", ""]).unwrap();
+            let same_op_count = circuit
+                .iter()
+                .filter(|n| n.operator_address == "0xSame")
+                .count();
+            assert!(
+                same_op_count <= 1,
+                "circuit contained {} nodes from 0xSame operator (max 1 allowed): [{}, {}, {}]",
+                same_op_count,
+                circuit[0].node_id,
+                circuit[1].node_id,
+                circuit[2].node_id,
+            );
+        }
+    }
+
+    #[test]
+    fn diverse_circuit_with_pins() {
+        // 6 nodes on 6 different subnets with unique operators.
+        let mut nodes = Vec::new();
+        for i in 1..=6 {
+            let id = format!("pin-node-{}", i);
+            let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+            n.node_id = id;
+            n.endpoint = format!("10.0.{}.1:51820", i);
+            n.operator_address = format!("0xOp{}", i);
+            nodes.push(n);
+        }
+
+        let pinned_entry = "pin-node-1";
+        let pinned_exit = "pin-node-3";
+        let entry_subnet = subnet_prefix("10.0.1.1:51820").unwrap();
+        let exit_subnet = subnet_prefix("10.0.3.1:51820").unwrap();
+
+        for _ in 0..50 {
+            let circuit = select_circuit_with_pins(
+                &nodes,
+                &[],
+                &[pinned_entry, "", pinned_exit],
+            )
+            .unwrap();
+
+            // Verify pinned positions are respected.
+            assert_eq!(circuit[0].node_id, pinned_entry);
+            assert_eq!(circuit[2].node_id, pinned_exit);
+
+            // Relay must not share subnet with pinned entry or exit.
+            let relay_subnet = subnet_prefix(&circuit[1].endpoint).unwrap();
+            assert_ne!(
+                relay_subnet, entry_subnet,
+                "relay shares subnet with pinned entry"
+            );
+            assert_ne!(
+                relay_subnet, exit_subnet,
+                "relay shares subnet with pinned exit"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_all_same_subnet_and_operator() {
+        // 4 nodes all on 10.0.1.x with the same operator — worst-case diversity.
+        let mut nodes = Vec::new();
+        for i in 1..=4 {
+            let id = format!("shared-{}", i);
+            let mut n = make_node(&id, 1_000_000_000_000_000_000, 0.95, 10, 0);
+            n.node_id = id;
+            n.endpoint = format!("10.0.1.{}:51820", i);
+            n.operator_address = "0xShared".to_string();
+            nodes.push(n);
+        }
+
+        // Should succeed via fallback despite zero diversity.
+        let result = select_circuit_with_pins(&nodes, &[], &["", "", ""]);
+        assert!(result.is_ok(), "expected Ok but got: {:?}", result);
+
+        let circuit = result.unwrap();
+        // All 3 node IDs must be distinct.
+        let mut ids: Vec<&str> = circuit.iter().map(|n| n.node_id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            3,
+            "expected 3 distinct node_ids, got: {:?}",
+            circuit.iter().map(|n| &n.node_id).collect::<Vec<_>>()
+        );
+    }
 }

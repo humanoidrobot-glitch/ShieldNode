@@ -183,12 +183,8 @@ Resolved: Circuit now outputs `entryPay`, `relayPay`, `exitPay`, `refund` as pub
 ### ~~EIP-712 digest computed off-circuit~~ — RESOLVED
 Resolved: EIP-712 digest is now computed entirely in-circuit via two keccak256 calls (~300K constraints, ~9% increase). No external trust required.
 
-### Owner-gated registry root updates
-`ZKSettlement.updateRegistryRoot()` uses a simple `owner == msg.sender` check. Single point of failure for registry root integrity.
-
-**Why deferred:** Documented as temporary in the contract. The proper fix is reading the Merkle root directly from NodeRegistry (requires NodeRegistry to maintain a Poseidon Merkle tree of registered nodes).
-
-**When to fix:** Phase 5, alongside the mainnet security audit. Add timelock + multisig at minimum.
+### ~~Owner-gated registry root updates~~ — RESOLVED
+Resolved: Registry root updates now use a 48-hour timelock via `proposeRegistryRoot()` and `executeRegistryRoot()`. `ROOT_TIMELOCK = 48 hours` enforces the delay. Multisig is still recommended for mainnet.
 
 ### ~~RECEIPT_TYPEHASH defined in three places~~ — RESOLVED
 Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both contracts and test files import `EIP712Utils.RECEIPT_TYPEHASH`.
@@ -204,12 +200,8 @@ Resolved: `RECEIPT_TYPEHASH` now defined once in `EIP712Utils.sol`. Both contrac
 
 **When to fix:** When the TUN device is fully wired. Route DNS through the tunnel, then remove the AllowDNS firewall exception. Alternatively, run a local DNS proxy on localhost that forwards queries through the tunnel.
 
-### Zkey ProvingKey loaded from disk on every proof generation
-`client/src-tauri/src/zk_prove.rs` reads and parses the zkey file (~100MB for a 3.5M constraint circuit) on every `generate_proof()` call. The `ProvingKey<Bn254>` is immutable after loading.
-
-**Why deferred:** Proving happens once per session disconnect. Single load is acceptable for current usage.
-
-**When to fix:** If batch settlements or retry logic make multiple proofs common. Cache the `ProvingKey` in `AppState` via `Arc<OnceCell<ProvingKey<Bn254>>>`.
+### ~~Zkey ProvingKey loaded from disk on every proof generation~~ — RESOLVED
+Resolved: `ProvingKey` is cached in a module-level `Mutex<Option<(String, Arc<ProvingKey<Bn254>>)>>`. First call loads from disk; subsequent calls return the cached `Arc`. Cache invalidates if the zkey path changes.
 
 ### ~~Gas price display units~~ — RESOLVED
 Resolved: Backend now returns gas price as `f64` in Gwei. Sub-Gwei values (e.g., 0.15 Gwei) display correctly. Frontend `.toFixed(2)` handles precision.
@@ -269,19 +261,11 @@ The client's `score_node` in `circuit.rs` hardcodes `20.0` for the TEE bonus. Th
 
 ## Challenge-Response Protocol (Phase 5)
 
-### Challenge response content not validated
-`ChallengeManager.respondToChallenge()` only verifies the EIP-712 signer matches the node operator. It does NOT validate the `responseHash` content — a node can sign any hash and pass. For `BandwidthVerification` the node should prove forwarding; for `PacketIntegrity` the response should match `challengeData`. Currently all challenge types accept any signed response.
+### ~~Challenge response content not validated~~ — RESOLVED
+Resolved: `respondToChallenge()` now rejects `bytes32(0)` responses for `BandwidthVerification` and `PacketIntegrity` challenge types. Full content-aware validation (e.g., ZK-VM proof of forwarding) remains Phase 6 work.
 
-**Why deferred:** v1 is a signer-only liveness gate — proving the node operator is online and has key access. Content verification requires type-specific validation logic (e.g., ZK-VM proof for packet forwarding) which is Phase 6 work.
-
-**When to fix:** Phase 6 when ZK-VM proof of correct forwarding is implemented. Add type-specific validation dispatching in `respondToChallenge()`.
-
-### expireChallenge does not auto-propose slash
-`expireChallenge()` marks a challenge as `Expired` and emits `ChallengeExpired`, but does not automatically call `SlashingOracle.proposeSlash()`. The challenger must manually file a slash proposal using the expiration as evidence. If the challenger goes offline, unresponsive nodes face no penalty.
-
-**Why deferred:** Intentional decoupling — challenge lifecycle and slashing are separate concerns. Auto-slash would create tight coupling between ChallengeManager and SlashingOracle's evidence encoding format.
-
-**When to fix:** Add a `SlashReason.ChallengeUnresponded` to the SlashingOracle, or allow ChallengeManager to call `proposeSlash()` directly with a pre-encoded evidence blob. Consider adding a bot that watches `ChallengeExpired` events and auto-files slash proposals.
+### ~~expireChallenge does not auto-propose slash~~ — RESOLVED
+Resolved: `expireChallenge()` now calls `oracle.proposeSlash()` via try/catch. On failure, status is set to `SlashFailed` with a `retrySlash()` function for manual retry. Authorization is verified before the call to fail loudly on misconfigured deployments.
 
 ### ~~compute_domain_separator duplicated in Rust (challenge.rs + receipts.rs)~~ — RESOLVED
 Resolved: Extracted to `node/src/network/eip712.rs`. Both `challenge.rs` and `receipts.rs` re-export `compute_domain_separator` from the shared module.
@@ -324,12 +308,8 @@ Cover packets are identified by the exit node via `payload[0] == 0xCC` after pee
 
 **When to fix:** With the shared crate migration, or when a third rate-tracking consumer appears. Extract to a `TrafficRateState` struct with configurable jitter range.
 
-### Link padding peer discovery not wired
-`LinkPaddingManager.add_peer()`/`remove_peer()` are never called from the relay forwarding code. The manager starts with zero peers and produces no padding even when `link_padding_enabled = true`. The relay listener needs to register peers when hop-to-hop connections are established and remove them on teardown.
-
-**Why deferred:** Documented with a TODO on the struct. Wiring requires changes to relay.rs session management to notify the padding manager of active peer links.
-
-**When to fix:** When integrating link padding into the live relay pipeline. Add `add_peer`/`remove_peer` calls in relay session setup/teardown.
+### ~~Link padding peer discovery not wired~~ — RESOLVED
+Resolved: `RelayListener` now calls `LinkPaddingManager.add_peer()` on SessionSetup and `remove_peer()` on SessionTeardown. The manager and relay listener share an `Arc<tokio::sync::Mutex<LinkPaddingManager>>`, and the relay UDP socket is shared via `Arc<UdpSocket>`.
 
 ### ~~AtomicBool stop flag instead of CancellationToken in link_padding_loop~~ — RESOLVED
 Resolved: Replaced `Arc<AtomicBool>` with `Arc<tokio::sync::Notify>`. The loop now uses `tokio::select!` to wake immediately on stop notification instead of polling after each sleep interval.
@@ -369,12 +349,8 @@ CommitmentTree uses keccak256 for internal Merkle tree nodes. The ZK bandwidth r
 
 **When to fix:** Phase 6 when deploying the ZK-compatible tree. Deploy a Poseidon version alongside, migrate real commitments, update ZKSettlement.registryRoot. Consider using a Poseidon Solidity library (e.g., circomlibjs's Solidity Poseidon) or wait for an EVM Poseidon precompile.
 
-### Deployer-known salt compromises dummy indistinguishability
-`initialize(bytes32 salt)` uses a deployer-provided salt. The deployer can later compute `keccak256("dummy", i, salt)` for any index and determine whether a commitment is real or dummy. The contract comments recommend VDF or commit-reveal for production salt generation, but there is no enforcement.
-
-**Why deferred:** Deployment-time operational concern, not a code change. The contract correctly accepts any salt — the security depends on how the salt is generated, not on the contract logic.
-
-**When to fix:** At mainnet deployment. Generate salt via a VDF (verifiable delay function) or a multi-party commit-reveal ceremony. Document the salt generation procedure in the operator deployment guide.
+### ~~Deployer-known salt compromises dummy indistinguishability~~ — RESOLVED
+Resolved: `initialize()` now mixes the caller-supplied `saltCommitment` with `blockhash(block.number - 1)`, so the effective salt is not reconstructable from calldata alone. VDF or commit-reveal for the input salt is still recommended for mainnet.
 
 ---
 

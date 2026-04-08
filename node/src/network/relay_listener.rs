@@ -13,6 +13,7 @@ use crate::metrics::bandwidth::BandwidthTracker;
 use crate::tunnel::tun_device::TunDevice;
 
 use super::hop_codec;
+use super::link_padding::LinkPaddingManager;
 use super::receipts;
 use super::relay::{RelayService, SessionState};
 
@@ -48,7 +49,7 @@ use super::control_msg::{self, RelayControlType, ACK_SUCCESS, ACK_FAILURE};
 /// 5. Otherwise the re-wrapped packet is forwarded to the next hop's relay
 ///    port with the new session_id.
 pub struct RelayListener {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     relay_service: Arc<RwLock<RelayService>>,
     tun: Option<Arc<TunDevice>>,
     /// Kept for future direct bandwidth bookkeeping (e.g. per-relay-hop stats).
@@ -58,6 +59,8 @@ pub struct RelayListener {
     operator_signer: Option<PrivateKeySigner>,
     /// Pre-computed EIP-712 domain separator for the SessionSettlement contract.
     domain_separator: Option<B256>,
+    /// Optional link padding manager, shared with the padding loop.
+    link_padding: Option<Arc<Mutex<LinkPaddingManager>>>,
 }
 
 impl RelayListener {
@@ -75,11 +78,14 @@ impl RelayListener {
         operator_signer: Option<PrivateKeySigner>,
         chain_id: Option<u64>,
         settlement_address: Option<Address>,
-    ) -> Result<Self> {
+        link_padding: Option<Arc<Mutex<LinkPaddingManager>>>,
+    ) -> Result<(Self, Arc<UdpSocket>)> {
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
-        let socket = UdpSocket::bind(addr)
-            .await
-            .with_context(|| format!("binding relay listener on {addr}"))?;
+        let socket = Arc::new(
+            UdpSocket::bind(addr)
+                .await
+                .with_context(|| format!("binding relay listener on {addr}"))?,
+        );
         info!(%addr, "relay UDP listener bound");
 
         // Pre-compute the domain separator when all EIP-712 params are available.
@@ -96,14 +102,20 @@ impl RelayListener {
             _ => None,
         };
 
-        Ok(Self {
-            socket,
-            relay_service,
-            tun,
-            bandwidth,
-            operator_signer,
-            domain_separator,
-        })
+        let socket_clone = socket.clone();
+
+        Ok((
+            Self {
+                socket,
+                relay_service,
+                tun,
+                bandwidth,
+                operator_signer,
+                domain_separator,
+                link_padding,
+            },
+            socket_clone,
+        ))
     }
 
     /// Main receive loop — runs until the task is cancelled.
@@ -279,6 +291,9 @@ impl RelayListener {
                 };
 
                 if accepted {
+                    if let Some(ref lp) = self.link_padding {
+                        lp.lock().await.add_peer(peer_addr);
+                    }
                     info!(
                         peer = %peer_addr,
                         session_id = real_session_id,
@@ -314,6 +329,10 @@ impl RelayListener {
                 {
                     let mut svc = self.relay_service.write().await;
                     svc.remove_session(target_session_id);
+                }
+
+                if let Some(ref lp) = self.link_padding {
+                    lp.lock().await.remove_peer(&peer_addr);
                 }
 
                 info!(

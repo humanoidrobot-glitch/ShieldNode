@@ -91,10 +91,8 @@ impl PeerLink {
 
 /// Manages padding for all peer links.
 ///
-/// TODO: Wire add_peer/remove_peer into relay.rs — register peers when
-/// hop-to-hop connections are established, remove on teardown. Currently
-/// the manager starts with zero peers and produces no padding until peers
-/// are registered by the relay forwarding code.
+/// Peers are registered when relay sessions are established via
+/// `RelayListener` and removed on session teardown.
 pub struct LinkPaddingManager {
     peers: HashMap<SocketAddr, PeerLink>,
     target_pps: u32,
