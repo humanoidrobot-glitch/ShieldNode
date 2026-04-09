@@ -376,3 +376,35 @@ Resolved: Extracted `MerkleVerify(DEPTH)` template to `circuits/lib/merkle.circo
 **Why deferred:** The entire client Sphinx module (classic and PQ) uses `String` errors, matching the client's `kex.rs` `KeyExchange` trait which also returns `String`. Fixing PQ alone would create inconsistency within the client crate.
 
 **When to fix:** When adding a client-side `SphinxError` enum. Do classic and PQ together. Alternatively, resolves naturally with the shared crate migration if the node's `SphinxError` is used directly.
+
+---
+
+## Contract Structural Patterns (identified April 9, 2026 review)
+
+### ReentrancyGuard, Ownable2Step, PullPayment, Pausable duplicated across contracts
+Five contracts each define their own `bool private _locked` + `nonReentrant()` modifier: NodeRegistry, SessionSettlement, ZKSettlement, SlashingOracle, ChallengeManager. Four contracts duplicate the two-step ownership pattern (`owner`, `pendingOwner`, `transferOwnership`, `acceptOwnership`): ZKSettlement, SlashingOracle, Treasury, CommitmentTree. Four contracts duplicate the pull-payment `withdraw()` function. Two contracts duplicate `whenNotPaused` + pause/unpause logic.
+
+**Why deferred:** Each contract works correctly in isolation. Extracting shared base contracts (`contracts/src/lib/ReentrancyGuard.sol`, `Ownable2Step.sol`, `PullPayment.sol`, `Pausable.sol`) touches all contracts and all 157 tests. Better done as a dedicated refactor pass, not mid-feature work.
+
+**When to fix:** Before Phase 5 mainnet launch. Extract lightweight local base contracts (no OpenZeppelin dependency) in `contracts/src/lib/`.
+
+### `banned` mapping redundant with `permanentBan` in NodeRegistry
+`NodeRegistry` has both `mapping(bytes32 => bool) public banned` and `mapping(bytes32 => bool) public permanentBan`. Both are set to `true` in `ban()`. The `banned` flag is deleted on `withdrawStake()` while `permanentBan` persists, but `_isActive()` already checks `n.isActive` which `ban()` sets to false. The `!banned[nodeId]` check in `_isActive` is belt-and-suspenders.
+
+**Why deferred:** Removing `banned` requires auditing all callers and tests for the distinction. Low risk — no functional impact, just one extra SLOAD in `_isActive`.
+
+**When to fix:** With the shared base contract extraction pass.
+
+### ZK settlement gas budget needs update
+Switching from `keccak256(abi.encode(addr, amount))` to `PoseidonT3.hash(...)` for commitment binding in `ZKSettlement._verifyAndCredit()` adds ~40-60K gas (4 Poseidon hashes). The gas budget in CLAUDE.md and docs says ~250K for ZK settle — should be updated to ~300-310K.
+
+**Why deferred:** Documentation-only change, no functional impact.
+
+**When to fix:** Next documentation pass.
+
+### `MINIMUM_DEPOSIT` and share constants duplicated between SessionSettlement and ZKSettlement
+`MINIMUM_DEPOSIT = 0.001 ether`, `ENTRY_SHARE = 25`, `RELAY_SHARE = 25` are defined identically in both contracts. If the split ratio changes, both must be updated.
+
+**Why deferred:** Only two contracts, values are stable. Extracting to `contracts/src/lib/Constants.sol` is trivial but low priority.
+
+**When to fix:** With the shared base contract extraction pass.

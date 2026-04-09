@@ -51,9 +51,19 @@ pub struct ReceiptWitness {
     pub node_r: Vec<String>,
     pub node_s: Vec<String>,
 
-    // Merkle proof for node registry
+    // Merkle proofs for node registry (all 3 nodes)
     pub node_merkle_proof: Vec<String>,
     pub node_merkle_index: String,
+
+    // Entry node public key + Merkle proof
+    pub entry_pubkey: Vec<Vec<String>>,
+    pub entry_merkle_proof: Vec<String>,
+    pub entry_merkle_index: String,
+
+    // Relay node public key + Merkle proof
+    pub relay_pubkey: Vec<Vec<String>>,
+    pub relay_merkle_proof: Vec<String>,
+    pub relay_merkle_index: String,
 
     // Deposit ID binding (private input, constrained to match public signal)
     pub deposit_id_private: String,
@@ -88,7 +98,7 @@ pub struct ZkProof {
     pub pi_b: [[String; 2]; 2],
     /// Proof point C [x, y] (G1)
     pub pi_c: [String; 2],
-    /// Public signals (7 values matching circuit public inputs)
+    /// Public signals (13 values: 9 inputs + 4 proven outputs)
     pub public_signals: Vec<String>,
 }
 
@@ -183,6 +193,8 @@ fn populate_inputs(
     push_input(builder, "exitCommitmentPub", &public.exit_commitment)?;
     push_input(builder, "refundCommitmentPub", &public.refund_commitment)?;
     push_input(builder, "registryRoot", &public.registry_root)?;
+    push_input(builder, "nullifierPub", &public.nullifier)?;
+    push_input(builder, "depositIdPub", &public.deposit_id)?;
 
     // Private inputs — receipt data
     push_input(builder, "sessionId", &witness.session_id)?;
@@ -206,9 +218,20 @@ fn populate_inputs(
     push_limbs(builder, "nodeR", &witness.node_r)?;
     push_limbs(builder, "nodeS", &witness.node_s)?;
 
-    // Private inputs — Merkle proof
+    // Private inputs — Merkle proofs (all 3 nodes)
     push_limbs(builder, "nodeMerkleProof", &witness.node_merkle_proof)?;
     push_input(builder, "nodeMerkleIndex", &witness.node_merkle_index)?;
+
+    push_limb_array(builder, "entryPubkey", &witness.entry_pubkey)?;
+    push_limbs(builder, "entryMerkleProof", &witness.entry_merkle_proof)?;
+    push_input(builder, "entryMerkleIndex", &witness.entry_merkle_index)?;
+
+    push_limb_array(builder, "relayPubkey", &witness.relay_pubkey)?;
+    push_limbs(builder, "relayMerkleProof", &witness.relay_merkle_proof)?;
+    push_input(builder, "relayMerkleIndex", &witness.relay_merkle_index)?;
+
+    // Private input — deposit ID binding
+    push_input(builder, "depositIdPrivate", &witness.deposit_id_private)?;
 
     Ok(())
 }

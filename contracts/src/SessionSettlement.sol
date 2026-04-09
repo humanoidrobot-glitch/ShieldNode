@@ -19,6 +19,7 @@ contract SessionSettlement is ISessionSettlement {
     uint256 public constant MINIMUM_DEPOSIT = 0.001 ether;
     uint256 public constant FORCE_SETTLE_TIMEOUT = 1 hours;
     uint256 public constant FORCE_SETTLE_CAP_BPS = 5000; // 50%
+    uint256 public constant SESSION_CLEANUP_TIMEOUT = 30 days;
 
     uint256 public constant ENTRY_SHARE = 25;
     uint256 public constant RELAY_SHARE = 25;
@@ -68,6 +69,7 @@ contract SessionSettlement is ISessionSettlement {
 
     event Paused(address account);
     event Unpaused(address account);
+    event SessionCleanedUp(uint256 indexed sessionId, address indexed client, uint256 refund);
 
     // ──────────────────────────────────────────────────────────────
     //  Constructor
@@ -262,6 +264,32 @@ contract SessionSettlement is ISessionSettlement {
     }
 
     // ──────────────────────────────────────────────────────────────
+    //  Idle session cleanup
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice Clean up an abandoned session after SESSION_CLEANUP_TIMEOUT.
+    ///         Callable by anyone.  Refunds the full deposit to the client
+    ///         and decrements openSessionCount so nodes can unstake.
+    /// @param sessionId The abandoned session to clean up.
+    function cleanupSession(uint256 sessionId) external nonReentrant whenNotPaused {
+        SessionInfo storage s = _sessions[sessionId];
+        require(s.client != address(0), "Session: unknown");
+        require(!s.settled, "Session: already settled");
+        require(
+            block.timestamp >= s.startTime + SESSION_CLEANUP_TIMEOUT,
+            "Session: cleanup too early"
+        );
+
+        s.settled = true;
+        s.cumulativeBytes = 0;
+        _decrementOpenSessions(s.nodeIds);
+
+        pendingWithdrawals[s.client] += s.deposit;
+
+        emit SessionCleanedUp(sessionId, s.client, s.deposit);
+    }
+
+    // ──────────────────────────────────────────────────────────────
     //  Pull-payment withdrawal
     // ──────────────────────────────────────────────────────────────
 
@@ -333,8 +361,8 @@ contract SessionSettlement is ISessionSettlement {
         uint256 exitPay  = (cumulativeBytes * s.nodePrices[2] * EXIT_SHARE) / 100;
         totalPaid = entryPay + relayPay + exitPay;
 
-        if (totalPaid > cap) {
-            // Scale proportionally to stay within cap
+        if (totalPaid > cap && totalPaid > 0) {
+            // Scale proportionally to stay within cap.
             entryPay = (entryPay * cap) / totalPaid;
             relayPay = (relayPay * cap) / totalPaid;
             exitPay  = cap - entryPay - relayPay;
@@ -345,12 +373,7 @@ contract SessionSettlement is ISessionSettlement {
         s.settled = true;
         s.cumulativeBytes = cumulativeBytes;
 
-        // Decrement open session count per node.
-        for (uint256 i; i < 3; ++i) {
-            if (openSessionCount[s.nodeIds[i]] > 0) {
-                openSessionCount[s.nodeIds[i]]--;
-            }
-        }
+        _decrementOpenSessions(s.nodeIds);
 
         // Credit payments (pull-payment pattern).
         if (entryPay > 0) pendingWithdrawals[s.nodeOwners[0]] += entryPay;
@@ -361,6 +384,17 @@ contract SessionSettlement is ISessionSettlement {
         if (refund > 0) pendingWithdrawals[s.client] += refund;
 
         emit SessionSettled(sessionId, s.client, cumulativeBytes, totalPaid);
+    }
+
+    /// @dev Decrement open session count for each node in the circuit.
+    function _decrementOpenSessions(bytes32[3] storage nodeIds) internal {
+        for (uint256 i; i < 3; ++i) {
+            bytes32 nid = nodeIds[i];
+            uint256 count = openSessionCount[nid];
+            if (count > 0) {
+                openSessionCount[nid] = count - 1;
+            }
+        }
     }
 
     /// @dev Check if an address is one of the snapshotted session node owners.

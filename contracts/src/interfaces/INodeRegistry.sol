@@ -47,6 +47,9 @@ interface INodeRegistry {
     /// @notice Emitted when stake changes (slash or top-up).
     event StakeUpdated(bytes32 indexed nodeId, uint256 newStake);
 
+    /// @notice Emitted when a node's ZK eligibility commitment is updated.
+    event CommitmentUpdated(bytes32 indexed nodeId, bytes32 commitment);
+
     // ──────────────────────────────────────────────────────────────
     //  External / Public functions
     // ──────────────────────────────────────────────────────────────

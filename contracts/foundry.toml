@@ -3,9 +3,10 @@ src = "src"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.24"
+remappings = ["poseidon-solidity/=lib/poseidon-solidity/contracts/"]
 optimizer = true
 optimizer_runs = 200
-via_ir = true
+via_ir = false
 
 [profile.default.fuzz]
 runs = 256
@@ -17,7 +18,20 @@ src = "src"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.24"
+remappings = ["poseidon-solidity/=lib/poseidon-solidity/contracts/"]
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+eth_rpc_url = "${ETH_RPC_URL}"
+
+# Deploy profile: optimized bytecode for mainnet.
+# Run with: forge build --profile deploy
+[profile.deploy]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.24"
+remappings = ["poseidon-solidity/=lib/poseidon-solidity/contracts/"]
 optimizer = true
 optimizer_runs = 200
 via_ir = true
-eth_rpc_url = "${ETH_RPC_URL}"

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {EIP712Utils} from "./lib/EIP712Utils.sol";
+import {PoseidonT3} from "poseidon-solidity/PoseidonT3.sol";
 
 /// @title IGroth16Verifier
 /// @notice Interface for the auto-generated Groth16 verifier from snarkjs.
@@ -264,68 +265,16 @@ contract ZKSettlement {
             "ZKSettlement: invalid proof"
         );
 
-        // 6. Extract and verify payment amounts.
-        uint256 totalPayment = pubSignals[SIG_TOTAL_PAYMENT];
-        require(totalPayment <= depositAmount, "ZKSettlement: payment exceeds deposit");
-
-        uint256 entryPay = pubSignals[SIG_ENTRY_PAY];
-        uint256 relayPay = pubSignals[SIG_RELAY_PAY];
-        uint256 exitPay  = pubSignals[SIG_EXIT_PAY];
-        uint256 refund   = pubSignals[SIG_REFUND];
-
-        require(entryPay + relayPay + exitPay == totalPayment, "ZKSettlement: split mismatch");
-        require(refund + totalPayment == depositAmount, "ZKSettlement: refund mismatch");
-
-        // Enforce payment split ratios on-chain as defense-in-depth
-        // in case the ZK circuit has a bug allowing arbitrary splits.
-        if (totalPayment > 0) {
-            require(
-                entryPay == (totalPayment * ENTRY_SHARE) / 100,
-                "ZKSettlement: entry share mismatch"
-            );
-            require(
-                relayPay == (totalPayment * RELAY_SHARE) / 100,
-                "ZKSettlement: relay share mismatch"
-            );
-        }
-
-        // 7. Verify caller-supplied addresses are bound to the proof's
-        //    commitment public signals via keccak256(addr, amount).
-        require(
-            uint256(keccak256(abi.encode(entryAddr, entryPay))) == pubSignals[SIG_ENTRY_COMMITMENT],
-            "ZKSettlement: entry addr binding"
-        );
-        require(
-            uint256(keccak256(abi.encode(relayAddr, relayPay))) == pubSignals[SIG_RELAY_COMMITMENT],
-            "ZKSettlement: relay addr binding"
-        );
-        require(
-            uint256(keccak256(abi.encode(exitAddr, exitPay))) == pubSignals[SIG_EXIT_COMMITMENT],
-            "ZKSettlement: exit addr binding"
-        );
-        require(
-            uint256(keccak256(abi.encode(refundAddr, refund))) == pubSignals[SIG_REFUND_COMMITMENT],
-            "ZKSettlement: refund addr binding"
-        );
-
-        // 8. Effects.
+        // 6–9. Verify payments, commitments, and credit payees
+        //       (extracted for stack depth).
         nullifiers[nullifier] = true;
         deposits[depositId] = 0;
 
-        // 9. Credit payments (pull-payment pattern).
-        if (entryPay > 0) pendingWithdrawals[entryAddr] += entryPay;
-        if (relayPay > 0) pendingWithdrawals[relayAddr] += relayPay;
-        if (exitPay > 0)  pendingWithdrawals[exitAddr]  += exitPay;
-        if (refund > 0)   pendingWithdrawals[refundAddr] += refund;
-
-        emit ZKSessionSettled(
-            nullifier,
-            totalPayment,
-            pubSignals[SIG_ENTRY_COMMITMENT],
-            pubSignals[SIG_RELAY_COMMITMENT],
-            pubSignals[SIG_EXIT_COMMITMENT],
-            pubSignals[SIG_REFUND_COMMITMENT]
-        );
+        address[4] memory addrs = [
+            address(entryAddr), address(relayAddr),
+            address(exitAddr), address(refundAddr)
+        ];
+        _verifyAndCredit(pubSignals, depositAmount, addrs);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -379,5 +328,63 @@ contract ZKSettlement {
         emit OwnershipTransferred(owner, msg.sender);
         owner = msg.sender;
         pendingOwner = address(0);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Internal helpers
+    // ──────────────────────────────────────────────────────────────
+
+    /// @dev Verify payment amounts, Poseidon commitments, and credit payees.
+    ///      Extracted from settleWithProof to avoid stack-too-deep.
+    function _verifyAndCredit(
+        uint256[13] calldata pubSignals,
+        uint256 depositAmount,
+        address[4] memory addrs
+    ) internal {
+        // a. Extract and verify payment amounts.
+        uint256 totalPayment = pubSignals[SIG_TOTAL_PAYMENT];
+        require(totalPayment <= depositAmount, "ZKSettlement: payment exceeds deposit");
+
+        uint256[4] memory amounts = [
+            pubSignals[SIG_ENTRY_PAY],
+            pubSignals[SIG_RELAY_PAY],
+            pubSignals[SIG_EXIT_PAY],
+            pubSignals[SIG_REFUND]
+        ];
+
+        require(amounts[0] + amounts[1] + amounts[2] == totalPayment, "ZKSettlement: split mismatch");
+        require(amounts[3] + totalPayment == depositAmount, "ZKSettlement: refund mismatch");
+
+        if (totalPayment > 0) {
+            require(amounts[0] == (totalPayment * ENTRY_SHARE) / 100, "ZKSettlement: entry share mismatch");
+            require(amounts[1] == (totalPayment * RELAY_SHARE) / 100, "ZKSettlement: relay share mismatch");
+            // Exit share is fully constrained by the split check on line above:
+            // amounts[0] + amounts[1] + amounts[2] == totalPayment.
+        }
+
+        // b. Verify Poseidon(addr, amount) commitments.
+        uint256[4] memory commitments = [
+            pubSignals[SIG_ENTRY_COMMITMENT],
+            pubSignals[SIG_RELAY_COMMITMENT],
+            pubSignals[SIG_EXIT_COMMITMENT],
+            pubSignals[SIG_REFUND_COMMITMENT]
+        ];
+        for (uint256 i; i < 4; ++i) {
+            require(
+                PoseidonT3.hash([uint256(uint160(addrs[i])), amounts[i]]) == commitments[i],
+                "ZKSettlement: addr commitment binding"
+            );
+        }
+
+        // c. Credit payments (pull-payment pattern).
+        for (uint256 i; i < 4; ++i) {
+            if (amounts[i] > 0) pendingWithdrawals[addrs[i]] += amounts[i];
+        }
+
+        emit ZKSessionSettled(
+            bytes32(pubSignals[SIG_NULLIFIER]),
+            totalPayment,
+            commitments[0], commitments[1], commitments[2], commitments[3]
+        );
     }
 }

@@ -39,3 +39,7 @@ ark-bn254 = "0.5"
 ark-std = "0.5"
 ark-serialize = "0.5"
 num-bigint = { version = "0.4", features = ["serde"] }
+
+# ZK witness construction (secp256k1 pubkey recovery + Poseidon hashing)
+k256 = { version = "0.13", features = ["ecdsa"] }
+light-poseidon = "0.4"

@@ -4111,6 +4111,7 @@ dependencies = [
  "once_cell",
  "serdect",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -4258,6 +4259,18 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.7.3",
+]
+
+[[package]]
+name = "light-poseidon"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47a1ccadd0bb5a32c196da536fd72c59183de24a055f6bf0513bf845fefab862"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "num-bigint",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5641,7 +5654,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6808,6 +6821,8 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "k256",
+ "light-poseidon",
  "ml-kem",
  "num-bigint",
  "rand 0.8.5",

@@ -1,4 +1,5 @@
 use alloy::primitives::{Address, FixedBytes, U256};
+use alloy::sol;
 use alloy::sol_types::SolEvent;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
@@ -7,6 +8,24 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::chain::ISessionSettlement;
+
+sol! {
+    #[sol(rpc)]
+    interface IZKSettlement {
+        function settleWithProof(
+            uint256[2] calldata proof_a,
+            uint256[2][2] calldata proof_b,
+            uint256[2] calldata proof_c,
+            uint256[13] calldata pubSignals,
+            bytes32 nullifier,
+            bytes32 depositId,
+            address payable entryAddr,
+            address payable relayAddr,
+            address payable exitAddr,
+            address payable refundAddr
+        ) external;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletConfig {
@@ -107,6 +126,75 @@ pub async fn settle_session(
 
     let tx_hash = format!("{:?}", pending.tx_hash());
     info!(tx = %tx_hash, "session settled on-chain");
+    Ok(tx_hash)
+}
+
+/// Submit a ZK proof to ZKSettlement.settleWithProof.
+pub async fn settle_zk_session(
+    wallet: &WalletConfig,
+    proof: &crate::zk_prove::ZkProof,
+    data: &crate::zk_witness::ZkSessionData,
+) -> Result<String, String> {
+    let signer = wallet.parse_signer()?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(wallet.parse_url()?);
+
+    // ZKSettlement is at a separate address from SessionSettlement.
+    // For now, use the same settlement_address config field.
+    // TODO: Add zk_settlement_address to WalletConfig when deployed separately.
+    let zk_settlement: Address = wallet.parse_settlement()?;
+
+    // Parse proof components into contract types.
+    let proof_a: [U256; 2] = [
+        proof.pi_a[0].parse::<U256>().map_err(|e| format!("pi_a[0]: {e}"))?,
+        proof.pi_a[1].parse::<U256>().map_err(|e| format!("pi_a[1]: {e}"))?,
+    ];
+    let proof_b: [[U256; 2]; 2] = [
+        [
+            proof.pi_b[0][0].parse::<U256>().map_err(|e| format!("pi_b[0][0]: {e}"))?,
+            proof.pi_b[0][1].parse::<U256>().map_err(|e| format!("pi_b[0][1]: {e}"))?,
+        ],
+        [
+            proof.pi_b[1][0].parse::<U256>().map_err(|e| format!("pi_b[1][0]: {e}"))?,
+            proof.pi_b[1][1].parse::<U256>().map_err(|e| format!("pi_b[1][1]: {e}"))?,
+        ],
+    ];
+    let proof_c: [U256; 2] = [
+        proof.pi_c[0].parse::<U256>().map_err(|e| format!("pi_c[0]: {e}"))?,
+        proof.pi_c[1].parse::<U256>().map_err(|e| format!("pi_c[1]: {e}"))?,
+    ];
+
+    let pub_signals: [U256; 13] = {
+        let mut arr = [U256::ZERO; 13];
+        for (i, s) in proof.public_signals.iter().enumerate().take(13) {
+            arr[i] = s.parse::<U256>().map_err(|e| format!("pubSignal[{i}]: {e}"))?;
+        }
+        arr
+    };
+
+    let nullifier = FixedBytes::from(data.deposit_id); // nullifier binding
+    let deposit_id = FixedBytes::from(data.deposit_id);
+    let entry_addr = Address::from(data.entry_address);
+    let relay_addr = Address::from(data.relay_address);
+    let exit_addr = Address::from(data.exit_address);
+    let refund_addr = Address::from(data.client_address);
+
+    info!("submitting ZK proof to ZKSettlement.settleWithProof");
+
+    let contract = IZKSettlement::new(zk_settlement, &provider);
+    let pending = contract
+        .settleWithProof(
+            proof_a, proof_b, proof_c, pub_signals,
+            nullifier, deposit_id,
+            entry_addr, relay_addr, exit_addr, refund_addr,
+        )
+        .send()
+        .await
+        .map_err(|e| format!("settleWithProof tx failed: {e}"))?;
+
+    let tx_hash = format!("{:?}", pending.tx_hash());
+    info!(tx = %tx_hash, "ZK session settled on-chain");
     Ok(tx_hash)
 }
 

@@ -7,7 +7,8 @@
 
 use tracing::{info, warn};
 
-use crate::zk_prove::{self, CircuitArtifacts, PublicInputs, ReceiptWitness};
+use crate::zk_prove::{self, CircuitArtifacts};
+use crate::zk_witness::{self, ZkSessionData};
 use crate::wallet::{self, WalletConfig};
 
 /// Settlement mode.
@@ -53,6 +54,7 @@ pub async fn settle_session(
     wallet_cfg: &WalletConfig,
     session_id: u64,
     receipt_data: Vec<u8>,
+    zk_data: Option<ZkSessionData>,
 ) -> Result<SettlementResult, String> {
     match mode {
         SettlementMode::Plaintext => {
@@ -63,14 +65,17 @@ pub async fn settle_session(
             })
         }
         SettlementMode::Zk => {
-            settle_zk(wallet_cfg, session_id).await
+            let data = zk_data.ok_or("ZK mode requires session data for witness construction")?;
+            settle_zk(wallet_cfg, &data).await
         }
         SettlementMode::Auto => {
             // Try ZK first, fall back to plaintext on any failure.
-            match settle_zk(wallet_cfg, session_id).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    info!(error = %e, "ZK settlement unavailable, using plaintext");
+            if let Some(ref data) = zk_data {
+                match settle_zk(wallet_cfg, data).await {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        warn!(error = %e, "ZK settlement failed, falling back to plaintext");
+                    }
                 }
             }
 
@@ -85,9 +90,12 @@ pub async fn settle_session(
 }
 
 /// Attempt ZK settlement.
+///
+/// Builds a ZK witness from the session data, generates a Groth16 proof,
+/// and submits it to ZKSettlement.settleWithProof on-chain.
 async fn settle_zk(
-    _wallet_cfg: &WalletConfig,
-    session_id: u64,
+    wallet_cfg: &WalletConfig,
+    session_data: &ZkSessionData,
 ) -> Result<SettlementResult, String> {
     let artifacts = default_artifacts();
 
@@ -95,10 +103,26 @@ async fn settle_zk(
         return Err("ZK circuit artifacts not found".to_string());
     }
 
-    // TODO: Build the full witness from session data and generate proof via
-    // zk_prove::generate_proof(). Submit to ZKSettlement.settleWithProof.
-    // Requires: dual-signed receipt, node Merkle proof, Poseidon commitments.
-    Err("ZK proof witness construction not yet wired".to_string())
+    // 1. Build witness + public inputs from session data.
+    info!(session_id = session_data.session_id, "building ZK witness");
+    let (witness, public) = zk_witness::build_witness(session_data)?;
+
+    // 2. Generate Groth16 proof (uses cached proving key).
+    info!("generating Groth16 proof (this may take several seconds)");
+    let proof = zk_prove::generate_proof(&artifacts, &witness, &public)?;
+    info!(
+        pi_a_x = &proof.pi_a[0][..20],
+        signals = proof.public_signals.len(),
+        "proof generated"
+    );
+
+    // 3. Submit proof on-chain via ZKSettlement.settleWithProof.
+    let tx_hash = wallet::settle_zk_session(wallet_cfg, &proof, session_data).await?;
+
+    Ok(SettlementResult {
+        tx_hash,
+        method: "zk",
+    })
 }
 
 #[cfg(test)]

@@ -103,9 +103,18 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     signal input nodeR[4];
     signal input nodeS[4];
 
-    // Merkle proof for node registry membership
+    // Merkle proofs for node registry membership (all 3 nodes)
     signal input nodeMerkleProof[MERKLE_DEPTH];
-    signal input nodeMerkleIndex;  // leaf index (bit-decomposed internally)
+    signal input nodeMerkleIndex;
+
+    // Entry and relay node public keys + Merkle proofs
+    signal input entryPubkey[2][4];    // [x, y] each as 4x64-bit limbs
+    signal input entryMerkleProof[MERKLE_DEPTH];
+    signal input entryMerkleIndex;
+
+    signal input relayPubkey[2][4];
+    signal input relayMerkleProof[MERKLE_DEPTH];
+    signal input relayMerkleIndex;
 
     // ── 1. Compute EIP-712 digest in-circuit ──────────────────────
     //
@@ -197,20 +206,47 @@ template BandwidthReceipt(MERKLE_DEPTH) {
     }
     nodeVerify.result === 1;
 
-    // ── 4. Verify node is in registry (Merkle proof) ──────────────
-    // Leaf = Poseidon(nodePubkey[0][0..3], nodePubkey[1][0..3])
-    component leafHash = Poseidon(8);
+    // ── 4. Verify all 3 nodes are in registry (Merkle proofs) ──────
+    // Exit node (also the ECDSA co-signer from Step 3)
+    component exitLeafHash = Poseidon(8);
     for (var i = 0; i < 4; i++) {
-        leafHash.inputs[i] <== nodePubkey[0][i];
-        leafHash.inputs[4 + i] <== nodePubkey[1][i];
+        exitLeafHash.inputs[i] <== nodePubkey[0][i];
+        exitLeafHash.inputs[4 + i] <== nodePubkey[1][i];
+    }
+    component exitMerkleCheck = MerkleVerify(MERKLE_DEPTH);
+    exitMerkleCheck.leaf <== exitLeafHash.out;
+    exitMerkleCheck.index <== nodeMerkleIndex;
+    exitMerkleCheck.root <== registryRoot;
+    for (var i = 0; i < MERKLE_DEPTH; i++) {
+        exitMerkleCheck.siblings[i] <== nodeMerkleProof[i];
     }
 
-    component merkleCheck = MerkleVerify(MERKLE_DEPTH);
-    merkleCheck.leaf <== leafHash.out;
-    merkleCheck.index <== nodeMerkleIndex;
-    merkleCheck.root <== registryRoot;
+    // Entry node
+    component entryLeafHash = Poseidon(8);
+    for (var i = 0; i < 4; i++) {
+        entryLeafHash.inputs[i] <== entryPubkey[0][i];
+        entryLeafHash.inputs[4 + i] <== entryPubkey[1][i];
+    }
+    component entryMerkleCheck = MerkleVerify(MERKLE_DEPTH);
+    entryMerkleCheck.leaf <== entryLeafHash.out;
+    entryMerkleCheck.index <== entryMerkleIndex;
+    entryMerkleCheck.root <== registryRoot;
     for (var i = 0; i < MERKLE_DEPTH; i++) {
-        merkleCheck.siblings[i] <== nodeMerkleProof[i];
+        entryMerkleCheck.siblings[i] <== entryMerkleProof[i];
+    }
+
+    // Relay node
+    component relayLeafHash = Poseidon(8);
+    for (var i = 0; i < 4; i++) {
+        relayLeafHash.inputs[i] <== relayPubkey[0][i];
+        relayLeafHash.inputs[4 + i] <== relayPubkey[1][i];
+    }
+    component relayMerkleCheck = MerkleVerify(MERKLE_DEPTH);
+    relayMerkleCheck.leaf <== relayLeafHash.out;
+    relayMerkleCheck.index <== relayMerkleIndex;
+    relayMerkleCheck.root <== registryRoot;
+    for (var i = 0; i < MERKLE_DEPTH; i++) {
+        relayMerkleCheck.siblings[i] <== relayMerkleProof[i];
     }
 
     // ── 5. Compute payment ────────────────────────────────────────

@@ -35,6 +35,9 @@ interface ISlashingOracle {
         uint256 slashedAmount
     );
 
+    /// @notice Emitted when a node is permanently banned (3rd fraud offence).
+    event PermanentBan(bytes32 indexed nodeId);
+
     // ──────────────────────────────────────────────────────────────
     //  External functions
     // ──────────────────────────────────────────────────────────────

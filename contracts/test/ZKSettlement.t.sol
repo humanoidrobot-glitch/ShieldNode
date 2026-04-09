@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {ZKSettlement, IGroth16Verifier} from "../src/ZKSettlement.sol";
+import {PoseidonT3} from "poseidon-solidity/PoseidonT3.sol";
 
 contract MockVerifier is IGroth16Verifier {
     bool public shouldPass = true;
@@ -41,8 +42,8 @@ contract ZKSettlementTest is Test {
         zk.executeRegistryRoot(0);
     }
 
-    /// @dev Build 13 public signals with nullifier, depositId, and address
-    ///      commitments bound (Finding 2: keccak address binding).
+    /// @dev Build 13 public signals with nullifier, depositId, and
+    ///      Poseidon address commitments (matching circomlib Poseidon(2)).
     function _pubSignals(
         uint256 totalPayment,
         bytes32 nullifier,
@@ -53,19 +54,19 @@ contract ZKSettlementTest is Test {
         uint256 exitPay  = totalPayment - entryPay - relayPay;
         uint256 refund   = totalPayment <= 1 ether ? 1 ether - totalPayment : 0;
         return [
-            uint256(zk.DOMAIN_SEPARATOR()),                              // [0] domainSeparator
-            totalPayment,                                                 // [1] totalPayment
-            uint256(keccak256(abi.encode(entryOp, entryPay))),           // [2] entryCommitment
-            uint256(keccak256(abi.encode(relayOp, relayPay))),           // [3] relayCommitment
-            uint256(keccak256(abi.encode(exitOp, exitPay))),             // [4] exitCommitment
-            uint256(keccak256(abi.encode(refundTo, refund))),            // [5] refundCommitment
-            uint256(12345),                                               // [6] registryRoot
-            uint256(nullifier),                                           // [7] nullifier
-            uint256(depositId),                                           // [8] depositId
-            entryPay,                                                     // [9] entryPayOut
-            relayPay,                                                     // [10] relayPayOut
-            exitPay,                                                      // [11] exitPayOut
-            refund                                                        // [12] refundOut
+            uint256(zk.DOMAIN_SEPARATOR()),                                          // [0]
+            totalPayment,                                                             // [1]
+            PoseidonT3.hash([uint256(uint160(entryOp)), entryPay]),                  // [2]
+            PoseidonT3.hash([uint256(uint160(relayOp)), relayPay]),                  // [3]
+            PoseidonT3.hash([uint256(uint160(exitOp)), exitPay]),                    // [4]
+            PoseidonT3.hash([uint256(uint160(refundTo)), refund]),                   // [5]
+            uint256(12345),                                                           // [6]
+            uint256(nullifier),                                                       // [7]
+            uint256(depositId),                                                       // [8]
+            entryPay,                                                                 // [9]
+            relayPay,                                                                 // [10]
+            exitPay,                                                                  // [11]
+            refund                                                                    // [12]
         ];
     }
 

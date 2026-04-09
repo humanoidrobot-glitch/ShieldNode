@@ -51,6 +51,11 @@ contract EndToEndForkTest is Test {
         _;
     }
 
+    function _sign(uint256 pk, bytes32 d) internal pure returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, d);
+        return abi.encodePacked(r, s, v);
+    }
+
     function setUp() public onlyFork {
         deployer  = makeAddr("deployer");
         entryOp   = vm.addr(ENTRY_KEY);
@@ -172,20 +177,13 @@ contract EndToEndForkTest is Test {
         bytes32 structHash = EIP712Utils.receiptStructHash(sessionId, cumBytes, ts);
         bytes32 digest = EIP712Utils.hashTypedData(settlement.DOMAIN_SEPARATOR(), structHash);
 
-        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(CLIENT_KEY, digest);
-        bytes memory clientSig = abi.encodePacked(r1, s1, v1);
-
-        // Findings 8, 9: receipt needs client + all 3 node signatures.
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(ENTRY_KEY, digest);
-        bytes memory entrySig = abi.encodePacked(r2, s2, v2);
-
-        (uint8 v3, bytes32 r3, bytes32 s3) = vm.sign(RELAY_KEY, digest);
-        bytes memory relaySig = abi.encodePacked(r3, s3, v3);
-
-        (uint8 v4, bytes32 r4, bytes32 s4) = vm.sign(EXIT_KEY, digest);
-        bytes memory exitSig = abi.encodePacked(r4, s4, v4);
-
-        bytes memory receipt = abi.encode(sessionId, cumBytes, ts, clientSig, entrySig, relaySig, exitSig);
+        bytes memory receipt = abi.encode(
+            sessionId, cumBytes, ts,
+            _sign(CLIENT_KEY, digest),
+            _sign(ENTRY_KEY, digest),
+            _sign(RELAY_KEY, digest),
+            _sign(EXIT_KEY, digest)
+        );
 
         uint256 gasBefore = gasleft();
         vm.prank(client);
@@ -222,9 +220,7 @@ contract EndToEndForkTest is Test {
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", oracle.ATTESTATION_DOMAIN_SEPARATOR(), structHash)
         );
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(CHALL_KEY, digest);
-        bytes memory sig = abi.encodePacked(r, s, v);
-        bytes memory evidence = abi.encode(exitId, ts, descHash, sig);
+        bytes memory evidence = abi.encode(exitId, ts, descHash, _sign(CHALL_KEY, digest));
 
         vm.prank(challAddr);
         oracle.proposeSlash(exitId, uint8(ISlashingOracle.SlashReason.ProvableLogging), evidence);

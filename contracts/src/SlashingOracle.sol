@@ -412,6 +412,7 @@ contract SlashingOracle is ISlashingOracle {
         // ban — they are handled separately via LIVENESS_BAN_THRESHOLD.
         if (p.reason != SlashReason.ChallengeFailure && fraudSlashCount[p.nodeId] >= 3) {
             registry.ban(p.nodeId);
+            emit PermanentBan(p.nodeId);
         }
 
         // Track liveness failures separately; deactivate at threshold.

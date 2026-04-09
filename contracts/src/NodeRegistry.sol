@@ -67,6 +67,13 @@ contract NodeRegistry is INodeRegistry {
     ///      preventing duplicate entries on re-registration.
     mapping(bytes32 => bool) private _everRegistered;
 
+    /// @dev Separate array of currently-active node IDs for O(n) pagination
+    ///      where n = active count (not total ever-registered).
+    bytes32[] private _activeNodeIds;
+
+    /// @dev Index of a nodeId within _activeNodeIds (1-indexed; 0 = not in array).
+    mapping(bytes32 => uint256) private _activeIndex;
+
     // ──────────────────────────────────────────────────────────────
     //  Constructor
     // ──────────────────────────────────────────────────────────────
@@ -80,6 +87,16 @@ contract NodeRegistry is INodeRegistry {
     // ──────────────────────────────────────────────────────────────
     //  Modifiers
     // ──────────────────────────────────────────────────────────────
+
+    /// @dev Reentrancy guard.
+    bool private _locked;
+
+    modifier nonReentrant() {
+        require(!_locked, "NodeRegistry: reentrant");
+        _locked = true;
+        _;
+        _locked = false;
+    }
 
     /// @dev Restrict a call to the node's owner.
     modifier onlyNodeOwner(bytes32 nodeId) {
@@ -133,6 +150,7 @@ contract NodeRegistry is INodeRegistry {
             _everRegistered[nodeId] = true;
             _allNodeIds.push(nodeId);
         }
+        _addActive(nodeId);
 
         emit NodeRegistered(nodeId, msg.sender, publicKey, endpoint, msg.value);
     }
@@ -148,6 +166,7 @@ contract NodeRegistry is INodeRegistry {
         // Effects
         _nodes[nodeId].isActive = false;
         deregisteredAt[nodeId] = block.timestamp;
+        _removeActive(nodeId);
 
         emit NodeDeregistered(nodeId, msg.sender);
     }
@@ -178,6 +197,7 @@ contract NodeRegistry is INodeRegistry {
 
         // Effects — delete before transfer (checks-effects-interactions).
         // permanentSlashCount and permanentBan are NOT deleted — they persist.
+        _removeActive(nodeId);
         delete _nodes[nodeId];
         delete deregisteredAt[nodeId];
         delete banned[nodeId]; // session-scoped flag; permanentBan survives
@@ -236,6 +256,16 @@ contract NodeRegistry is INodeRegistry {
         emit StakeUpdated(nodeId, _nodes[nodeId].stake);
     }
 
+    /// @notice Set or update the ZK eligibility commitment for a node.
+    ///         Prepares the node for Phase 6 commitment-based proofs.
+    /// @param nodeId     The node to update.
+    /// @param commitment The Poseidon commitment hash (or bytes32(0) to clear).
+    function setCommitment(bytes32 nodeId, bytes32 commitment) external onlyNodeOwner(nodeId) {
+        require(_nodes[nodeId].isActive, "NodeRegistry: not active");
+        _nodes[nodeId].commitment = commitment;
+        emit CommitmentUpdated(nodeId, commitment);
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  Views
     // ──────────────────────────────────────────────────────────────
@@ -250,11 +280,12 @@ contract NodeRegistry is INodeRegistry {
         uint256 offset,
         uint256 limit
     ) external view override returns (bytes32[] memory nodeIds) {
-        // First pass: count actives to size the output array.
-        uint256 total = _allNodeIds.length;
+        // Iterate _activeNodeIds (much smaller than _allNodeIds for mature
+        // registries), filtering only for heartbeat freshness.
+        uint256 total = _activeNodeIds.length;
         uint256 activeCount;
         for (uint256 i; i < total; ++i) {
-            if (_isActive(_allNodeIds[i])) {
+            if (_isHeartbeatFresh(_activeNodeIds[i])) {
                 ++activeCount;
             }
         }
@@ -267,13 +298,12 @@ contract NodeRegistry is INodeRegistry {
         uint256 size = limit < remaining ? limit : remaining;
         nodeIds = new bytes32[](size);
 
-        // Second pass: fill the page.
         uint256 seen;
         uint256 filled;
         for (uint256 i; i < total && filled < size; ++i) {
-            if (_isActive(_allNodeIds[i])) {
+            if (_isHeartbeatFresh(_activeNodeIds[i])) {
                 if (seen >= offset) {
-                    nodeIds[filled] = _allNodeIds[i];
+                    nodeIds[filled] = _activeNodeIds[i];
                     ++filled;
                 }
                 ++seen;
@@ -295,7 +325,7 @@ contract NodeRegistry is INodeRegistry {
     /// @param amount  The amount of ETH to slash from the node's stake.
     /// @param isFraud True for fraud slashes; false for liveness. Only fraud
     ///                increments the owner-level counter toward permanent ban.
-    function slash(bytes32 nodeId, uint256 amount, bool isFraud) external onlyOracle {
+    function slash(bytes32 nodeId, uint256 amount, bool isFraud) external onlyOracle nonReentrant {
         NodeInfo storage node = _nodes[nodeId];
         require(node.owner != address(0), "NodeRegistry: node not found");
         require(amount > 0, "NodeRegistry: zero slash");
@@ -323,6 +353,7 @@ contract NodeRegistry is INodeRegistry {
         _nodes[nodeId].isActive = false;
         banned[nodeId] = true;
         permanentBan[nodeId] = true;
+        _removeActive(nodeId);
     }
 
     /// @notice Deactivate a node due to repeated liveness failures.
@@ -334,6 +365,7 @@ contract NodeRegistry is INodeRegistry {
         require(nodeOwner != address(0), "NodeRegistry: node not found");
         _nodes[nodeId].isActive = false;
         deregisteredAt[nodeId] = block.timestamp;
+        _removeActive(nodeId);
 
         emit NodeDeregistered(nodeId, nodeOwner);
     }
@@ -341,6 +373,28 @@ contract NodeRegistry is INodeRegistry {
     // ──────────────────────────────────────────────────────────────
     //  Internal helpers
     // ──────────────────────────────────────────────────────────────
+
+    /// @dev Add a nodeId to the _activeNodeIds set.
+    function _addActive(bytes32 nodeId) internal {
+        if (_activeIndex[nodeId] == 0) {
+            _activeNodeIds.push(nodeId);
+            _activeIndex[nodeId] = _activeNodeIds.length; // 1-indexed
+        }
+    }
+
+    /// @dev Remove a nodeId from the _activeNodeIds set (swap-and-pop).
+    function _removeActive(bytes32 nodeId) internal {
+        uint256 idx = _activeIndex[nodeId];
+        if (idx == 0) return; // not in array
+        uint256 lastIdx = _activeNodeIds.length;
+        if (idx != lastIdx) {
+            bytes32 lastId = _activeNodeIds[lastIdx - 1];
+            _activeNodeIds[idx - 1] = lastId;
+            _activeIndex[lastId] = idx;
+        }
+        _activeNodeIds.pop();
+        delete _activeIndex[nodeId];
+    }
 
     /// @dev Returns true when a node's heartbeat is fresh enough.
     function _isHeartbeatFresh(bytes32 nodeId) internal view returns (bool) {

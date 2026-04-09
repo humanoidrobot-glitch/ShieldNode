@@ -143,6 +143,11 @@ contract ChallengeManager {
         bytes32 indexed nodeId
     );
 
+    event ChallengeRetrySucceeded(
+        uint256 indexed challengeId,
+        bytes32 indexed nodeId
+    );
+
     // ──────────────────────────────────────────────────────────────
     //  Errors
     // ──────────────────────────────────────────────────────────────
@@ -325,6 +330,7 @@ contract ChallengeManager {
         bytes memory evidence = abi.encode(challengeId);
         try oracle.proposeSlash(c.nodeId, uint8(ISlashingOracle.SlashReason.ChallengeFailure), evidence) {
             c.status = ChallengeStatus.Slashed;
+            emit ChallengeRetrySucceeded(challengeId, c.nodeId);
         } catch {
             emit SlashProposalFailed(challengeId, c.nodeId);
         }

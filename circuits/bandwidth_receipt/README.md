@@ -53,15 +53,21 @@ Groth16 requires a trusted setup (powers-of-tau ceremony). For testnet we use a 
 | `nodePubkey` | (uint256, uint256) | Exit node's secp256k1 public key (x, y) |
 | `nodeSig` | (uint256, uint256) | Exit node's ECDSA signature (r, s) |
 | `receiptTypehash` | uint256 | EIP-712 RECEIPT_TYPEHASH constant (protocol-defined) |
-| `nodeMerkleProof` | uint256[] | Merkle proof that nodePubkey is in registryRoot |
-| `nodeMerkleIndex` | uint256 | Leaf index in the Merkle tree |
+| `nodeMerkleProof` | uint256[] | Merkle proof that exit nodePubkey is in registryRoot |
+| `nodeMerkleIndex` | uint256 | Exit node leaf index in the Merkle tree |
+| `entryPubkey` | (uint256, uint256) | Entry node's secp256k1 public key (x, y) |
+| `entryMerkleProof` | uint256[] | Merkle proof that entry node is in registryRoot |
+| `entryMerkleIndex` | uint256 | Entry node leaf index |
+| `relayPubkey` | (uint256, uint256) | Relay node's secp256k1 public key (x, y) |
+| `relayMerkleProof` | uint256[] | Merkle proof that relay node is in registryRoot |
+| `relayMerkleIndex` | uint256 | Relay node leaf index |
 
 ## Constraints
 
 1. **EIP-712 digest computation** — Compute `structHash = keccak256(RECEIPT_TYPEHASH, sessionId, cumulativeBytes, timestamp)`, then `digest = keccak256("\x19\x01" || domainSeparator || structHash)`
 2. **Client signature verification** — Verify `clientSig` is a valid ECDSA signature by `clientPubkey` over `digest`
 3. **Node signature verification** — Verify `nodeSig` is a valid ECDSA signature by `nodePubkey` over `digest`
-4. **Node registry membership** — Verify `nodePubkey` is in the Merkle tree with root `registryRoot`
+4. **Node registry membership** — Verify all 3 node public keys (entry, relay, exit) are in the Merkle tree with root `registryRoot`
 5. **Payment computation** — `totalPayment = min(cumulativeBytes * pricePerByte, deposit)`
 6. **Payment split** — `entryPay = totalPayment * 25 / 100`, `relayPay = totalPayment * 25 / 100`, `exitPay = totalPayment - entryPay - relayPay`
 7. **Refund computation** — `refund = deposit - totalPayment`
@@ -76,7 +82,8 @@ Groth16 requires a trusted setup (powers-of-tau ceremony). For testnet we use a 
 | Uint256-to-bits conversions (5x) | ~5K |
 | ECDSA verify (client) | ~1.5M |
 | ECDSA verify (node) | ~1.5M |
-| Merkle proof (depth 20) | ~20K |
+| Merkle proofs (3 nodes × depth 20) | ~60K |
+| Poseidon leaf hashes (3 nodes × 8-input) | ~3K |
 | Poseidon hashes (4 commitments) | ~1K |
 | Arithmetic (payment split) | ~100 |
 | **Total** | **~3.5M** |
@@ -96,6 +103,22 @@ Proving time estimate: 3-10s on modern hardware (16GB RAM, 8 cores) with Groth16
 The EIP-712 digest is computed **entirely inside the circuit** from the private receipt data (sessionId, cumulativeBytes, timestamp) and the public domainSeparator. No external trust is required — the prover cannot lie about the receipt data because the digest fed to ECDSA verification is derived from the private inputs, not supplied externally.
 
 This costs ~300K additional constraints (two keccak256 calls) but eliminates any trust assumption about the prover's honesty regarding receipt content.
+
+## ZK vs Plaintext Settlement Pricing
+
+The ZK and plaintext settlement paths use **different payment models**:
+
+| | ZK (`ZKSettlement`) | Plaintext (`SessionSettlement`) |
+|---|---|---|
+| **Price input** | Single `pricePerByte` (exit node's rate) | Per-node `nodePrices[3]` (each node's own rate) |
+| **Payment formula** | `totalPayment = cumBytes × pricePerByte`, then flat 25/25/50 split | `entryPay = cumBytes × nodePrices[0] × 25/100`, etc. |
+| **When prices differ** | All nodes paid from the same base rate | Each node paid at its own advertised rate |
+
+This is a deliberate design choice. The ZK circuit uses a single price to keep constraint count low — adding per-node prices would require 3× the arithmetic constraints and 3 additional private inputs. The exit node's `pricePerByte` serves as the session's reference rate.
+
+**Client responsibility**: When constructing a ZK witness, the client should use the exit node's `pricePerByte` (snapshotted at session open) as the circuit's `pricePerByte` input. Entry and relay nodes implicitly accept this rate by co-signing the bandwidth receipt.
+
+**Implication**: If nodes have different prices, the ZK path produces slightly different per-node payments than the plaintext path would. Both paths are internally consistent — the circuit proves the split is correct for its pricing model, and the contract verifies the proven amounts.
 
 ## Post-Quantum Note
 

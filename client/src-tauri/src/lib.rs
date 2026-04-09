@@ -15,6 +15,7 @@ mod tunnel;
 mod wallet;
 mod watchlist;
 mod zk_prove;
+mod zk_witness;
 
 use std::sync::{Arc, Mutex};
 
@@ -441,11 +442,15 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // 7. Settle via configured mode (ZK or plaintext).
+    // ZK witness data is not yet constructed here — requires Merkle proof
+    // infrastructure (local Poseidon tree from registry data). For now,
+    // pass None and let ZK mode fall back to plaintext in Auto mode.
     let result = settlement::settle_session(
         settlement_mode,
         &wallet_cfg,
         session_id,
         receipt_data,
+        None, // zk_data: wired in future PR with Merkle tree infra
     )
     .await?;
     let tx_hash = result.tx_hash;

@@ -264,6 +264,76 @@ contract SessionSettlementTest is Test {
         settlement.settleSession(sessionId, receipt);
     }
 
+    // ────────────────────── Zero-byte settlement ──────────────────────
+
+    function test_settle_zero_bytes_refunds_deposit() public {
+        vm.prank(client);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
+
+        uint256 sessionId = 0;
+        uint256 cumBytes   = 0;
+        uint256 ts         = block.timestamp;
+
+        vm.prank(client);
+        settlement.settleSession(sessionId, _coopReceipt(sessionId, cumBytes, ts));
+
+        // Zero bytes → zero payment → full refund.
+        assertEq(settlement.pendingWithdrawals(entryOp), 0);
+        assertEq(settlement.pendingWithdrawals(relayOp), 0);
+        assertEq(settlement.pendingWithdrawals(exitOp),  0);
+        assertEq(settlement.pendingWithdrawals(client),  1 ether);
+
+        ISessionSettlement.SessionInfo memory s = settlement.getSession(sessionId);
+        assertTrue(s.settled);
+        assertEq(s.cumulativeBytes, 0);
+    }
+
+    // ────────────────────── Idle session cleanup ──────────────────────
+
+    function test_cleanup_after_timeout() public {
+        vm.prank(client);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
+
+        // Cannot clean up before timeout.
+        vm.expectRevert("Session: cleanup too early");
+        settlement.cleanupSession(0);
+
+        // Warp past 30-day timeout.
+        vm.warp(block.timestamp + 30 days + 1);
+
+        // Anyone can trigger cleanup.
+        address anyone = makeAddr("anyone");
+        vm.prank(anyone);
+        settlement.cleanupSession(0);
+
+        // Full deposit refunded to client.
+        assertEq(settlement.pendingWithdrawals(client), 1 ether);
+
+        // Session marked settled.
+        ISessionSettlement.SessionInfo memory s = settlement.getSession(0);
+        assertTrue(s.settled);
+
+        // Open session count decremented — nodes can unstake.
+        assertEq(settlement.openSessionCount(entryId), 0);
+        assertEq(settlement.openSessionCount(relayId), 0);
+        assertEq(settlement.openSessionCount(exitId),  0);
+    }
+
+    function test_cleanup_already_settled_reverts() public {
+        vm.prank(client);
+        settlement.openSession{value: 1 ether}(nodeIds, type(uint256).max);
+
+        // Settle normally first.
+        uint256 ts = block.timestamp;
+        vm.prank(client);
+        settlement.settleSession(0, _coopReceipt(0, 100, ts));
+
+        // Cleanup should fail.
+        vm.warp(block.timestamp + 30 days + 1);
+        vm.expectRevert("Session: already settled");
+        settlement.cleanupSession(0);
+    }
+
     // ────────────────────── cumulativeBytes cap (Fix 4) ──────────────────────
 
     function test_settle_bytes_overflow_reverts() public {
