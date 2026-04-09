@@ -120,6 +120,10 @@ pub struct CircuitHop {
     pub hop_index: u64,
     /// Random session identifier for the relay protocol.
     pub session_id: u64,
+    /// Operator's Ethereum address (hex, for ZK commitments).
+    pub operator_address: String,
+    /// Price per byte at session open time (for ZK witness).
+    pub price_per_byte: u64,
 }
 
 /// The full 3-hop circuit state with per-hop session keys.
@@ -225,6 +229,8 @@ pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
             session_key,
             hop_index: i as u64,
             session_id,
+            operator_address: node.operator_address.clone(),
+            price_per_byte: node.price_per_byte,
         });
     }
 

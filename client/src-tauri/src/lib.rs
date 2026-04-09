@@ -14,6 +14,7 @@ mod sphinx;
 mod tunnel;
 mod wallet;
 mod watchlist;
+mod zk_merkle;
 mod zk_prove;
 mod zk_witness;
 
@@ -43,6 +44,8 @@ pub enum ConnectionState {
         hop_count: u32,
         /// How many times the circuit has been rotated since connect.
         rotation_count: u32,
+        /// Original deposit amount in wei (for ZK settlement).
+        deposit_wei: u128,
     },
 }
 
@@ -232,10 +235,11 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     let wallet_cfg = state.wallet_config()?;
 
     // Open on-chain session (0.001 ETH deposit = minimum).
+    let deposit_wei: u128 = 1_000_000_000_000_000; // 0.001 ETH
     let (tx_hash, session_id) = wallet::open_session(
         &wallet_cfg,
         &entry_node_id,
-        1_000_000_000_000_000, // 0.001 ETH
+        deposit_wei as u128,
     ).await?;
 
     let session_id_str = session_id.to_string();
@@ -248,6 +252,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             bytes_used: 0,
             hop_count,
             rotation_count: 0,
+            deposit_wei: deposit_wei as u128,
         };
     }
 
@@ -345,18 +350,17 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     stop_health_monitor(&state)?;
     stop_cover_traffic(&state)?;
 
-    // 1. Get session state (session_id, bytes_used) and exit endpoint.
-    let (session_id_str, bytes_used, exit_endpoint) = {
+    // 1. Get session state (session_id, bytes_used, deposit) and exit endpoint.
+    let (session_id_str, bytes_used, exit_endpoint, deposit_wei) = {
         let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         match &*conn {
-            ConnectionState::Connected { session_id, bytes_used, node_id, .. } => {
-                // Determine exit endpoint from circuit state or fall back to node_id's endpoint.
+            ConnectionState::Connected { session_id, bytes_used, node_id, deposit_wei, .. } => {
                 let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
                 let endpoint = circ
                     .as_ref()
                     .map(|c| c.exit.endpoint.clone())
                     .unwrap_or_else(|| node_id.clone());
-                (session_id.clone(), *bytes_used, endpoint)
+                (session_id.clone(), *bytes_used, endpoint, *deposit_wei)
             }
             _ => return Err("not connected".to_string()),
         }
@@ -441,16 +445,23 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         tun.stop_tunnel()?;
     }
 
-    // 7. Settle via configured mode (ZK or plaintext).
-    // ZK witness data is not yet constructed here — requires Merkle proof
-    // infrastructure (local Poseidon tree from registry data). For now,
-    // pass None and let ZK mode fall back to plaintext in Auto mode.
+    // 7. Build ZK session data if settlement mode may use ZK.
+    let zk_data = if settlement_mode != settlement::SettlementMode::Plaintext {
+        build_zk_session_data(
+            &state, session_id, bytes_used, timestamp, deposit_wei,
+            &domain_sep, &digest, &client_sig, &node_sig,
+        )
+    } else {
+        None
+    };
+
+    // 8. Settle via configured mode (ZK or plaintext).
     let result = settlement::settle_session(
         settlement_mode,
         &wallet_cfg,
         session_id,
         receipt_data,
-        None, // zk_data: wired in future PR with Merkle tree infra
+        zk_data,
     )
     .await?;
     let tx_hash = result.tx_hash;
@@ -496,6 +507,88 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
 
     info!(tx = %tx_hash, "disconnected and session settled with EIP-712 receipt");
     Ok(tx_hash)
+}
+
+/// Build ZK session data from current state for ZK settlement.
+/// Returns None if the circuit state is unavailable or data is incomplete.
+fn build_zk_session_data(
+    state: &AppState,
+    session_id: u64,
+    bytes_used: u64,
+    timestamp: u64,
+    deposit_wei: u128,
+    domain_sep: &alloy::primitives::B256,
+    digest: &alloy::primitives::B256,
+    client_sig: &[u8],
+    node_sig: &[u8],
+) -> Option<zk_witness::ZkSessionData> {
+    let circ = state.circuit.lock().ok()?;
+    let circuit = circ.as_ref()?;
+
+    // Parse operator addresses from hex to [u8; 20].
+    let parse_addr = |hex: &str| -> Option<[u8; 20]> {
+        let stripped = hex.strip_prefix("0x").unwrap_or(hex);
+        let bytes = hex::decode(stripped).ok()?;
+        if bytes.len() != 20 { return None; }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    };
+
+    let client_address = {
+        let cfg = state.config.lock().ok()?;
+        let signer = cfg.operator_private_key.as_deref()?;
+        let pk = wallet::WalletConfig {
+            rpc_url: String::new(),
+            chain_id: 0,
+            private_key: Some(signer.to_string()),
+            settlement_address: String::new(),
+        }.parse_signer().ok()?;
+        let addr = alloy::signers::Signer::address(&pk);
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(addr.as_slice());
+        arr
+    };
+
+    let receipt_typehash: [u8; 32] = alloy::primitives::keccak256(
+        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
+    ).0;
+
+    Some(zk_witness::ZkSessionData {
+        session_id,
+        cumulative_bytes: bytes_used,
+        timestamp,
+        price_per_byte: circuit.exit.price_per_byte,
+        deposit: deposit_wei,
+        domain_separator: domain_sep.0,
+        digest: digest.0,
+        receipt_typehash,
+        deposit_id: [0u8; 32], // TODO: track depositId from ZKSettlement.deposit() call
+
+        client_sig: client_sig.to_vec(),
+        node_sig: node_sig.to_vec(),
+
+        client_address,
+        entry_address: parse_addr(&circuit.entry.operator_address)?,
+        relay_address: parse_addr(&circuit.relay.operator_address)?,
+        exit_address: parse_addr(&circuit.exit.operator_address)?,
+
+        // Merkle proofs: populated when a local Poseidon tree is built
+        // from the registry. For now, use empty stubs — ZK settlement will
+        // fail at proof generation until the tree infrastructure is wired
+        // at connect time.
+        exit_merkle_proof: vec!["0".to_string(); 20],
+        exit_merkle_index: 0,
+        entry_merkle_proof: vec!["0".to_string(); 20],
+        entry_merkle_index: 0,
+        relay_merkle_proof: vec!["0".to_string(); 20],
+        relay_merkle_index: 0,
+
+        entry_secp256k1_pubkey: vec![],  // TODO: recover from on-chain data
+        relay_secp256k1_pubkey: vec![],  // TODO: recover from on-chain data
+
+        registry_root: "0".to_string(), // TODO: from ZKSettlement.registryRoot()
+    })
 }
 
 /// Return the current connection status.
