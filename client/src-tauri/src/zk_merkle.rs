@@ -3,22 +3,21 @@
 //! Builds a Poseidon-based Merkle tree from registered node secp256k1 public
 //! keys, matching the circuit's `MerkleVerify(MERKLE_DEPTH)` template.
 //! Provides proof extraction for individual nodes.
+//!
+//! Memory: ~64 MB at depth 20 (~2M internal nodes × 32 bytes).
 
-use light_poseidon::{Poseidon, PoseidonBytesHasher, PoseidonHasher};
+use light_poseidon::{Poseidon, PoseidonBytesHasher};
 use num_bigint::BigInt;
 
 /// Merkle tree depth (must match circuit instantiation).
 pub const MERKLE_DEPTH: usize = 20;
 
-/// Maximum number of leaves (2^MERKLE_DEPTH).
-pub const MAX_LEAVES: usize = 1 << MERKLE_DEPTH;
-
 /// A Poseidon Merkle tree for the ZK node registry.
+///
+/// Stores all layers (leaves through root) for O(1) proof extraction.
 pub struct PoseidonMerkleTree {
     /// Tree depth.
     depth: usize,
-    /// Leaf hashes (padded with zeros to 2^depth).
-    leaves: Vec<[u8; 32]>,
     /// Number of real leaves inserted.
     count: usize,
     /// Internal nodes, layer by layer from leaves to root.
@@ -53,13 +52,19 @@ impl PoseidonMerkleTree {
             return Err(format!("too many pubkeys: {} > {max_leaves}", pubkeys.len()));
         }
 
+        // Create hashers once and reuse across all hashes.
+        let mut hasher8 = Poseidon::<ark_bn254::Fr>::new_circom(8)
+            .map_err(|e| format!("poseidon8 init: {e}"))?;
+        let mut hasher2 = Poseidon::<ark_bn254::Fr>::new_circom(2)
+            .map_err(|e| format!("poseidon2 init: {e}"))?;
+
         // Compute leaf hashes.
         let mut leaves = Vec::with_capacity(max_leaves);
         for (i, pk) in pubkeys.iter().enumerate() {
             if pk.len() != 65 || pk[0] != 0x04 {
                 return Err(format!("pubkey[{i}]: expected 65-byte uncompressed key"));
             }
-            let leaf = poseidon8_pubkey(pk)?;
+            let leaf = poseidon8_pubkey_with(&mut hasher8, pk)?;
             leaves.push(leaf);
         }
         let count = leaves.len();
@@ -67,21 +72,21 @@ impl PoseidonMerkleTree {
         // Pad with zeros to fill the tree.
         leaves.resize(max_leaves, [0u8; 32]);
 
-        // Build layers bottom-up.
+        // Build layers bottom-up. Move leaves into layers[0] (no clone).
         let mut layers: Vec<Vec<[u8; 32]>> = Vec::with_capacity(depth + 1);
-        layers.push(leaves.clone());
+        layers.push(leaves);
 
         for d in 0..depth {
             let prev = &layers[d];
             let mut next = Vec::with_capacity(prev.len() / 2);
             for pair in prev.chunks(2) {
-                let hash = poseidon2_hash(&pair[0], &pair[1])?;
+                let hash = poseidon2_hash_with(&mut hasher2, &pair[0], &pair[1])?;
                 next.push(hash);
             }
             layers.push(next);
         }
 
-        Ok(Self { depth, leaves, count, layers })
+        Ok(Self { depth, count, layers })
     }
 
     /// Get the Merkle root as a decimal string.
@@ -121,7 +126,7 @@ impl PoseidonMerkleTree {
     /// Find the leaf index for a given uncompressed secp256k1 pubkey.
     pub fn find_index(&self, pubkey: &[u8]) -> Result<usize, String> {
         let leaf = poseidon8_pubkey(pubkey)?;
-        self.leaves.iter()
+        self.layers[0].iter()
             .position(|l| l == &leaf)
             .ok_or_else(|| "pubkey not found in tree".to_string())
     }
@@ -129,51 +134,64 @@ impl PoseidonMerkleTree {
 
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// Poseidon(2) hash of two 32-byte inputs, returning a 32-byte output.
-fn poseidon2_hash(a: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32], String> {
-    let mut poseidon = Poseidon::<ark_bn254::Fr>::new_circom(2)
-        .map_err(|e| format!("poseidon2 init: {e}"))?;
-
-    let hash_bytes = poseidon
+/// Poseidon(2) hash with a pre-created hasher (avoids re-allocation).
+fn poseidon2_hash_with(
+    hasher: &mut Poseidon<ark_bn254::Fr>,
+    a: &[u8; 32],
+    b: &[u8; 32],
+) -> Result<[u8; 32], String> {
+    let hash_bytes = hasher
         .hash_bytes_be(&[a.as_slice(), b.as_slice()])
         .map_err(|e| format!("poseidon2 hash: {e}"))?;
-
     let mut out = [0u8; 32];
     out.copy_from_slice(&hash_bytes);
     Ok(out)
 }
 
-/// Poseidon(8) hash of a secp256k1 public key's x,y coordinates as 4×64-bit limbs each.
-/// Matches the circuit's `Poseidon(8)` template for leaf computation.
-fn poseidon8_pubkey(pubkey: &[u8]) -> Result<[u8; 32], String> {
-    assert!(pubkey.len() == 65 && pubkey[0] == 0x04);
+/// Poseidon(8) hash with a pre-created hasher (avoids re-allocation).
+fn poseidon8_pubkey_with(
+    hasher: &mut Poseidon<ark_bn254::Fr>,
+    pubkey: &[u8],
+) -> Result<[u8; 32], String> {
+    if pubkey.len() != 65 || pubkey[0] != 0x04 {
+        return Err("poseidon8: expected 65-byte uncompressed key (0x04 prefix)".to_string());
+    }
+    hash_pubkey_coords(hasher, pubkey)
+}
 
-    // Split x and y into 4×64-bit big-endian limbs (8 inputs total).
+/// Poseidon(8) hash of a pubkey (standalone, creates its own hasher).
+/// Used by `find_index` which doesn't have a hasher in scope.
+fn poseidon8_pubkey(pubkey: &[u8]) -> Result<[u8; 32], String> {
+    if pubkey.len() != 65 || pubkey[0] != 0x04 {
+        return Err("poseidon8: expected 65-byte uncompressed key (0x04 prefix)".to_string());
+    }
+    let mut hasher = Poseidon::<ark_bn254::Fr>::new_circom(8)
+        .map_err(|e| format!("poseidon8 init: {e}"))?;
+    hash_pubkey_coords(&mut hasher, pubkey)
+}
+
+/// Core pubkey hashing: split x,y into 4×64-bit limbs, hash with Poseidon(8).
+fn hash_pubkey_coords(
+    hasher: &mut Poseidon<ark_bn254::Fr>,
+    pubkey: &[u8],
+) -> Result<[u8; 32], String> {
     let x = &pubkey[1..33];
     let y = &pubkey[33..65];
 
-    let mut inputs: Vec<&[u8]> = Vec::with_capacity(8);
     let limb_bufs: Vec<[u8; 32]> = (0..8)
         .map(|i| {
             let coord = if i < 4 { x } else { y };
-            let limb_idx = i % 4;
-            let start = limb_idx * 8;
+            let start = (i % 4) * 8;
             let limb_u64 = u64::from_be_bytes(coord[start..start + 8].try_into().unwrap());
-            // Poseidon expects field elements as 32-byte big-endian.
             let mut buf = [0u8; 32];
             buf[24..32].copy_from_slice(&limb_u64.to_be_bytes());
             buf
         })
         .collect();
 
-    for buf in &limb_bufs {
-        inputs.push(buf.as_slice());
-    }
+    let inputs: Vec<&[u8]> = limb_bufs.iter().map(|b| b.as_slice()).collect();
 
-    let mut poseidon = Poseidon::<ark_bn254::Fr>::new_circom(8)
-        .map_err(|e| format!("poseidon8 init: {e}"))?;
-
-    let hash_bytes = poseidon
+    let hash_bytes = hasher
         .hash_bytes_be(&inputs)
         .map_err(|e| format!("poseidon8 hash: {e}"))?;
 
@@ -186,15 +204,13 @@ fn poseidon8_pubkey(pubkey: &[u8]) -> Result<[u8; 32], String> {
 mod tests {
     use super::*;
 
-    /// Generate a fake uncompressed secp256k1 pubkey for testing.
     fn fake_pubkey(seed: u8) -> Vec<u8> {
-        let mut pk = vec![0x04]; // uncompressed prefix
-        pk.extend(std::iter::repeat(seed).take(32)); // x coordinate
-        pk.extend(std::iter::repeat(seed.wrapping_add(1)).take(32)); // y coordinate
+        let mut pk = vec![0x04];
+        pk.extend(std::iter::repeat(seed).take(32));
+        pk.extend(std::iter::repeat(seed.wrapping_add(1)).take(32));
         pk
     }
 
-    /// Use depth 4 (16 leaves) for fast tests.
     const TEST_DEPTH: usize = 4;
 
     fn test_tree(pubkeys: &[Vec<u8>]) -> PoseidonMerkleTree {
@@ -203,9 +219,7 @@ mod tests {
 
     #[test]
     fn build_tree_with_3_nodes() {
-        let pubkeys = vec![fake_pubkey(1), fake_pubkey(2), fake_pubkey(3)];
-        let tree = test_tree(&pubkeys);
-
+        let tree = test_tree(&[fake_pubkey(1), fake_pubkey(2), fake_pubkey(3)]);
         assert_eq!(tree.count(), 3);
         assert!(!tree.root().is_empty());
         assert_ne!(tree.root(), "0");
@@ -213,9 +227,7 @@ mod tests {
 
     #[test]
     fn proof_has_correct_depth() {
-        let pubkeys = vec![fake_pubkey(10), fake_pubkey(20)];
-        let tree = test_tree(&pubkeys);
-
+        let tree = test_tree(&[fake_pubkey(10), fake_pubkey(20)]);
         let proof = tree.proof(0).unwrap();
         assert_eq!(proof.siblings.len(), TEST_DEPTH);
         assert_eq!(proof.index, 0);
@@ -228,7 +240,6 @@ mod tests {
         let pk2 = fake_pubkey(2);
         let pk3 = fake_pubkey(3);
         let tree = test_tree(&[pk1.clone(), pk2.clone(), pk3.clone()]);
-
         assert_eq!(tree.find_index(&pk1).unwrap(), 0);
         assert_eq!(tree.find_index(&pk2).unwrap(), 1);
         assert_eq!(tree.find_index(&pk3).unwrap(), 2);

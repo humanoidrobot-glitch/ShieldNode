@@ -239,7 +239,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     let (tx_hash, session_id) = wallet::open_session(
         &wallet_cfg,
         &entry_node_id,
-        deposit_wei as u128,
+        deposit_wei,
     ).await?;
 
     let session_id_str = session_id.to_string();
@@ -252,7 +252,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             bytes_used: 0,
             hop_count,
             rotation_count: 0,
-            deposit_wei: deposit_wei as u128,
+            deposit_wei: deposit_wei,
         };
     }
 
@@ -446,10 +446,11 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // 7. Build ZK session data if settlement mode may use ZK.
+    let client_addr = alloy::signers::Signer::address(&signer);
     let zk_data = if settlement_mode != settlement::SettlementMode::Plaintext {
         build_zk_session_data(
             &state, session_id, bytes_used, timestamp, deposit_wei,
-            &domain_sep, &digest, &client_sig, &node_sig,
+            &domain_sep, &digest, &client_sig, &node_sig, &client_addr,
         )
     } else {
         None
@@ -521,11 +522,20 @@ fn build_zk_session_data(
     digest: &alloy::primitives::B256,
     client_sig: &[u8],
     node_sig: &[u8],
+    client_addr: &alloy::primitives::Address,
 ) -> Option<zk_witness::ZkSessionData> {
-    let circ = state.circuit.lock().ok()?;
-    let circuit = circ.as_ref()?;
+    // Extract circuit data under a scoped lock (release before any other locks).
+    let (exit_price, entry_addr_hex, relay_addr_hex, exit_addr_hex) = {
+        let circ = state.circuit.lock().ok()?;
+        let c = circ.as_ref()?;
+        (
+            c.exit.price_per_byte,
+            c.entry.operator_address.clone(),
+            c.relay.operator_address.clone(),
+            c.exit.operator_address.clone(),
+        )
+    };
 
-    // Parse operator addresses from hex to [u8; 20].
     let parse_addr = |hex: &str| -> Option<[u8; 20]> {
         let stripped = hex.strip_prefix("0x").unwrap_or(hex);
         let bytes = hex::decode(stripped).ok()?;
@@ -535,53 +545,36 @@ fn build_zk_session_data(
         Some(arr)
     };
 
-    let client_address = {
-        let cfg = state.config.lock().ok()?;
-        let signer = cfg.operator_private_key.as_deref()?;
-        let pk = wallet::WalletConfig {
-            rpc_url: String::new(),
-            chain_id: 0,
-            private_key: Some(signer.to_string()),
-            settlement_address: String::new(),
-        }.parse_signer().ok()?;
-        let addr = alloy::signers::Signer::address(&pk);
-        let mut arr = [0u8; 20];
-        arr.copy_from_slice(addr.as_slice());
-        arr
-    };
+    let mut client_address = [0u8; 20];
+    client_address.copy_from_slice(client_addr.as_slice());
 
-    let receipt_typehash: [u8; 32] = alloy::primitives::keccak256(
-        "BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)"
-    ).0;
+    let depth = zk_merkle::MERKLE_DEPTH;
 
     Some(zk_witness::ZkSessionData {
         session_id,
         cumulative_bytes: bytes_used,
         timestamp,
-        price_per_byte: circuit.exit.price_per_byte,
+        price_per_byte: exit_price,
         deposit: deposit_wei,
         domain_separator: domain_sep.0,
         digest: digest.0,
-        receipt_typehash,
+        receipt_typehash: receipts::receipt_typehash().0,
         deposit_id: [0u8; 32], // TODO: track depositId from ZKSettlement.deposit() call
 
         client_sig: client_sig.to_vec(),
         node_sig: node_sig.to_vec(),
 
         client_address,
-        entry_address: parse_addr(&circuit.entry.operator_address)?,
-        relay_address: parse_addr(&circuit.relay.operator_address)?,
-        exit_address: parse_addr(&circuit.exit.operator_address)?,
+        entry_address: parse_addr(&entry_addr_hex)?,
+        relay_address: parse_addr(&relay_addr_hex)?,
+        exit_address: parse_addr(&exit_addr_hex)?,
 
-        // Merkle proofs: populated when a local Poseidon tree is built
-        // from the registry. For now, use empty stubs — ZK settlement will
-        // fail at proof generation until the tree infrastructure is wired
-        // at connect time.
-        exit_merkle_proof: vec!["0".to_string(); 20],
+        // Merkle proofs stubbed until tree is built at connect time.
+        exit_merkle_proof: vec!["0".to_string(); depth],
         exit_merkle_index: 0,
-        entry_merkle_proof: vec!["0".to_string(); 20],
+        entry_merkle_proof: vec!["0".to_string(); depth],
         entry_merkle_index: 0,
-        relay_merkle_proof: vec!["0".to_string(); 20],
+        relay_merkle_proof: vec!["0".to_string(); depth],
         relay_merkle_index: 0,
 
         entry_secp256k1_pubkey: vec![],  // TODO: recover from on-chain data

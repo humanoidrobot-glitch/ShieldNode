@@ -5,7 +5,7 @@ use alloy::sol_types::SolValue;
 use tracing::info;
 
 /// Compute the EIP-712 type hash for BandwidthReceipt.
-fn receipt_typehash() -> B256 {
+pub(crate) fn receipt_typehash() -> B256 {
     keccak256("BandwidthReceipt(uint256 sessionId,uint256 cumulativeBytes,uint256 timestamp)")
 }
 
