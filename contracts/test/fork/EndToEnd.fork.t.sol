@@ -10,6 +10,7 @@ import {ChallengeManager}   from "../../src/ChallengeManager.sol";
 import {ISlashingOracle}    from "../../src/interfaces/ISlashingOracle.sol";
 import {INodeRegistry}      from "../../src/interfaces/INodeRegistry.sol";
 import {EIP712Utils}        from "../../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "../helpers/TestKeys.sol";
 
 /// @title End-to-end fork test
 /// @notice Deploys the full protocol on a mainnet fork and exercises the
@@ -104,11 +105,11 @@ contract EndToEndForkTest is Test {
 
         // Register 3 nodes.
         vm.prank(entryOp);
-        registry.register{value: 0.1 ether}(entryId, keccak256("e-pub"), "1.1.1.1:51820");
+        registry.register{value: 0.1 ether}(entryId, keccak256("e-pub"), "1.1.1.1:51820", TestKeys.entry_key());
         vm.prank(relayOp);
-        registry.register{value: 0.1 ether}(relayId, keccak256("r-pub"), "2.2.2.2:51820");
+        registry.register{value: 0.1 ether}(relayId, keccak256("r-pub"), "2.2.2.2:51820", TestKeys.relay_key());
         vm.prank(exitOp);
-        registry.register{value: 1 ether}(exitId, keccak256("x-pub"), "3.3.3.3:51820");
+        registry.register{value: 1 ether}(exitId, keccak256("x-pub"), "3.3.3.3:51820", TestKeys.exit_key());
 
         // Set per-node prices on all 3 nodes (Finding 11: openSession requires all prices > 0).
         vm.prank(entryOp);
@@ -122,17 +123,19 @@ contract EndToEndForkTest is Test {
     // ── Gas cost verification ──────────────────────────────────
 
     function test_gas_register() public onlyFork {
-        address newOp = makeAddr("newOp");
+        uint256 newOpPk = 0xDEAD1;
+        address newOp = vm.addr(newOpPk);
         vm.deal(newOp, 1 ether);
         bytes32 newId = keccak256(abi.encode(newOp, keccak256("pub")));
 
         vm.prank(newOp);
         uint256 gasBefore = gasleft();
-        registry.register{value: 0.1 ether}(newId, keccak256("pub"), "5.5.5.5:51820");
+        registry.register{value: 0.1 ether}(newId, keccak256("pub"), "5.5.5.5:51820", TestKeys.operator_key());
         uint256 gasUsed = gasBefore - gasleft();
 
         // CLAUDE.md estimate: ~150K. Actual varies by compiler settings.
-        assertLt(gasUsed, 300_000, "register gas too high");
+        // Increased after adding secp256k1 key storage (~170K → ~330K).
+        assertLt(gasUsed, 400_000, "register gas too high");
         console.log("register gas:", gasUsed);
     }
 

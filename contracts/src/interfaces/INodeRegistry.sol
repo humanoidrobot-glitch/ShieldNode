@@ -20,6 +20,8 @@ interface INodeRegistry {
         bool    isActive;
         uint256 pricePerByte;
         bytes32 commitment;       // reserved for Phase-6 ZK eligibility
+        bytes32 secp256k1X;       // x-coordinate of operator's secp256k1 pubkey
+        bytes32 secp256k1Y;       // y-coordinate of operator's secp256k1 pubkey
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -55,13 +57,15 @@ interface INodeRegistry {
     // ──────────────────────────────────────────────────────────────
 
     /// @notice Register a new VPN node with the given id and public key.
-    /// @param nodeId     Unique identifier for the node.
-    /// @param publicKey  Curve25519 public key used by clients.
-    /// @param endpoint   WireGuard endpoint (host:port).
+    /// @param nodeId        Unique identifier for the node.
+    /// @param publicKey     Curve25519 public key used by clients.
+    /// @param endpoint      WireGuard endpoint (host:port).
+    /// @param secp256k1Key  Operator's uncompressed secp256k1 pubkey (64 bytes: x || y).
     function register(
         bytes32 nodeId,
         bytes32 publicKey,
-        string calldata endpoint
+        string calldata endpoint,
+        bytes calldata secp256k1Key
     ) external payable;
 
     /// @notice Deregister a node and begin the unstake cooldown.

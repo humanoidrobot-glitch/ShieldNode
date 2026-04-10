@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import {NodeRegistry}       from "../../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../../src/SessionSettlement.sol";
 import {EIP712Utils}        from "../../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "../helpers/TestKeys.sol";
 
 /// @title SessionSettlement Handler
 /// @notice Drives random open/settle/withdraw sequences for invariant testing.
@@ -129,11 +130,11 @@ contract SessionSettlementInvariantTest is Test {
         vm.deal(exitOp, 10 ether);
 
         vm.prank(entryOp);
-        registry.register{value: 0.1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 0.1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820", TestKeys.entry_key());
         vm.prank(relayOp);
-        registry.register{value: 0.1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 0.1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820", TestKeys.relay_key());
         vm.prank(exitOp);
-        registry.register{value: 0.1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820");
+        registry.register{value: 0.1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820", TestKeys.exit_key());
 
         vm.prank(entryOp);
         registry.updatePricePerByte(eid, 1);

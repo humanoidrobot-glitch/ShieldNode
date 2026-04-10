@@ -118,7 +118,8 @@ contract NodeRegistry is INodeRegistry {
     function register(
         bytes32 nodeId,
         bytes32 publicKey,
-        string calldata endpoint
+        string calldata endpoint,
+        bytes calldata secp256k1Key
     ) external payable override {
         require(_nodes[nodeId].owner == address(0), "NodeRegistry: already registered");
         require(!permanentBan[nodeId], "NodeRegistry: permanently banned");
@@ -132,6 +133,12 @@ contract NodeRegistry is INodeRegistry {
             nodeId == keccak256(abi.encode(msg.sender, publicKey)),
             "NodeRegistry: nodeId not derived from sender+pubkey"
         );
+        // Verify secp256k1 key belongs to the sender.
+        require(secp256k1Key.length == 64, "NodeRegistry: secp256k1 key must be 64 bytes");
+        require(
+            address(uint160(uint256(keccak256(secp256k1Key)))) == msg.sender,
+            "NodeRegistry: secp256k1 key does not match sender"
+        );
 
         _nodes[nodeId] = NodeInfo({
             owner:         msg.sender,
@@ -143,7 +150,9 @@ contract NodeRegistry is INodeRegistry {
             slashCount:    permanentSlashCountByOwner[msg.sender],
             isActive:      true,
             pricePerByte:  0,
-            commitment:    bytes32(0)
+            commitment:    bytes32(0),
+            secp256k1X:    bytes32(secp256k1Key[:32]),
+            secp256k1Y:    bytes32(secp256k1Key[32:64])
         });
 
         if (!_everRegistered[nodeId]) {

@@ -6,6 +6,7 @@ import {NodeRegistry}       from "../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../src/SessionSettlement.sol";
 import {ISessionSettlement} from "../src/interfaces/ISessionSettlement.sol";
 import {EIP712Utils}        from "../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "./helpers/TestKeys.sol";
 
 contract StressTest is Test {
     NodeRegistry      public registry;
@@ -13,9 +14,9 @@ contract StressTest is Test {
 
     address public oracle = makeAddr("oracle");
 
-    uint256 constant ENTRY_KEY = 0xE001;
-    uint256 constant RELAY_KEY = 0xE002;
-    uint256 constant EXIT_KEY  = 0xE003;
+    uint256 constant ENTRY_KEY = 0xA001;
+    uint256 constant RELAY_KEY = 0xA002;
+    uint256 constant EXIT_KEY  = 0xA003;
 
     address public entryOp;
     address public relayOp;
@@ -47,9 +48,9 @@ contract StressTest is Test {
         registry   = new NodeRegistry(oracle);
         settlement = new SessionSettlement(address(registry), address(this));
 
-        _registerNode(entryOp, entryId, "entry-stress", "10.0.0.1:51820");
-        _registerNode(relayOp, relayId, "relay-stress", "10.0.0.2:51820");
-        _registerNode(exitOp,  exitId,  "exit-stress",  "10.0.0.3:51820");
+        _registerNode(entryOp, entryId, "entry-stress", "10.0.0.1:51820", TestKeys.entry_key());
+        _registerNode(relayOp, relayId, "relay-stress", "10.0.0.2:51820", TestKeys.relay_key());
+        _registerNode(exitOp,  exitId,  "exit-stress",  "10.0.0.3:51820", TestKeys.exit_key());
 
         // Finding 11: all 3 nodes need a price for openSession
         vm.prank(entryOp);
@@ -62,9 +63,9 @@ contract StressTest is Test {
         nodeIds = [entryId, relayId, exitId];
     }
 
-    function _registerNode(address op, bytes32 id, string memory pub_, string memory ep) internal {
+    function _registerNode(address op, bytes32 id, string memory pub_, string memory ep, bytes memory secp256k1Key) internal {
         vm.prank(op);
-        registry.register{value: 0.1 ether}(id, keccak256(bytes(pub_)), ep);
+        registry.register{value: 0.1 ether}(id, keccak256(bytes(pub_)), ep, secp256k1Key);
     }
 
     function _domainSeparator() internal view returns (bytes32) {

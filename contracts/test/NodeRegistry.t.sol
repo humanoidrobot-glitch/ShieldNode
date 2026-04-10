@@ -7,13 +7,15 @@ import {INodeRegistry}      from "../src/interfaces/INodeRegistry.sol";
 import {SlashingOracle}     from "../src/SlashingOracle.sol";
 import {SessionSettlement}  from "../src/SessionSettlement.sol";
 import {Treasury}           from "../src/Treasury.sol";
+import {TestKeys}           from "./helpers/TestKeys.sol";
 
 contract NodeRegistryTest is Test {
     NodeRegistry public registry;
     SlashingOracle public oracle;
 
     address public deployer  = makeAddr("deployer");
-    address public operator = makeAddr("operator");
+    uint256 constant OPERATOR_PK = 0xDEAD1;
+    address public operator;
     address public rando    = makeAddr("rando");
 
     bytes32 public   NODE_ID;
@@ -21,6 +23,7 @@ contract NodeRegistryTest is Test {
     string  constant ENDPOINT   = "192.168.1.1:51820";
 
     function setUp() public {
+        operator = vm.addr(OPERATOR_PK);
         NODE_ID = keccak256(abi.encode(operator, PUB_KEY));
 
         vm.startPrank(deployer);
@@ -46,7 +49,7 @@ contract NodeRegistryTest is Test {
 
     function test_register_node() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         INodeRegistry.NodeInfo memory info = registry.getNode(NODE_ID);
         assertEq(info.owner, operator);
@@ -61,15 +64,15 @@ contract NodeRegistryTest is Test {
     function test_register_insufficient_stake() public {
         vm.prank(operator);
         vm.expectRevert("NodeRegistry: insufficient stake");
-        registry.register{value: 0.01 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.01 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
     }
 
     function test_register_duplicate() public {
         vm.startPrank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.expectRevert("NodeRegistry: already registered");
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
         vm.stopPrank();
     }
 
@@ -77,7 +80,7 @@ contract NodeRegistryTest is Test {
 
     function test_heartbeat() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         // Advance time
         vm.warp(block.timestamp + 1 hours);
@@ -91,7 +94,7 @@ contract NodeRegistryTest is Test {
 
     function test_heartbeat_not_owner() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(rando);
         vm.expectRevert("NodeRegistry: not node owner");
@@ -102,7 +105,7 @@ contract NodeRegistryTest is Test {
 
     function test_deregister_and_withdraw() public {
         vm.prank(operator);
-        registry.register{value: 0.5 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.5 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(operator);
         registry.deregister(NODE_ID);
@@ -123,7 +126,7 @@ contract NodeRegistryTest is Test {
 
     function test_deregister_cooldown_not_passed() public {
         vm.prank(operator);
-        registry.register{value: 0.5 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.5 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(operator);
         registry.deregister(NODE_ID);
@@ -146,7 +149,8 @@ contract NodeRegistryTest is Test {
             registry.register{value: 0.1 ether}(
                 ids[i],
                 pubKey,
-                "1.2.3.4:51820"
+                "1.2.3.4:51820",
+                TestKeys.operator_key()
             );
         }
 
@@ -172,7 +176,7 @@ contract NodeRegistryTest is Test {
 
     function test_slash_from_oracle() public {
         vm.prank(operator);
-        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         uint256 oracleBalBefore = address(oracle).balance;
 
@@ -189,7 +193,7 @@ contract NodeRegistryTest is Test {
 
     function test_slash_unauthorized() public {
         vm.prank(operator);
-        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(rando);
         vm.expectRevert("NodeRegistry: not oracle");
@@ -200,7 +204,7 @@ contract NodeRegistryTest is Test {
 
     function test_update_endpoint() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(operator);
         registry.updateEndpoint(NODE_ID, "10.0.0.1:51820");
@@ -213,7 +217,7 @@ contract NodeRegistryTest is Test {
 
     function test_node_inactive_after_missed_heartbeats() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         assertTrue(registry.isNodeActive(NODE_ID));
 
@@ -226,7 +230,7 @@ contract NodeRegistryTest is Test {
 
     function test_updatePrice_within_cap() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(operator);
         registry.updatePricePerByte(NODE_ID, 1e12);
@@ -237,7 +241,7 @@ contract NodeRegistryTest is Test {
 
     function test_updatePrice_exceeds_cap_reverts() public {
         vm.prank(operator);
-        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 0.1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.operator_key());
 
         vm.prank(operator);
         vm.expectRevert("NodeRegistry: price too high");

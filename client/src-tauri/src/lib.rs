@@ -46,6 +46,9 @@ pub enum ConnectionState {
         rotation_count: u32,
         /// Original deposit amount in wei (for ZK settlement).
         deposit_wei: u128,
+        /// Deposit ID from ZKSettlement.deposit() (None if ZK not used).
+        #[serde(skip)]
+        zk_deposit_id: Option<[u8; 32]>,
     },
 }
 
@@ -123,6 +126,7 @@ impl AppState {
             chain_id: cfg.chain_id,
             private_key: cfg.operator_private_key.clone(),
             settlement_address: SETTLEMENT_ADDRESS.to_string(),
+            zk_settlement_address: None, // TODO: add ZK_SETTLEMENT_ADDRESS constant
         })
     }
 }
@@ -244,6 +248,25 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
     let session_id_str = session_id.to_string();
 
+    // Make ZK deposit if settlement mode may use ZK.
+    let zk_deposit_id = {
+        let mode = state.config.lock().map_err(|e| format!("lock error: {e}"))?.settlement_mode;
+        if mode != settlement::SettlementMode::Plaintext {
+            match wallet::zk_deposit(&wallet_cfg, deposit_wei).await {
+                Ok(id) => {
+                    info!(deposit_id = %hex::encode(&id), "ZK deposit successful");
+                    Some(id)
+                }
+                Err(e) => {
+                    warn!(error = %e, "ZK deposit failed, ZK settlement will be unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     {
         let mut conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         *conn = ConnectionState::Connected {
@@ -252,7 +275,8 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             bytes_used: 0,
             hop_count,
             rotation_count: 0,
-            deposit_wei: deposit_wei,
+            deposit_wei,
+            zk_deposit_id,
         };
     }
 
@@ -350,17 +374,17 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     stop_health_monitor(&state)?;
     stop_cover_traffic(&state)?;
 
-    // 1. Get session state (session_id, bytes_used, deposit) and exit endpoint.
-    let (session_id_str, bytes_used, exit_endpoint, deposit_wei) = {
+    // 1. Get session state (session_id, bytes_used, deposit, deposit_id) and exit endpoint.
+    let (session_id_str, bytes_used, exit_endpoint, deposit_wei, zk_deposit_id) = {
         let conn = state.connection.lock().map_err(|e| format!("lock error: {e}"))?;
         match &*conn {
-            ConnectionState::Connected { session_id, bytes_used, node_id, deposit_wei, .. } => {
+            ConnectionState::Connected { session_id, bytes_used, node_id, deposit_wei, zk_deposit_id, .. } => {
                 let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
                 let endpoint = circ
                     .as_ref()
                     .map(|c| c.exit.endpoint.clone())
                     .unwrap_or_else(|| node_id.clone());
-                (session_id.clone(), *bytes_used, endpoint, *deposit_wei)
+                (session_id.clone(), *bytes_used, endpoint, *deposit_wei, *zk_deposit_id)
             }
             _ => return Err("not connected".to_string()),
         }
@@ -392,6 +416,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
             chain_id: cfg.chain_id,
             private_key: cfg.operator_private_key.clone(),
             settlement_address: SETTLEMENT_ADDRESS.to_string(),
+            zk_settlement_address: None,
         };
         let mode = cfg.settlement_mode;
         (wc, cfg.chain_id, mode)
@@ -451,6 +476,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         build_zk_session_data(
             &state, session_id, bytes_used, timestamp, deposit_wei,
             &domain_sep, &digest, &client_sig, &node_sig, &client_addr,
+            zk_deposit_id,
         )
     } else {
         None
@@ -523,6 +549,7 @@ fn build_zk_session_data(
     client_sig: &[u8],
     node_sig: &[u8],
     client_addr: &alloy::primitives::Address,
+    deposit_id: Option<[u8; 32]>,
 ) -> Option<zk_witness::ZkSessionData> {
     // Extract circuit data under a scoped lock (release before any other locks).
     let (exit_price, entry_addr_hex, relay_addr_hex, exit_addr_hex) = {
@@ -559,7 +586,7 @@ fn build_zk_session_data(
         domain_separator: domain_sep.0,
         digest: digest.0,
         receipt_typehash: receipts::receipt_typehash().0,
-        deposit_id: [0u8; 32], // TODO: track depositId from ZKSettlement.deposit() call
+        deposit_id: deposit_id.unwrap_or([0u8; 32]),
 
         client_sig: client_sig.to_vec(),
         node_sig: node_sig.to_vec(),

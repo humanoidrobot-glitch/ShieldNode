@@ -9,6 +9,7 @@ import {ChallengeManager}   from "../src/ChallengeManager.sol";
 import {Treasury}           from "../src/Treasury.sol";
 import {EIP712Utils}        from "../src/lib/EIP712Utils.sol";
 import {INodeRegistry}      from "../src/interfaces/INodeRegistry.sol";
+import {TestKeys}           from "./helpers/TestKeys.sol";
 
 contract ChallengeManagerTest is Test {
     NodeRegistry      public registry;
@@ -73,7 +74,8 @@ contract ChallengeManagerTest is Test {
         registry.register{value: 0.1 ether}(
             nodeId,
             keccak256("pubkey"),
-            "10.0.0.1:51820"
+            "10.0.0.1:51820",
+            TestKeys.node_key()
         );
     }
 

@@ -12,6 +12,11 @@ use crate::chain::ISessionSettlement;
 sol! {
     #[sol(rpc)]
     interface IZKSettlement {
+        event DepositMade(bytes32 indexed depositId, address indexed depositor, uint256 amount);
+
+        function deposit() external payable returns (bytes32 depositId);
+        function registryRoot() external view returns (uint256);
+
         function settleWithProof(
             uint256[2] calldata proof_a,
             uint256[2][2] calldata proof_b,
@@ -33,6 +38,8 @@ pub struct WalletConfig {
     pub chain_id: u64,
     pub private_key: Option<String>,
     pub settlement_address: String,
+    #[serde(default)]
+    pub zk_settlement_address: Option<String>,
 }
 
 impl WalletConfig {
@@ -127,6 +134,54 @@ pub async fn settle_session(
     let tx_hash = format!("{:?}", pending.tx_hash());
     info!(tx = %tx_hash, "session settled on-chain");
     Ok(tx_hash)
+}
+
+/// Call ZKSettlement.deposit{value: amount}() and return the depositId.
+pub async fn zk_deposit(wallet: &WalletConfig, amount: u128) -> Result<[u8; 32], String> {
+    let signer = wallet.parse_signer()?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(wallet.parse_url()?);
+
+    let zk_addr: Address = wallet.zk_settlement_address.as_deref()
+        .unwrap_or(&wallet.settlement_address)
+        .parse()
+        .map_err(|e| format!("invalid ZK settlement address: {e}"))?;
+
+    let contract = IZKSettlement::new(zk_addr, &provider);
+    let pending = contract.deposit()
+        .value(U256::from(amount))
+        .send().await
+        .map_err(|e| format!("ZKSettlement.deposit tx failed: {e}"))?;
+
+    let receipt = pending.get_receipt().await
+        .map_err(|e| format!("failed to get deposit receipt: {e}"))?;
+
+    // Parse depositId from the DepositMade event (first indexed topic).
+    use alloy::primitives::keccak256;
+    let deposit_made_sig = keccak256("DepositMade(bytes32,address,uint256)");
+    let deposit_id: [u8; 32] = receipt.inner.logs().iter()
+        .find(|log| log.topics().first() == Some(&deposit_made_sig))
+        .and_then(|log| log.topics().get(1))
+        .map(|topic| topic.0)
+        .ok_or("no DepositMade event found in deposit receipt")?;
+
+    info!(deposit_id = %hex::encode(&deposit_id), "ZK deposit made");
+    Ok(deposit_id)
+}
+
+/// Read the current registryRoot from ZKSettlement (view call, no signing needed).
+pub async fn read_registry_root(rpc_url: &str, zk_settlement_addr: &str) -> Result<String, String> {
+    let url: url::Url = rpc_url.parse().map_err(|e| format!("invalid RPC URL: {e}"))?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    let addr: Address = zk_settlement_addr.parse()
+        .map_err(|e| format!("invalid ZK settlement address: {e}"))?;
+
+    let contract = IZKSettlement::new(addr, &provider);
+    let result = contract.registryRoot().call().await
+        .map_err(|e| format!("registryRoot call failed: {e}"))?;
+
+    Ok(result.to_string())
 }
 
 /// Submit a ZK proof to ZKSettlement.settleWithProof.

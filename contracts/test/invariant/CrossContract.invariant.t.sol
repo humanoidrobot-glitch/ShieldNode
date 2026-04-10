@@ -10,6 +10,7 @@ import {INodeRegistry}      from "../../src/interfaces/INodeRegistry.sol";
 import {ChallengeManager}   from "../../src/ChallengeManager.sol";
 import {Treasury}           from "../../src/Treasury.sol";
 import {EIP712Utils}        from "../../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "../helpers/TestKeys.sol";
 
 /// @title CrossContractHandler
 /// @notice Drives random sequences across NodeRegistry, SessionSettlement,
@@ -307,11 +308,11 @@ contract CrossContractInvariantTest is Test {
         vm.deal(exitOp, 10 ether);
 
         vm.prank(entryOp);
-        registry.register{value: 1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 1 ether}(eid, keccak256("entry-pub"), "1.1.1.1:51820", TestKeys.entry_key());
         vm.prank(relayOp);
-        registry.register{value: 1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 1 ether}(rid, keccak256("relay-pub"), "2.2.2.2:51820", TestKeys.relay_key());
         vm.prank(exitOp);
-        registry.register{value: 1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820");
+        registry.register{value: 1 ether}(xid, keccak256("exit-pub"), "3.3.3.3:51820", TestKeys.exit_key());
 
         vm.prank(entryOp);
         registry.updatePricePerByte(eid, 1);

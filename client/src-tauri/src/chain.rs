@@ -22,6 +22,8 @@ sol! {
             bool    isActive;
             uint256 pricePerByte;
             bytes32 commitment;
+            bytes32 secp256k1X;
+            bytes32 secp256k1Y;
         }
 
         function getActiveNodes(uint256 offset, uint256 limit)
@@ -187,6 +189,50 @@ impl ChainReader {
 
         info!(count = nodes.len(), "fetched full node info from registry");
         Ok(nodes)
+    }
+
+    /// Fetch secp256k1 pubkeys for all active nodes.
+    /// Returns (node_id hex string, 65-byte uncompressed pubkey) pairs.
+    pub async fn get_all_secp256k1_pubkeys(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let provider = self.provider();
+        let registry = INodeRegistry::new(self.registry_address, &provider);
+
+        let node_ids = registry
+            .getActiveNodes(alloy::primitives::U256::from(0), alloy::primitives::U256::from(100))
+            .call()
+            .await
+            .map_err(|e| format!("getActiveNodes failed: {e}"))?;
+
+        let futures: Vec<_> = node_ids
+            .iter()
+            .map(|id| {
+                let reg = &registry;
+                let id = *id;
+                async move {
+                    match reg.getNode(id).call().await {
+                        Ok(info) => {
+                            // Skip nodes without secp256k1 keys.
+                            let zero = alloy::primitives::FixedBytes::<32>::ZERO;
+                            if info.secp256k1X == zero && info.secp256k1Y == zero {
+                                return None;
+                            }
+                            // Build 65-byte uncompressed key: 0x04 || x || y
+                            let mut key = vec![0x04u8];
+                            key.extend_from_slice(info.secp256k1X.as_slice());
+                            key.extend_from_slice(info.secp256k1Y.as_slice());
+                            let id_hex = format!("0x{}", hex::encode(id.as_slice()));
+                            Some((id_hex, key))
+                        }
+                        Err(_) => None,
+                    }
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+        let pairs: Vec<_> = results.into_iter().flatten().collect();
+        info!(count = pairs.len(), "fetched secp256k1 pubkeys from registry");
+        Ok(pairs)
     }
 
     /// Fetch the current gas price from the RPC provider and return it in Gwei.

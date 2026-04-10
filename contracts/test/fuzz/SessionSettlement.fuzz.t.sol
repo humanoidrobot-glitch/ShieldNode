@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import {NodeRegistry}       from "../../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../../src/SessionSettlement.sol";
 import {EIP712Utils}        from "../../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "../helpers/TestKeys.sol";
 
 /// @title SessionSettlement fuzz tests
 /// @notice Fuzz settlement math: conservation, caps, and split correctness.
@@ -50,11 +51,11 @@ contract SessionSettlementFuzzTest is Test {
         settlement = new SessionSettlement(address(registry), address(this));
 
         vm.prank(entryOp);
-        registry.register{value: 0.1 ether}(entryId, keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 0.1 ether}(entryId, keccak256("entry-pub"), "1.1.1.1:51820", TestKeys.entry_key());
         vm.prank(relayOp);
-        registry.register{value: 0.1 ether}(relayId, keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 0.1 ether}(relayId, keccak256("relay-pub"), "2.2.2.2:51820", TestKeys.relay_key());
         vm.prank(exitOp);
-        registry.register{value: 0.1 ether}(exitId, keccak256("exit-pub"), "3.3.3.3:51820");
+        registry.register{value: 0.1 ether}(exitId, keccak256("exit-pub"), "3.3.3.3:51820", TestKeys.exit_key());
 
         nodeIds = [entryId, relayId, exitId];
     }

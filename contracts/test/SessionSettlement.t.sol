@@ -6,6 +6,7 @@ import {NodeRegistry}       from "../src/NodeRegistry.sol";
 import {SessionSettlement}  from "../src/SessionSettlement.sol";
 import {ISessionSettlement} from "../src/interfaces/ISessionSettlement.sol";
 import {EIP712Utils}        from "../src/lib/EIP712Utils.sol";
+import {TestKeys}           from "./helpers/TestKeys.sol";
 
 contract SessionSettlementTest is Test {
     NodeRegistry      public registry;
@@ -57,9 +58,9 @@ contract SessionSettlementTest is Test {
         registry   = new NodeRegistry(oracle);
         settlement = new SessionSettlement(address(registry), address(this));
 
-        _registerNode(entryOp, entryId, entryPub, "1.1.1.1:51820");
-        _registerNode(relayOp, relayId, relayPub, "2.2.2.2:51820");
-        _registerNode(exitOp,  exitId,  exitPub,  "3.3.3.3:51820");
+        _registerNode(entryOp, entryId, entryPub, "1.1.1.1:51820", TestKeys.entry_key());
+        _registerNode(relayOp, relayId, relayPub, "2.2.2.2:51820", TestKeys.relay_key());
+        _registerNode(exitOp,  exitId,  exitPub,  "3.3.3.3:51820", TestKeys.exit_key());
 
         // Set price on all nodes (Finding 11: per-node prices).
         vm.prank(entryOp);
@@ -75,10 +76,10 @@ contract SessionSettlementTest is Test {
     // ────────────────────── Helpers ──────────────────────
 
     function _registerNode(
-        address op, bytes32 id, bytes32 pubKey, string memory endpoint
+        address op, bytes32 id, bytes32 pubKey, string memory endpoint, bytes memory secp256k1Key
     ) internal {
         vm.prank(op);
-        registry.register{value: 0.1 ether}(id, pubKey, endpoint);
+        registry.register{value: 0.1 ether}(id, pubKey, endpoint, secp256k1Key);
     }
 
     function _domainSeparator() internal view returns (bytes32) {
@@ -161,11 +162,12 @@ contract SessionSettlementTest is Test {
     function test_open_session_zero_price() public {
         // A node with pricePerByte = 0 should be rejected.
         bytes32 cheapPub = keccak256("cheapPub");
-        address cheapOp = makeAddr("cheapOp");
+        uint256 cheapPk = 0xDEAD1;
+        address cheapOp = vm.addr(cheapPk);
         vm.deal(cheapOp, 1 ether);
         bytes32 cheapId = keccak256(abi.encode(cheapOp, cheapPub));
         vm.prank(cheapOp);
-        registry.register{value: 0.1 ether}(cheapId, cheapPub, "4.4.4.4:51820");
+        registry.register{value: 0.1 ether}(cheapId, cheapPub, "4.4.4.4:51820", TestKeys.operator_key());
         // Don't set pricePerByte — defaults to 0.
         bytes32[3] memory ids = [entryId, relayId, cheapId];
         vm.prank(client);

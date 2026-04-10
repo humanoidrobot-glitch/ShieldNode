@@ -7,6 +7,7 @@ import {SessionSettlement}  from "../../src/SessionSettlement.sol";
 import {SlashingOracle}     from "../../src/SlashingOracle.sol";
 import {ISlashingOracle}    from "../../src/interfaces/ISlashingOracle.sol";
 import {Treasury}           from "../../src/Treasury.sol";
+import {TestKeys}           from "../helpers/TestKeys.sol";
 
 /// @title SlashingOracle Handler
 /// @notice Drives random propose/execute sequences for invariant testing.
@@ -94,7 +95,8 @@ contract SlashingOracleInvariantTest is Test {
 
     function setUp() public {
         address deployer = makeAddr("deployer");
-        address nodeOp   = makeAddr("nodeOp");
+        uint256 nodeOpPk = 0xDEAD1;
+        address nodeOp   = vm.addr(nodeOpPk);
         bytes32 pubKey   = keccak256("pk");
         bytes32 nodeId   = keccak256(abi.encode(nodeOp, pubKey));
 
@@ -125,7 +127,7 @@ contract SlashingOracleInvariantTest is Test {
         vm.stopPrank();
 
         vm.prank(nodeOp);
-        registry.register{value: 1 ether}(nodeId, pubKey, "10.0.0.1:51820");
+        registry.register{value: 1 ether}(nodeId, pubKey, "10.0.0.1:51820", TestKeys.operator_key());
 
         targetContract(address(handler));
     }

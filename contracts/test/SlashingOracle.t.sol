@@ -8,6 +8,7 @@ import {SlashingOracle}     from "../src/SlashingOracle.sol";
 import {ISlashingOracle}    from "../src/interfaces/ISlashingOracle.sol";
 import {INodeRegistry}      from "../src/interfaces/INodeRegistry.sol";
 import {Treasury}           from "../src/Treasury.sol";
+import {TestKeys}           from "./helpers/TestKeys.sol";
 
 /// @title SlashingOracleTest
 /// @notice Comprehensive Foundry tests for the SlashingOracle contract,
@@ -28,7 +29,7 @@ contract SlashingOracleTest is Test {
     address internal clientAddr;
 
     // Node operator keypair for signing receipts.
-    uint256 internal nodePk    = 0xB0B;
+    uint256 internal nodePk    = 0xA101;
     address internal nodeAddr;
 
     // Challenger keypair for attestations.
@@ -41,8 +42,8 @@ contract SlashingOracleTest is Test {
     bytes32 constant UNKNOWN_NODE  = keccak256("non-existent-node");
 
     // Extra node operators for session creation.
-    uint256 internal entryPk = 0xE001;
-    uint256 internal relayPk = 0xE002;
+    uint256 internal entryPk = 0xA001;
+    uint256 internal relayPk = 0xA002;
     address internal entryAddr;
     address internal relayAddr;
     bytes32 internal ENTRY_ID;
@@ -101,11 +102,11 @@ contract SlashingOracleTest is Test {
 
         // Register nodes for 3-hop session.
         vm.prank(entryAddr);
-        registry.register{value: 0.1 ether}(ENTRY_ID, keccak256("entry-pub"), "1.1.1.1:51820");
+        registry.register{value: 0.1 ether}(ENTRY_ID, keccak256("entry-pub"), "1.1.1.1:51820", TestKeys.entry_key());
         vm.prank(relayAddr);
-        registry.register{value: 0.1 ether}(RELAY_ID, keccak256("relay-pub"), "2.2.2.2:51820");
+        registry.register{value: 0.1 ether}(RELAY_ID, keccak256("relay-pub"), "2.2.2.2:51820", TestKeys.relay_key());
         vm.prank(nodeAddr);
-        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT);
+        registry.register{value: 1 ether}(NODE_ID, PUB_KEY, ENDPOINT, TestKeys.node_key());
 
         // Set per-node prices (Finding 11: all 3 nodes must have non-zero price).
         vm.prank(entryAddr);
