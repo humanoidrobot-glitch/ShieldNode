@@ -11,6 +11,7 @@ mod receipts;
 pub mod reputation;
 mod settlement;
 mod sphinx;
+mod tun;
 mod tunnel;
 mod wallet;
 mod watchlist;
