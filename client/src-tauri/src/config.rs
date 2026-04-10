@@ -52,7 +52,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: String::new(), // Must be configured — no default RPC provider
+            rpc_url: "https://configure-rpc.shieldnode.invalid".to_string(), // Must be configured by user
             chain_id: 11155111, // Sepolia
             auto_rotate: false,
             circuit_rotation_interval_secs: 600,

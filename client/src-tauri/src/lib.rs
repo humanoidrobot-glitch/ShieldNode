@@ -72,7 +72,7 @@ pub struct AppState {
     pub circuit: Arc<Mutex<Option<CircuitState>>>,
     pub tunnel: Arc<Mutex<TunnelManager>>,
     pub config: Arc<Mutex<config::ClientConfig>>,
-    pub chain_reader: ChainReader,
+    pub chain_reader: Arc<Mutex<ChainReader>>,
     /// Cancel token for the background circuit rotation task.
     pub rotation_cancel: Mutex<Option<CancellationToken>>,
     /// Cancel token for the circuit health monitor task.
@@ -103,7 +103,7 @@ impl Default for AppState {
         let registry: Address = REGISTRY_ADDRESS.parse().expect("invalid registry address");
         let settlement: Address = SETTLEMENT_ADDRESS.parse().expect("invalid settlement address");
         Self {
-            chain_reader: ChainReader::new(cfg.rpc_url.clone(), registry, settlement),
+            chain_reader: Arc::new(Mutex::new(ChainReader::new(cfg.rpc_url.clone(), registry, settlement))),
             connection: Arc::new(Mutex::new(ConnectionState::default())),
             circuit: Arc::new(Mutex::new(None)),
             tunnel: Arc::new(Mutex::new(TunnelManager::new())),
@@ -130,6 +130,11 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Get a clone of the chain reader (cheap: just URL + addresses).
+    fn reader(&self) -> Result<ChainReader, String> {
+        self.chain_reader.lock().map(|r| r.clone()).map_err(|e| format!("lock error: {e}"))
+    }
+
     fn wallet_config(&self) -> Result<WalletConfig, String> {
         let cfg = self.config.lock().map_err(|e| format!("lock error: {e}"))?;
         Ok(WalletConfig {
@@ -164,7 +169,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     // Read config values needed for connect (single lock acquisition).
     let (pinned, kill_switch_enabled, strict_network) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        if cfg.rpc_url.is_empty() {
+        if cfg.rpc_url.is_empty() || cfg.rpc_url.contains(".invalid") {
             return Err("RPC URL not configured — set an Ethereum RPC endpoint in Settings before connecting".to_string());
         }
         (cfg.preferred_nodes.clone(), cfg.kill_switch, cfg.strict_network_size)
@@ -180,7 +185,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             .unwrap_or(settlement::SettlementMode::Auto);
 
         if settlement_mode != settlement::SettlementMode::Plaintext {
-            match state.chain_reader.get_active_nodes_with_pubkeys().await {
+            match state.reader()?.get_active_nodes_with_pubkeys().await {
                 Ok((_nodes, pubkey_map)) => {
                     // Collect pubkeys in deterministic order (sorted by node_id).
                     let mut sorted_ids: Vec<&String> = pubkey_map.keys().collect();
@@ -201,7 +206,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
 
                     // Read registry root from ZKSettlement.
                     match wallet::read_registry_root(
-                        &state.chain_reader.rpc_url_str(),
+                        &state.reader().map(|r| r.rpc_url_str()).unwrap_or_default(),
                         SETTLEMENT_ADDRESS, // TODO: use ZK_SETTLEMENT_ADDRESS when configured
                     ).await {
                         Ok(root) => {
@@ -362,7 +367,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             Arc::clone(&state.connection),
             Arc::clone(&state.circuit),
             Arc::clone(&state.tunnel),
-            state.chain_reader.clone(),
+            state.chain_reader.lock().expect("chain_reader lock").clone(),
         ));
         info!("circuit health monitor started");
     }
@@ -405,7 +410,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
             let connection = Arc::clone(&state.connection);
             let circuit = Arc::clone(&state.circuit);
             let tunnel = Arc::clone(&state.tunnel);
-            let chain_reader = state.chain_reader.clone();
+            let chain_reader = state.chain_reader.lock().expect("chain_reader lock").clone();
 
             tokio::spawn(rotation_loop(
                 cancel,
@@ -776,7 +781,7 @@ async fn get_circuit(state: State<'_, AppState>) -> Result<Option<CircuitInfo>, 
 /// wallet stub if the on-chain read fails.
 #[tauri::command]
 async fn get_gas_price(state: State<'_, AppState>) -> Result<f64, String> {
-    match state.chain_reader.get_gas_price().await {
+    match state.reader()?.get_gas_price().await {
         Ok(gwei) => Ok(gwei),
         Err(e) => {
             warn!(error = %e, "on-chain gas price fetch failed, using wallet fallback");
@@ -824,11 +829,23 @@ async fn update_settings(
 ) -> Result<(), String> {
     // Apply settings and clone for disk persistence, then drop the lock
     // before doing blocking I/O.
-    let snapshot = {
+    let (snapshot, rpc_changed) = {
         let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        let old_rpc = cfg.rpc_url.clone();
         cfg.apply_settings(&settings);
-        cfg.clone()
+        (cfg.clone(), cfg.rpc_url != old_rpc)
     };
+
+    // Rebuild chain reader if RPC URL changed.
+    if rpc_changed {
+        let registry: alloy::primitives::Address = REGISTRY_ADDRESS.parse().expect("invalid registry");
+        let settlement: alloy::primitives::Address = SETTLEMENT_ADDRESS.parse().expect("invalid settlement");
+        let new_reader = ChainReader::new(snapshot.rpc_url.clone(), registry, settlement);
+        if let Ok(mut cr) = state.chain_reader.lock() {
+            *cr = new_reader;
+        }
+        info!(rpc_url = %snapshot.rpc_url, "chain reader rebuilt with new RPC URL");
+    }
 
     // Persist to OS-appropriate config directory.
     let config_dir = app
@@ -1223,8 +1240,11 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
     let completion_rates = match cached {
         Some(rates) => rates,
         None => {
-            let fresh = state
-                .chain_reader
+            let reader = match state.reader() {
+                Ok(r) => r,
+                Err(_) => return mock_nodes(),
+            };
+            let fresh = reader
                 .get_completion_rates()
                 .await
                 .unwrap_or_default();
@@ -1240,7 +1260,11 @@ async fn fetch_nodes(state: &AppState) -> Vec<NodeInfo> {
         rep.evict_stale();
     }
 
-    let mut nodes = match state.chain_reader.get_active_nodes().await {
+    let reader = match state.reader() {
+        Ok(r) => r,
+        Err(_) => return mock_nodes(),
+    };
+    let mut nodes = match reader.get_active_nodes().await {
         Ok(on_chain) if !on_chain.is_empty() => {
             info!(count = on_chain.len(), "fetched on-chain nodes");
             on_chain

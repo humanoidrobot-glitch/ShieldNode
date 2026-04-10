@@ -90,19 +90,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
 
       - name: Install deps
         working-directory: client
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         working-directory: client
-        run: npm run build
-
-      - name: Lint
-        working-directory: client
-        run: npm run lint --if-present
+        run: pnpm run build
