@@ -39,8 +39,9 @@ pub struct ClientConfig {
     pub preferred_nodes: Vec<String>,
 
     /// Hex-encoded private key for signing on-chain transactions.
-    /// In production this would be replaced by WalletConnect / injected wallet.
-    #[serde(default)]
+    /// Stored in OS keychain when available, NOT serialized to JSON.
+    /// Falls back to plaintext JSON if keychain is unavailable.
+    #[serde(default, skip_serializing)]
     pub operator_private_key: Option<String>,
 
     /// Community watchlist subscriptions.
@@ -118,21 +119,34 @@ impl ClientConfig {
     }
 
     /// Load configuration from a JSON file on disk.
-    /// Returns `Default` values if the file does not exist.
+    /// Retrieves the private key from OS keychain if available.
     pub fn load(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::default());
+        let mut cfg = if path.exists() {
+            let data = std::fs::read_to_string(path)
+                .map_err(|e| format!("failed to read config file: {e}"))?;
+            serde_json::from_str(&data)
+                .map_err(|e| format!("failed to parse config file: {e}"))?
+        } else {
+            Self::default()
+        };
+
+        // Try loading private key from OS keychain.
+        if cfg.operator_private_key.is_none() {
+            cfg.operator_private_key = load_key_from_keychain();
         }
 
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read config file: {e}"))?;
-
-        serde_json::from_str(&data)
-            .map_err(|e| format!("failed to parse config file: {e}"))
+        Ok(cfg)
     }
 
     /// Persist the current configuration to a JSON file.
+    /// Stores the private key in OS keychain (not in JSON).
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        // Store private key in keychain before saving config.
+        if let Some(ref key) = self.operator_private_key {
+            save_key_to_keychain(key);
+        }
+
+        // Private key excluded from JSON via #[serde(skip_serializing)].
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize config: {e}"))?;
 
@@ -144,4 +158,27 @@ impl ClientConfig {
         std::fs::write(path, json)
             .map_err(|e| format!("failed to write config file: {e}"))
     }
+}
+
+const KEYCHAIN_SERVICE: &str = "shieldnode";
+const KEYCHAIN_USER: &str = "operator-private-key";
+
+/// Store the private key in the OS keychain. Silently fails if unavailable.
+fn save_key_to_keychain(key: &str) {
+    match keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER) {
+        Ok(entry) => {
+            if let Err(e) = entry.set_password(key) {
+                tracing::warn!(error = %e, "failed to store key in OS keychain (falling back to config)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "OS keychain unavailable");
+        }
+    }
+}
+
+/// Load the private key from the OS keychain. Returns None if unavailable.
+fn load_key_from_keychain() -> Option<String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER).ok()?;
+    entry.get_password().ok()
 }
