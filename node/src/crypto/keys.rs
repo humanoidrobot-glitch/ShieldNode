@@ -2,8 +2,6 @@ use std::path::Path;
 
 use thiserror::Error;
 use x25519_dalek::PublicKey;
-use zeroize::Zeroize;
-
 use super::traits::KeyExchange;
 use super::x25519_kem::{X25519Kem, X25519PublicKey, X25519SecretKey};
 
@@ -97,11 +95,9 @@ impl NodeKeyPair {
     }
 }
 
-impl Drop for NodeKeyPair {
-    fn drop(&mut self) {
-        self.secret.zeroize_secret();
-    }
-}
+// x25519-dalek's StaticSecret already derives ZeroizeOnDrop (via default
+// `zeroize` feature), so the inner secret bytes are automatically zeroed
+// via volatile writes when NodeKeyPair or EphemeralSession is dropped.
 
 // ── ephemeral per-circuit session ──────────────────────────────────────
 
@@ -140,11 +136,6 @@ impl EphemeralSession {
     }
 }
 
-impl Drop for EphemeralSession {
-    fn drop(&mut self) {
-        self.secret.zeroize_secret();
-    }
-}
 
 impl Default for EphemeralSession {
     fn default() -> Self {
