@@ -368,12 +368,16 @@ async fn main() -> Result<()> {
 
     // ── batch reorder (opt-in timing attack mitigation) ────────────────
 
-    if let Some(ref bb) = batch_buffer {
+    let batch_stop = if let Some(ref bb) = batch_buffer {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
         let bb_clone = bb.clone();
-        tokio::spawn(network::batch_reorder::batch_flush_loop(stop, socket_for_batch, bb_clone));
+        tokio::spawn(network::batch_reorder::batch_flush_loop(stop_clone, socket_for_batch, bb_clone));
         info!(window_ms = cfg.batch_window_ms, "batch reorder loop spawned");
-    }
+        Some(stop)
+    } else {
+        None
+    };
 
     // ── libp2p discovery (best-effort) ────────────────────────────────
 
@@ -404,6 +408,9 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
     if let Some((ref stop, _)) = link_padding_state {
         stop.notify_one();
+    }
+    if let Some(ref stop) = batch_stop {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Give tasks a chance to finish gracefully, then abort stragglers.

@@ -62,10 +62,10 @@ pub struct RelayListener {
     domain_separator: Option<B256>,
     /// Optional link padding manager, shared with the padding loop.
     link_padding: Option<Arc<Mutex<LinkPaddingManager>>>,
-    /// Packet normalization: outgoing sequence counter.
-    norm_seq: Mutex<SequenceCounter>,
-    /// Packet normalization: incoming reassembly.
-    denorm: Mutex<Denormalizer>,
+    /// Packet normalization: outgoing sequence counter (uncontended, single recv loop).
+    norm_seq: std::sync::Mutex<SequenceCounter>,
+    /// Packet normalization: incoming reassembly (uncontended, single recv loop).
+    denorm: std::sync::Mutex<Denormalizer>,
     /// Optional batch reorder buffer. When present, forwarded packets are
     /// enqueued here instead of sent directly. The batch_flush_loop sends them.
     batch_buffer: Option<Arc<Mutex<super::batch_reorder::BatchBuffer>>>,
@@ -122,8 +122,8 @@ impl RelayListener {
                 operator_signer,
                 domain_separator,
                 link_padding,
-                norm_seq: Mutex::new(SequenceCounter::new()),
-                denorm: Mutex::new(Denormalizer::new()),
+                norm_seq: std::sync::Mutex::new(SequenceCounter::new()),
+                denorm: std::sync::Mutex::new(Denormalizer::new()),
                 batch_buffer,
             },
             socket_clone,
@@ -152,7 +152,7 @@ impl RelayListener {
             // it's a normalized frame. Otherwise treat as raw (control messages).
             let packet_data: Vec<u8> = if n == NORMALIZED_SIZE {
                 let frame: [u8; NORMALIZED_SIZE] = buf[..n].try_into().unwrap();
-                let mut denorm = self.denorm.lock().await;
+                let mut denorm = self.denorm.lock().expect("denorm lock");
                 match denorm.denormalize(&frame) {
                     Some(reassembled) => reassembled,
                     None => continue, // more fragments needed
@@ -491,7 +491,7 @@ impl RelayListener {
 
         // Normalize to fixed-size frames (all wire packets become NORMALIZED_SIZE).
         let normalized = {
-            let mut seq = self.norm_seq.lock().await;
+            let mut seq = self.norm_seq.lock().expect("norm_seq lock");
             packet_norm::normalize(&frame, &mut seq)
         };
 

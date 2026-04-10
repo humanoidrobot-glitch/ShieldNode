@@ -217,6 +217,12 @@ impl TunnelListener {
         self.peers.retain(|_, p| p.last_active.elapsed() < timeout);
         let evicted = before - self.peers.len();
         if evicted > 0 {
+            // Clear stale last_active_peer if the peer was evicted.
+            if let Some(ref addr) = self.last_active_peer {
+                if !self.peers.contains_key(addr) {
+                    self.last_active_peer = None;
+                }
+            }
             info!(evicted, remaining = self.peers.len(), "evicted stale peers");
         }
     }
