@@ -70,7 +70,7 @@ impl SphinxPacket {
             next_hop = *pub_key;
         }
 
-        let mac = compute_mac(&route[0].1, &next_hop, &current_payload);
+        let mac = compute_mac(&route[0].1, 0, &next_hop, &current_payload);
 
         Ok(Self {
             header: SphinxHeader {
@@ -93,7 +93,7 @@ impl SphinxPacket {
         hop_index: u64,
     ) -> Result<([u8; 32], SphinxPacket), SphinxError> {
         // Verify MAC before decrypting.
-        verify_mac(session_key, &self.header.next_hop, &self.payload, &self.header.mac)?;
+        verify_mac(session_key, hop_index as u8, &self.header.next_hop, &self.payload, &self.header.mac)?;
 
         let decrypted = aead::decrypt(session_key, hop_index, &self.payload)
             .map_err(|e| SphinxError::DecryptionFailed(e.to_string()))?;
@@ -171,10 +171,11 @@ impl SphinxPacket {
     }
 }
 
-/// Compute HMAC-SHA256 over (next_hop || payload) using session_key.
-fn compute_mac(session_key: &[u8; 32], next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+/// Compute HMAC-SHA256 over (hop_index || next_hop || payload) using session_key.
+fn compute_mac(session_key: &[u8; 32], hop_index: u8, next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
     let mut hmac = HmacSha256::new_from_slice(session_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]);
     hmac.update(next_hop);
     hmac.update(payload);
     let result = hmac.finalize().into_bytes();
@@ -183,15 +184,17 @@ fn compute_mac(session_key: &[u8; 32], next_hop: &[u8; 32], payload: &[u8]) -> [
     out
 }
 
-/// Verify HMAC-SHA256 over (next_hop || payload).
+/// Verify HMAC-SHA256 over (hop_index || next_hop || payload).
 fn verify_mac(
     session_key: &[u8; 32],
+    hop_index: u8,
     next_hop: &[u8; 32],
     payload: &[u8],
     expected: &[u8; 32],
 ) -> Result<(), SphinxError> {
     let mut hmac = HmacSha256::new_from_slice(session_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]);
     hmac.update(next_hop);
     hmac.update(payload);
     hmac.verify_slice(expected)
@@ -286,7 +289,7 @@ impl PqSphinxPacket {
                 pq_serialize(
                     &inner.next_hop,
                     &inner.kem_ciphertext,
-                    &pq_compute_mac(&inner.layer_key, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
+                    &pq_compute_mac(&inner.layer_key, (i + 1) as u8, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
                     &current_blob,
                 )
             } else {
@@ -299,7 +302,7 @@ impl PqSphinxPacket {
         }
 
         let hop0 = &session.hops[0];
-        let mac = pq_compute_mac(&hop0.layer_key, &hop0.next_hop, &hop0.kem_ciphertext, &current_blob);
+        let mac = pq_compute_mac(&hop0.layer_key, 0, &hop0.next_hop, &hop0.kem_ciphertext, &current_blob);
 
         Ok(Self {
             next_hop: hop0.next_hop,
@@ -326,7 +329,7 @@ impl PqSphinxPacket {
         let layer_key = pq_derive_layer_key(shared_secret.as_ref());
 
         // Verify MAC before decrypting.
-        pq_verify_mac(&layer_key, &self.next_hop, &self.kem_ciphertext, &self.encrypted_blob, &self.mac)?;
+        pq_verify_mac(&layer_key, hop_index as u8, &self.next_hop, &self.kem_ciphertext, &self.encrypted_blob, &self.mac)?;
 
         let decrypted = aead::decrypt_with_nonce(&layer_key, &pq_nonce(hop_index), &self.encrypted_blob)
             .map_err(|e| SphinxError::DecryptionFailed(e.to_string()))?;
@@ -340,7 +343,7 @@ impl PqSphinxPacket {
         layer_key: &[u8; 32],
         hop_index: usize,
     ) -> Result<([u8; 32], Vec<u8>), SphinxError> {
-        pq_verify_mac(layer_key, &self.next_hop, &self.kem_ciphertext, &self.encrypted_blob, &self.mac)?;
+        pq_verify_mac(layer_key, hop_index as u8, &self.next_hop, &self.kem_ciphertext, &self.encrypted_blob, &self.mac)?;
 
         let decrypted = aead::decrypt_with_nonce(layer_key, &pq_nonce(hop_index), &self.encrypted_blob)
             .map_err(|e| SphinxError::DecryptionFailed(e.to_string()))?;
@@ -438,15 +441,17 @@ fn pq_nonce(hop_index: usize) -> [u8; 12] {
     aead::nonce_from_index(hop_index as u64)
 }
 
-/// Compute HMAC-SHA256 over (next_hop || kem_ciphertext || encrypted_blob).
+/// Compute HMAC-SHA256 over (hop_index || next_hop || kem_ciphertext || encrypted_blob).
 fn pq_compute_mac(
     layer_key: &[u8; 32],
+    hop_index: u8,
     next_hop: &[u8; 32],
     kem_ciphertext: &[u8],
     encrypted_blob: &[u8],
 ) -> [u8; 32] {
     let mut hmac = HmacSha256::new_from_slice(layer_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]);
     hmac.update(next_hop);
     hmac.update(kem_ciphertext);
     hmac.update(encrypted_blob);
@@ -456,9 +461,10 @@ fn pq_compute_mac(
     out
 }
 
-/// Verify HMAC-SHA256 over (next_hop || kem_ciphertext || encrypted_blob).
+/// Verify HMAC-SHA256 over (hop_index || next_hop || kem_ciphertext || encrypted_blob).
 fn pq_verify_mac(
     layer_key: &[u8; 32],
+    hop_index: u8,
     next_hop: &[u8; 32],
     kem_ciphertext: &[u8],
     encrypted_blob: &[u8],
@@ -466,6 +472,7 @@ fn pq_verify_mac(
 ) -> Result<(), SphinxError> {
     let mut hmac = HmacSha256::new_from_slice(layer_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]);
     hmac.update(next_hop);
     hmac.update(kem_ciphertext);
     hmac.update(encrypted_blob);

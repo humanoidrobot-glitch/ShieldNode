@@ -37,7 +37,7 @@ impl SphinxPacket {
             next_hop = *pub_key;
         }
 
-        let mac = compute_mac(&route[0].1, &next_hop, &current_payload);
+        let mac = compute_mac(&route[0].1, 0, &next_hop, &current_payload);
 
         Ok(Self {
             next_hop: route[0].0,
@@ -58,9 +58,10 @@ impl SphinxPacket {
     }
 }
 
-fn compute_mac(session_key: &[u8; 32], next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+fn compute_mac(session_key: &[u8; 32], hop_index: u8, next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
     let mut hmac = HmacSha256::new_from_slice(session_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]); // bind MAC to hop position (prevents replay across hops)
     hmac.update(next_hop);
     hmac.update(payload);
     let result = hmac.finalize().into_bytes();
@@ -127,7 +128,7 @@ impl PqSphinxPacket {
                 pq_serialize(
                     &inner.next_hop,
                     &inner.kem_ciphertext,
-                    &pq_compute_mac(&inner.layer_key, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
+                    &pq_compute_mac(&inner.layer_key, (i + 1) as u8, &inner.next_hop, &inner.kem_ciphertext, &current_blob),
                     &current_blob,
                 )
             } else {
@@ -139,7 +140,7 @@ impl PqSphinxPacket {
         }
 
         let hop0 = &session.hops[0];
-        let mac = pq_compute_mac(&hop0.layer_key, &hop0.next_hop, &hop0.kem_ciphertext, &current_blob);
+        let mac = pq_compute_mac(&hop0.layer_key, 0, &hop0.next_hop, &hop0.kem_ciphertext, &current_blob);
 
         Ok(Self {
             next_hop: hop0.next_hop,
@@ -176,12 +177,14 @@ fn pq_nonce(hop_index: usize) -> [u8; 12] {
 
 fn pq_compute_mac(
     layer_key: &[u8; 32],
+    hop_index: u8,
     next_hop: &[u8; 32],
     kem_ciphertext: &[u8],
     encrypted_blob: &[u8],
 ) -> [u8; 32] {
     let mut hmac = HmacSha256::new_from_slice(layer_key)
         .expect("HMAC accepts any key length");
+    hmac.update(&[hop_index]);
     hmac.update(next_hop);
     hmac.update(kem_ciphertext);
     hmac.update(encrypted_blob);
