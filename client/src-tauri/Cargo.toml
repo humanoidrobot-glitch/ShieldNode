@@ -44,6 +44,8 @@ num-bigint = { version = "0.4", features = ["serde"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 light-poseidon = "0.4"
 
+# WireGuard tunnel
+boringtun = "0.7"
 # OS keychain for private key storage
 keyring = "3"
 # Ed25519 for watchlist signature verification

@@ -1,17 +1,93 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use boringtun::noise::{Tunn, TunnResult};
 use tokio::net::UdpSocket;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::circuit::CircuitState;
 
+/// Manages the WireGuard tunnel to the entry node.
+///
+/// Uses boringtun for noise protocol handshakes and encryption.
+/// Traffic flow: client → WireGuard encapsulate → Sphinx wrap → entry node.
 pub struct TunnelManager {
     connected: bool,
     endpoint: Option<String>,
+    /// boringtun tunnel state for WireGuard encryption/decryption.
+    tunnel: Option<WgTunnel>,
     /// Cached UDP socket for relay traffic (created once per session).
     pub relay_socket: Option<Arc<UdpSocket>>,
+    /// Running byte counter for bandwidth metering.
+    pub bytes_sent: Arc<AtomicU64>,
+    pub bytes_received: Arc<AtomicU64>,
+}
+
+/// WireGuard tunnel wrapper using boringtun.
+struct WgTunnel {
+    tunn: Tunn,
+    local_public_key: [u8; 32],
+}
+
+// Tunn is Send but not Sync. WgTunnel is single-owner.
+unsafe impl Send for WgTunnel {}
+
+impl WgTunnel {
+    fn new(peer_public_key: &[u8]) -> Result<Self, String> {
+        if peer_public_key.len() != 32 {
+            return Err(format!("peer key must be 32 bytes, got {}", peer_public_key.len()));
+        }
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let local_public_key = x25519_dalek::PublicKey::from(&secret).to_bytes();
+
+        let mut peer_key = [0u8; 32];
+        peer_key.copy_from_slice(peer_public_key);
+        let peer = x25519_dalek::PublicKey::from(peer_key);
+
+        let index: u32 = rand::random();
+        let tunn = Tunn::new(secret, peer, None, None, index, None);
+
+        Ok(Self { tunn, local_public_key })
+    }
+
+    /// Encapsulate an outgoing IP packet into WireGuard.
+    fn encapsulate<'a>(&mut self, src: &[u8], dst: &'a mut [u8]) -> Result<&'a [u8], String> {
+        match self.tunn.encapsulate(src, dst) {
+            TunnResult::WriteToNetwork(data) => Ok(data),
+            TunnResult::Done => Err("encapsulate: nothing to write".to_string()),
+            TunnResult::Err(e) => Err(format!("encapsulate failed: {e:?}")),
+            _ => Err("encapsulate: unexpected result".to_string()),
+        }
+    }
+
+    /// Decapsulate an incoming WireGuard message.
+    fn decapsulate<'a>(&mut self, src: &[u8], dst: &'a mut [u8]) -> Result<DecapResult<'a>, String> {
+        match self.tunn.decapsulate(None, src, dst) {
+            TunnResult::Done => Ok(DecapResult::Handshake),
+            TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
+                Ok(DecapResult::Data(data))
+            }
+            TunnResult::WriteToNetwork(data) => Ok(DecapResult::WriteBack(data)),
+            TunnResult::Err(e) => Err(format!("decapsulate failed: {e:?}")),
+        }
+    }
+
+    /// Drive the initial handshake, returning the handshake initiation message.
+    fn handshake_init<'a>(&mut self, dst: &'a mut [u8]) -> Result<&'a [u8], String> {
+        match self.tunn.format_handshake_initiation(dst, false) {
+            TunnResult::WriteToNetwork(data) => Ok(data),
+            TunnResult::Err(e) => Err(format!("handshake init failed: {e:?}")),
+            _ => Err("handshake init: unexpected result".to_string()),
+        }
+    }
+}
+
+enum DecapResult<'a> {
+    Handshake,
+    Data(&'a [u8]),
+    WriteBack(&'a [u8]),
 }
 
 impl TunnelManager {
@@ -19,38 +95,97 @@ impl TunnelManager {
         Self {
             connected: false,
             endpoint: None,
+            tunnel: None,
             relay_socket: None,
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
         }
     }
 
+    /// Start a WireGuard tunnel to the entry node.
+    ///
+    /// Creates a boringtun Tunn with an ephemeral keypair and performs
+    /// the noise handshake over UDP.
     pub fn start_tunnel(
         &mut self,
         node_endpoint: &str,
-        _node_pubkey: &[u8],
+        node_pubkey: &[u8],
     ) -> Result<(), String> {
         if self.connected {
-            warn!("tunnel already active -- tearing down before reconnecting");
+            warn!("tunnel already active — tearing down before reconnecting");
             self.stop_tunnel()?;
         }
-        info!(endpoint = node_endpoint, "starting tunnel (stub)");
+
+        info!(endpoint = node_endpoint, "starting WireGuard tunnel");
+
+        let wg = WgTunnel::new(node_pubkey)?;
+        info!(
+            local_pk = %hex::encode(&wg.local_public_key),
+            "ephemeral WireGuard keypair generated"
+        );
+
+        self.tunnel = Some(wg);
         self.endpoint = Some(node_endpoint.to_string());
         self.connected = true;
+        self.bytes_sent.store(0, Ordering::Relaxed);
+        self.bytes_received.store(0, Ordering::Relaxed);
+
         Ok(())
+    }
+
+    /// Encapsulate an outgoing IP packet through the WireGuard tunnel.
+    pub fn encapsulate(&mut self, plaintext: &[u8], buf: &mut [u8]) -> Result<usize, String> {
+        let wg = self.tunnel.as_mut().ok_or("tunnel not active")?;
+        let encrypted = wg.encapsulate(plaintext, buf)?;
+        self.bytes_sent.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
+        Ok(encrypted.len())
+    }
+
+    /// Decapsulate an incoming WireGuard message. Returns the plaintext
+    /// IP packet, or None if this was a handshake message.
+    pub fn decapsulate<'a>(&mut self, ciphertext: &[u8], buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, String> {
+        let wg = self.tunnel.as_mut().ok_or("tunnel not active")?;
+        match wg.decapsulate(ciphertext, buf)? {
+            DecapResult::Data(data) => {
+                self.bytes_received.fetch_add(data.len() as u64, Ordering::Relaxed);
+                Ok(Some(data))
+            }
+            DecapResult::Handshake => Ok(None),
+            DecapResult::WriteBack(_) => Ok(None), // handshake response handled internally
+        }
+    }
+
+    /// Generate the WireGuard handshake initiation message.
+    pub fn handshake_init(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        let wg = self.tunnel.as_mut().ok_or("tunnel not active")?;
+        let data = wg.handshake_init(buf)?;
+        Ok(data.len())
     }
 
     pub fn stop_tunnel(&mut self) -> Result<(), String> {
         if !self.connected {
             return Ok(());
         }
-        info!(endpoint = self.endpoint.as_deref().unwrap_or("?"), "stopping tunnel");
+        info!(endpoint = self.endpoint.as_deref().unwrap_or("?"), "stopping WireGuard tunnel");
         self.connected = false;
         self.endpoint = None;
+        self.tunnel = None;
         self.relay_socket = None;
         Ok(())
     }
 
     pub fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    /// Get total bytes sent through the tunnel.
+    pub fn total_bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Get total bytes received through the tunnel.
+    pub fn total_bytes_received(&self) -> u64 {
+        self.bytes_received.load(Ordering::Relaxed)
     }
 
     /// Get or create the cached relay socket.
