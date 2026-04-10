@@ -23,9 +23,8 @@ const EVICTION_INTERVAL_SECS: u64 = 60;
 /// UDP listener that accepts WireGuard handshakes and tunnels traffic.
 ///
 /// In exit mode, decapsulated packets are written to a TUN device which
-/// injects them into the OS network stack. The return path (TUN ->
-/// WireGuard encapsulation) is deferred to Phase 2 when multi-peer
-/// routing and tunnel state sharing are implemented.
+/// injects them into the OS network stack. Response packets read from the
+/// TUN are encapsulated and sent back to the most recently active peer.
 pub struct TunnelListener {
     socket: UdpSocket,
     private_key: [u8; 32],
@@ -34,6 +33,8 @@ pub struct TunnelListener {
     bandwidth: Arc<Mutex<BandwidthTracker>>,
     exit_mode: bool,
     tun: Option<Arc<TunDevice>>,
+    /// Last active peer for TUN return path routing.
+    last_active_peer: Option<SocketAddr>,
 }
 
 impl TunnelListener {
@@ -61,12 +62,14 @@ impl TunnelListener {
             bandwidth,
             exit_mode,
             tun,
+            last_active_peer: None,
         })
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut recv_buf = vec![0u8; 65536];
         let mut send_buf = vec![0u8; 65536];
+        let mut tun_buf = vec![0u8; 65536];
         let mut last_eviction = Instant::now();
 
         info!(
@@ -76,49 +79,91 @@ impl TunnelListener {
         );
 
         loop {
-            let (n, peer_addr) = self.socket.recv_from(&mut recv_buf).await?;
-            let packet = &recv_buf[..n];
+            // Use select! to read from both UDP and TUN concurrently.
+            tokio::select! {
+                // ── Incoming from client (UDP) ──────────────────────────
+                result = self.socket.recv_from(&mut recv_buf) => {
+                    let (n, peer_addr) = result?;
+                    let packet = &recv_buf[..n];
 
-            debug!(peer = %peer_addr, bytes = n, "received UDP packet");
+                    debug!(peer = %peer_addr, bytes = n, "received UDP packet");
 
-            if last_eviction.elapsed().as_secs() >= EVICTION_INTERVAL_SECS {
-                self.evict_stale_peers();
-                last_eviction = Instant::now();
-            }
-
-            let session_id = self.get_or_create_peer(peer_addr);
-
-            let peer = self.peers.get_mut(&peer_addr).unwrap();
-            peer.last_active = Instant::now();
-
-            match peer.tunnel.handle_incoming(packet, &mut send_buf) {
-                Ok(0) => {
-                    self.drive_handshake(peer_addr, &mut send_buf).await;
-                }
-                Ok(payload_len) => {
-                    let inner = &send_buf[..payload_len];
-                    debug!(peer = %peer_addr, inner_len = payload_len, "decapsulated inner packet");
-
-                    {
-                        let mut bw = self.bandwidth.lock().await;
-                        bw.record_bytes(session_id, n as u64, payload_len as u64);
+                    if last_eviction.elapsed().as_secs() >= EVICTION_INTERVAL_SECS {
+                        self.evict_stale_peers();
+                        last_eviction = Instant::now();
                     }
 
-                    if self.exit_mode {
-                        if let Some(tun) = &self.tun {
-                            if let Err(e) = tun.write_packet(inner).await {
-                                warn!(error = %e, "failed to write to TUN");
-                            }
-                        } else {
-                            debug!("exit mode but no TUN device — packet dropped");
+                    let session_id = self.get_or_create_peer(peer_addr);
+                    self.last_active_peer = Some(peer_addr);
+
+                    let peer = self.peers.get_mut(&peer_addr).unwrap();
+                    peer.last_active = Instant::now();
+
+                    match peer.tunnel.handle_incoming(packet, &mut send_buf) {
+                        Ok(0) => {
+                            self.drive_handshake(peer_addr, &mut send_buf).await;
                         }
-                    } else {
-                        debug!("relay mode: would forward to next hop");
+                        Ok(payload_len) => {
+                            let inner = &send_buf[..payload_len];
+                            debug!(peer = %peer_addr, inner_len = payload_len, "decapsulated inner packet");
+
+                            {
+                                let mut bw = self.bandwidth.lock().await;
+                                bw.record_bytes(session_id, n as u64, payload_len as u64);
+                            }
+
+                            if self.exit_mode {
+                                if let Some(tun) = &self.tun {
+                                    if let Err(e) = tun.write_packet(inner).await {
+                                        warn!(error = %e, "failed to write to TUN");
+                                    }
+                                }
+                            } else {
+                                debug!("relay mode: would forward to next hop");
+                            }
+                        }
+                        Err(e) => {
+                            debug!(peer = %peer_addr, error = %e, "decapsulation error");
+                            self.drive_handshake(peer_addr, &mut send_buf).await;
+                        }
                     }
                 }
-                Err(e) => {
-                    debug!(peer = %peer_addr, error = %e, "decapsulation error (expected during handshake)");
-                    self.drive_handshake(peer_addr, &mut send_buf).await;
+
+                // ── Response from TUN (return path) ─────────────────────
+                result = async {
+                    if let Some(ref tun) = self.tun {
+                        tun.read_packet(&mut tun_buf).await
+                    } else {
+                        // No TUN device — sleep forever (never selected).
+                        std::future::pending::<Result<usize, super::tun_device::TunError>>().await
+                    }
+                } => {
+                    match result {
+                        Ok(n) if n > 0 => {
+                            if let Some(peer_addr) = self.last_active_peer {
+                                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                                    // Encapsulate the TUN response in WireGuard.
+                                    match peer.tunnel.handle_outgoing(&tun_buf[..n], &mut send_buf) {
+                                        Ok(encrypted) if !encrypted.is_empty() => {
+                                            if let Err(e) = self.socket.send_to(encrypted, peer_addr).await {
+                                                warn!(error = %e, "failed to send TUN response to peer");
+                                            } else {
+                                                debug!(peer = %peer_addr, tun_bytes = n, enc_bytes = encrypted.len(), "sent TUN response");
+                                            }
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            debug!(error = %e, "WireGuard encapsulation failed for TUN response");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "TUN read error");
+                        }
+                    }
                 }
             }
         }
