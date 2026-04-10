@@ -92,6 +92,29 @@ Ensure these are open in your firewall and forwarded if behind NAT:
 
 **Note:** Port 9090 is bound to localhost by default. To expose it to a monitoring network, change `127.0.0.1:9090:9090/tcp` in `docker-compose.yml`.
 
+### NAT / Port Forwarding
+
+ShieldNode relay nodes **must** be reachable from the internet on UDP ports 51820 and 51821. If your node is behind a NAT (home router, cloud VPC), you must configure port forwarding:
+
+**Home router:**
+1. Log into your router admin panel (typically 192.168.1.1)
+2. Find "Port Forwarding" or "Virtual Server" section
+3. Forward UDP 51820 and UDP 51821 to your node's local IP
+4. Ensure your ISP does not use Carrier-Grade NAT (CGNAT) — if they do, contact them for a public IP or use a VPS
+
+**Cloud providers (AWS, GCP, etc.):**
+- Add inbound UDP rules for ports 51820 and 51821 to your security group / firewall
+- Cloud instances typically have direct public IPs — no additional NAT config needed
+
+**Verification:**
+```bash
+# From another machine, check if your node is reachable:
+nc -zuv YOUR_PUBLIC_IP 51820
+nc -zuv YOUR_PUBLIC_IP 51821
+```
+
+**UPnP / STUN:** Automatic NAT traversal (UPnP, STUN hole-punching) is on the roadmap but not yet implemented. For now, manual port forwarding is required.
+
 ## Economics
 
 Revenue depends on traffic routed through your node:
