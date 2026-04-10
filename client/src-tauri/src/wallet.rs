@@ -158,10 +158,9 @@ pub async fn zk_deposit(wallet: &WalletConfig, amount: u128) -> Result<[u8; 32],
         .map_err(|e| format!("failed to get deposit receipt: {e}"))?;
 
     // Parse depositId from the DepositMade event (first indexed topic).
-    use alloy::primitives::keccak256;
-    let deposit_made_sig = keccak256("DepositMade(bytes32,address,uint256)");
+    use alloy::sol_types::SolEvent;
     let deposit_id: [u8; 32] = receipt.inner.logs().iter()
-        .find(|log| log.topics().first() == Some(&deposit_made_sig))
+        .find(|log| log.topics().first() == Some(&IZKSettlement::DepositMade::SIGNATURE_HASH))
         .and_then(|log| log.topics().get(1))
         .map(|topic| topic.0)
         .ok_or("no DepositMade event found in deposit receipt")?;
