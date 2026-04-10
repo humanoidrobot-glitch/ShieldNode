@@ -491,13 +491,19 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         "client EIP-712 signature produced, requesting node co-signature"
     );
 
-    // 4. Send to exit node for co-signing.
+    // 4. Send to exit node for co-signing (with signature verification).
+    let exit_operator = {
+        let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+        circ.as_ref().map(|c| c.exit.operator_address.clone()).unwrap_or_default()
+    };
     let node_sig = tunnel::request_receipt_cosign(
         &exit_endpoint,
         session_id,
         bytes_used,
         timestamp,
         &client_sig,
+        &digest.0,
+        &exit_operator,
     )
     .await?;
 

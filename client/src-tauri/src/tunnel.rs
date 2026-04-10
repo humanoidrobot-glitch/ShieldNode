@@ -187,12 +187,19 @@ pub async fn teardown_sessions(circuit: &CircuitState) {
 /// ```
 ///
 /// Expected response: 65 bytes (node signature) on success, or 1 byte (error code) on failure.
+/// Request the exit node's EIP-712 co-signature on a bandwidth receipt.
+///
+/// After receiving the 65-byte signature, verifies it by recovering the
+/// secp256k1 public key and checking that the derived address matches the
+/// expected exit node operator.
 pub async fn request_receipt_cosign(
     exit_endpoint: &str,
     session_id: u64,
     cumulative_bytes: u64,
     timestamp: u64,
     client_signature: &[u8], // 65 bytes
+    digest: &[u8; 32],              // EIP-712 receipt digest
+    expected_operator: &str,         // hex address of exit node operator
 ) -> Result<Vec<u8>, String> {
     if client_signature.len() != 65 {
         return Err(format!(
@@ -236,11 +243,25 @@ pub async fn request_receipt_cosign(
     match tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut resp_buf)).await {
         Ok(Ok((n, from))) => {
             if n == 65 {
+                let node_sig = resp_buf[..65].to_vec();
+
+                // Verify the co-signature: recover pubkey → derive address → match.
+                let recovered_addr = crate::zk_witness::recover_address(&node_sig, digest)?;
+                let expected = expected_operator.strip_prefix("0x")
+                    .unwrap_or(expected_operator)
+                    .to_lowercase();
+                if recovered_addr.to_lowercase() != expected {
+                    return Err(format!(
+                        "node co-signature address mismatch: recovered {recovered_addr}, expected {expected}"
+                    ));
+                }
+
                 info!(
                     from = %from,
-                    "received 65-byte node co-signature"
+                    recovered_addr,
+                    "verified 65-byte node co-signature"
                 );
-                Ok(resp_buf[..65].to_vec())
+                Ok(node_sig)
             } else if n == 1 {
                 Err(format!(
                     "exit node rejected receipt co-sign with error code: 0x{:02x}",

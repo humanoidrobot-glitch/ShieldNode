@@ -52,6 +52,30 @@ pub fn recover_pubkey(sig: &[u8], digest: &[u8; 32]) -> Result<Vec<Vec<String>>,
     ])
 }
 
+/// Recover the Ethereum address from a 65-byte ECDSA signature + digest.
+/// Returns the address as a lowercase hex string (no 0x prefix).
+pub fn recover_address(sig: &[u8], digest: &[u8; 32]) -> Result<String, String> {
+    if sig.len() != 65 {
+        return Err(format!("expected 65-byte signature, got {}", sig.len()));
+    }
+
+    let r_s = Signature::from_slice(&sig[0..64])
+        .map_err(|e| format!("invalid signature: {e}"))?;
+
+    let v = sig[64];
+    let rec_id = RecoveryId::new(v.wrapping_sub(27) & 1 != 0, false);
+
+    let key = VerifyingKey::recover_from_prehash(digest, &r_s, rec_id)
+        .map_err(|e| format!("pubkey recovery failed: {e}"))?;
+
+    // Ethereum address = last 20 bytes of keccak256(uncompressed_pubkey_without_prefix).
+    let uncompressed = key.to_encoded_point(false);
+    let pubkey_bytes = &uncompressed.as_bytes()[1..]; // skip 0x04 prefix
+    let hash = alloy::primitives::keccak256(pubkey_bytes);
+    let addr = &hash[12..]; // last 20 bytes
+    Ok(hex::encode(addr))
+}
+
 // ── Poseidon hashing ─────────────────────────────────────────────────────
 
 /// Poseidon(2) hash matching circomlib over the BN254 scalar field.
