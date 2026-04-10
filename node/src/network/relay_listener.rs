@@ -66,6 +66,9 @@ pub struct RelayListener {
     norm_seq: Mutex<SequenceCounter>,
     /// Packet normalization: incoming reassembly.
     denorm: Mutex<Denormalizer>,
+    /// Optional batch reorder buffer. When present, forwarded packets are
+    /// enqueued here instead of sent directly. The batch_flush_loop sends them.
+    batch_buffer: Option<Arc<Mutex<super::batch_reorder::BatchBuffer>>>,
 }
 
 impl RelayListener {
@@ -84,6 +87,7 @@ impl RelayListener {
         chain_id: Option<u64>,
         settlement_address: Option<Address>,
         link_padding: Option<Arc<Mutex<LinkPaddingManager>>>,
+        batch_buffer: Option<Arc<Mutex<super::batch_reorder::BatchBuffer>>>,
     ) -> Result<(Self, Arc<UdpSocket>)> {
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
         let socket = Arc::new(
@@ -120,6 +124,7 @@ impl RelayListener {
                 link_padding,
                 norm_seq: Mutex::new(SequenceCounter::new()),
                 denorm: Mutex::new(Denormalizer::new()),
+                batch_buffer,
             },
             socket_clone,
         ))
@@ -490,11 +495,20 @@ impl RelayListener {
             packet_norm::normalize(&frame, &mut seq)
         };
 
-        for nf in &normalized {
-            self.socket
-                .send_to(&nf.data, dest)
-                .await
-                .with_context(|| format!("sending normalized frame to {dest}"))?;
+        if let Some(ref bb) = self.batch_buffer {
+            // Enqueue into batch buffer — batch_flush_loop sends after shuffling.
+            let mut buf = bb.lock().await;
+            for nf in &normalized {
+                buf.enqueue(nf.data.to_vec(), dest);
+            }
+        } else {
+            // Send directly (no batch reordering).
+            for nf in &normalized {
+                self.socket
+                    .send_to(&nf.data, dest)
+                    .await
+                    .with_context(|| format!("sending normalized frame to {dest}"))?;
+            }
         }
 
         debug!(
@@ -502,7 +516,8 @@ impl RelayListener {
             dest = %dest,
             raw_len = frame.len(),
             frames = normalized.len(),
-            "forwarded normalized relay packet to next hop"
+            batched = self.batch_buffer.is_some(),
+            "forwarded relay packet to next hop"
         );
 
         Ok(())

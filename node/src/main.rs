@@ -289,6 +289,14 @@ async fn main() -> Result<()> {
 
     let relay_service = Arc::new(tokio::sync::RwLock::new(RelayService::new(bandwidth.clone())));
 
+    let batch_buffer = if cfg.batch_reorder_enabled {
+        Some(Arc::new(tokio::sync::Mutex::new(
+            network::batch_reorder::BatchBuffer::new(cfg.batch_window_ms),
+        )))
+    } else {
+        None
+    };
+
     let link_padding_mgr = if cfg.link_padding_enabled {
         Some(Arc::new(tokio::sync::Mutex::new(
             LinkPaddingManager::new(cfg.link_padding_pps),
@@ -336,6 +344,7 @@ async fn main() -> Result<()> {
         Some(cfg.chain_id),
         settlement_address,
         link_padding_mgr.clone(),
+        batch_buffer.clone(),
     )
     .await
     .context("failed to bind relay listener")?;
@@ -346,6 +355,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Clone relay socket for each background task that needs it.
+    let socket_for_batch = relay_socket.clone();
+
     let link_padding_state = if let Some(mgr) = link_padding_mgr {
         let stop = Arc::new(tokio::sync::Notify::new());
         let handle = tokio::spawn(link_padding_loop(stop.clone(), relay_socket, mgr));
@@ -353,6 +365,15 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // ── batch reorder (opt-in timing attack mitigation) ────────────────
+
+    if let Some(ref bb) = batch_buffer {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bb_clone = bb.clone();
+        tokio::spawn(network::batch_reorder::batch_flush_loop(stop, socket_for_batch, bb_clone));
+        info!(window_ms = cfg.batch_window_ms, "batch reorder loop spawned");
+    }
 
     // ── libp2p discovery (best-effort) ────────────────────────────────
 
