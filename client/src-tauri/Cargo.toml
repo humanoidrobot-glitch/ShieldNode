@@ -44,5 +44,7 @@ num-bigint = { version = "0.4", features = ["serde"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 light-poseidon = "0.4"
 
-# OS keychain for private key storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
+# OS keychain for private key storage
 keyring = "3"
+# Ed25519 for watchlist signature verification
+ed25519-dalek = { version = "2", features = ["rand_core"] }

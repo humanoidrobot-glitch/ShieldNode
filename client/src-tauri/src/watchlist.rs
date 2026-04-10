@@ -116,9 +116,31 @@ impl WatchlistManager {
             .unwrap_or(true)
     }
 
-    /// Store fetched watchlist results. Call after `fetch_all_watchlists`.
+    /// Store fetched watchlist results. Rejects lists with invalid signatures.
+    /// Unsigned lists are accepted with a warning.
     pub fn apply_fetched(&mut self, lists: Vec<(String, Watchlist)>) {
-        self.lists = lists;
+        self.lists = lists
+            .into_iter()
+            .filter(|(url, wl)| {
+                if let Some(ref sig_hex) = wl.signature {
+                    match verify_watchlist_signature(wl, sig_hex) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            warn!(url = %url, "watchlist signature verification failed — rejecting");
+                            false
+                        }
+                        Err(e) => {
+                            warn!(url = %url, error = %e, "watchlist signature check error — rejecting");
+                            false
+                        }
+                    }
+                } else {
+                    // Unsigned lists accepted with warning.
+                    warn!(url = %url, name = %wl.name, "accepting unsigned watchlist");
+                    true
+                }
+            })
+            .collect();
         self.last_refresh = Some(std::time::Instant::now());
     }
 
@@ -229,6 +251,55 @@ async fn fetch_watchlist(url: &str) -> Result<Watchlist, String> {
     }
 
     Ok(wl)
+}
+
+// ── Signature verification ───────────────────────────────────────────
+
+/// Build a canonical message for signature verification.
+/// The signed content is: name + maintainer + updated_at + sorted entry IDs.
+fn canonical_watchlist_message(wl: &Watchlist) -> String {
+    let mut entry_ids: Vec<&str> = wl.entries.iter().map(|e| e.node_id.as_str()).collect();
+    entry_ids.sort();
+    format!(
+        "{}:{}:{}:{}",
+        wl.name,
+        wl.maintainer,
+        wl.updated_at,
+        entry_ids.join(",")
+    )
+}
+
+/// Verify a watchlist Ed25519 signature.
+///
+/// The `sig_hex` format is `"<pubkey_hex>:<signature_hex>"` where:
+/// - pubkey_hex: 64-char hex-encoded Ed25519 public key (32 bytes)
+/// - signature_hex: 128-char hex-encoded Ed25519 signature (64 bytes)
+fn verify_watchlist_signature(wl: &Watchlist, sig_hex: &str) -> Result<bool, String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let parts: Vec<&str> = sig_hex.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err("invalid signature format: expected 'pubkey:signature'".to_string());
+    }
+
+    let pk_bytes = hex::decode(parts[0])
+        .map_err(|e| format!("invalid pubkey hex: {e}"))?;
+    let sig_bytes = hex::decode(parts[1])
+        .map_err(|e| format!("invalid signature hex: {e}"))?;
+
+    if pk_bytes.len() != 32 {
+        return Err(format!("pubkey must be 32 bytes, got {}", pk_bytes.len()));
+    }
+    if sig_bytes.len() != 64 {
+        return Err(format!("signature must be 64 bytes, got {}", sig_bytes.len()));
+    }
+
+    let pk = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap())
+        .map_err(|e| format!("invalid Ed25519 pubkey: {e}"))?;
+    let sig = Signature::from_bytes(&sig_bytes.try_into().unwrap());
+
+    let message = canonical_watchlist_message(wl);
+    Ok(pk.verify(message.as_bytes(), &sig).is_ok())
 }
 
 #[cfg(test)]
@@ -347,5 +418,42 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
 
         std::fs::remove_file(&dir).ok();
+    }
+
+    #[test]
+    fn verify_signed_watchlist() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use rand::rngs::OsRng;
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+
+        let wl = Watchlist {
+            name: "Test".to_string(),
+            maintainer: "tester".to_string(),
+            updated_at: 1000,
+            entries: vec![WatchlistEntry {
+                node_id: "0xabc".to_string(),
+                reason: "test".to_string(),
+                category: "collusion".to_string(),
+            }],
+            signature: None, // will be set below
+        };
+
+        // Build canonical message and sign it.
+        let msg = canonical_watchlist_message(&wl);
+        let sig = signing_key.sign(msg.as_bytes());
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        // Verify the maintainer pubkey field.
+        let pubkey_hex = hex::encode(verifying_key.to_bytes());
+        let mut signed_wl = wl.clone();
+        signed_wl.signature = Some(format!("{}:{}", pubkey_hex, sig_hex));
+
+        assert!(verify_watchlist_signature(&signed_wl, signed_wl.signature.as_ref().unwrap()).unwrap());
+
+        // Tamper with the list and verify it fails.
+        signed_wl.name = "Tampered".to_string();
+        assert!(!verify_watchlist_signature(&signed_wl, signed_wl.signature.as_ref().unwrap()).unwrap());
     }
 }
