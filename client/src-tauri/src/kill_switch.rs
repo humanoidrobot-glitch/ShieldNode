@@ -11,10 +11,31 @@
 //! - macOS: pf (packet filter)
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::Command;
 use tracing::{info, warn};
 
 const RULE_NAME: &str = "ShieldNode-KillSwitch";
+
+/// Path to the sentinel file that indicates the kill switch was active
+/// when the process last ran. Used to detect orphaned firewall rules
+/// after a crash.
+fn sentinel_path() -> PathBuf {
+    std::env::temp_dir().join("shieldnode-killswitch-active")
+}
+
+/// Check for orphaned kill switch rules from a previous crash.
+/// Call this at application startup.
+pub fn cleanup_orphaned_rules() {
+    let sentinel = sentinel_path();
+    if sentinel.exists() {
+        warn!("detected orphaned kill switch rules from a previous crash — cleaning up");
+        if let Err(e) = deactivate() {
+            warn!(error = %e, "failed to clean up orphaned kill switch rules");
+        }
+        let _ = std::fs::remove_file(&sentinel);
+    }
+}
 
 /// Activate the kill switch: block all traffic except to the VPN entry node.
 pub fn activate(entry_endpoint: &str) -> Result<(), String> {
@@ -34,6 +55,13 @@ pub fn activate(entry_endpoint: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     activate_macos(&entry_ip)?;
 
+    // Write sentinel so we can detect orphaned rules after a crash.
+    let sentinel = sentinel_path();
+    if let Some(parent) = sentinel.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&sentinel, "active");
+
     info!("kill switch active — all non-VPN traffic blocked");
     Ok(())
 }
@@ -50,6 +78,9 @@ pub fn deactivate() -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     deactivate_macos()?;
+
+    // Remove sentinel.
+    let _ = std::fs::remove_file(sentinel_path());
 
     info!("kill switch deactivated — normal traffic restored");
     Ok(())
