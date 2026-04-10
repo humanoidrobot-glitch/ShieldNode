@@ -112,6 +112,11 @@ impl ChainReader {
         }
     }
 
+    /// Return the RPC URL as a string reference.
+    pub fn rpc_url_str(&self) -> String {
+        self.rpc_url.to_string()
+    }
+
     /// Build a read-only provider from the cached URL.
     fn provider(&self) -> impl Provider {
         ProviderBuilder::new().connect_http(self.rpc_url.clone())
@@ -121,13 +126,14 @@ impl ChainReader {
     ///
     /// Calls `getActiveNodes(0, 100)` to obtain the list of active node IDs,
     /// then calls `getNode(id)` for each one to retrieve full metadata.
-    pub async fn get_active_nodes(&self) -> Result<Vec<OnChainNodeInfo>, String> {
+    /// Fetch all active node IDs and their full NodeInfo in parallel.
+    /// Shared by `get_active_nodes()` and `get_active_nodes_with_pubkeys()`.
+    async fn fetch_active_node_infos(
+        &self,
+    ) -> Result<Vec<(alloy::primitives::FixedBytes<32>, INodeRegistry::NodeInfo)>, String> {
         let provider = self.provider();
+        let registry = INodeRegistry::new(self.registry_address, &provider);
 
-        let registry =
-            INodeRegistry::new(self.registry_address, &provider);
-
-        // Fetch up to 100 active node IDs.
         let node_ids = registry
             .getActiveNodes(alloy::primitives::U256::from(0), alloy::primitives::U256::from(100))
             .call()
@@ -139,13 +145,6 @@ impl ChainReader {
             return Ok(Vec::new());
         }
 
-        // Current timestamp for uptime calculation.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Fetch all node details in parallel.
         let futures: Vec<_> = node_ids
             .iter()
             .map(|id| {
@@ -163,11 +162,20 @@ impl ChainReader {
             })
             .collect();
 
-        let results = futures::future::join_all(futures).await;
+        Ok(futures::future::join_all(futures).await.into_iter().flatten().collect())
+    }
 
-        let nodes: Vec<OnChainNodeInfo> = results
+    /// Fetch active nodes with metadata for circuit selection.
+    pub async fn get_active_nodes(&self) -> Result<Vec<OnChainNodeInfo>, String> {
+        let infos = self.fetch_active_node_infos().await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let nodes: Vec<OnChainNodeInfo> = infos
             .into_iter()
-            .flatten()
             .map(|(id, info)| {
                 let stake_eth = wei_to_eth(info.stake);
                 let last_hb: u64 = info.lastHeartbeat.try_into().unwrap_or(0);
@@ -191,48 +199,52 @@ impl ChainReader {
         Ok(nodes)
     }
 
-    /// Fetch secp256k1 pubkeys for all active nodes.
-    /// Returns (node_id hex string, 65-byte uncompressed pubkey) pairs.
-    pub async fn get_all_secp256k1_pubkeys(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let provider = self.provider();
-        let registry = INodeRegistry::new(self.registry_address, &provider);
+    /// Fetch active nodes AND their secp256k1 pubkeys in a single RPC round.
+    /// Returns (nodes for circuit selection, pubkey map for Merkle tree).
+    pub async fn get_active_nodes_with_pubkeys(
+        &self,
+    ) -> Result<(Vec<OnChainNodeInfo>, std::collections::HashMap<String, Vec<u8>>), String> {
+        let infos = self.fetch_active_node_infos().await?;
 
-        let node_ids = registry
-            .getActiveNodes(alloy::primitives::U256::from(0), alloy::primitives::U256::from(100))
-            .call()
-            .await
-            .map_err(|e| format!("getActiveNodes failed: {e}"))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
-        let futures: Vec<_> = node_ids
-            .iter()
-            .map(|id| {
-                let reg = &registry;
-                let id = *id;
-                async move {
-                    match reg.getNode(id).call().await {
-                        Ok(info) => {
-                            // Skip nodes without secp256k1 keys.
-                            let zero = alloy::primitives::FixedBytes::<32>::ZERO;
-                            if info.secp256k1X == zero && info.secp256k1Y == zero {
-                                return None;
-                            }
-                            // Build 65-byte uncompressed key: 0x04 || x || y
-                            let mut key = vec![0x04u8];
-                            key.extend_from_slice(info.secp256k1X.as_slice());
-                            key.extend_from_slice(info.secp256k1Y.as_slice());
-                            let id_hex = format!("0x{}", hex::encode(id.as_slice()));
-                            Some((id_hex, key))
-                        }
-                        Err(_) => None,
-                    }
-                }
-            })
-            .collect();
+        let zero = alloy::primitives::FixedBytes::<32>::ZERO;
+        let mut nodes = Vec::with_capacity(infos.len());
+        let mut pubkeys = std::collections::HashMap::new();
 
-        let results = futures::future::join_all(futures).await;
-        let pairs: Vec<_> = results.into_iter().flatten().collect();
-        info!(count = pairs.len(), "fetched secp256k1 pubkeys from registry");
-        Ok(pairs)
+        for (id, info) in infos {
+            let id_hex = format!("0x{}", hex::encode(id.as_slice()));
+
+            // Extract secp256k1 pubkey if present.
+            if info.secp256k1X != zero || info.secp256k1Y != zero {
+                let mut key = vec![0x04u8];
+                key.extend_from_slice(info.secp256k1X.as_slice());
+                key.extend_from_slice(info.secp256k1Y.as_slice());
+                pubkeys.insert(id_hex.clone(), key);
+            }
+
+            let stake_eth = wei_to_eth(info.stake);
+            let last_hb: u64 = info.lastHeartbeat.try_into().unwrap_or(0);
+            let uptime = heartbeat_to_uptime(last_hb, now);
+            let slash_count: u32 = info.slashCount.try_into().unwrap_or(u32::MAX);
+            let price_per_byte: f64 = u128_from_u256(info.pricePerByte) as f64;
+
+            nodes.push(OnChainNodeInfo {
+                node_id: id_hex,
+                public_key: format!("0x{}", hex::encode(info.publicKey.as_slice())),
+                endpoint: info.endpoint,
+                stake: stake_eth,
+                uptime,
+                price_per_byte,
+                slash_count,
+            });
+        }
+
+        info!(nodes = nodes.len(), pubkeys = pubkeys.len(), "fetched nodes + secp256k1 pubkeys");
+        Ok((nodes, pubkeys))
     }
 
     /// Fetch the current gas price from the RPC provider and return it in Gwei.

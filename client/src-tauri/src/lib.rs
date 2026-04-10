@@ -87,6 +87,12 @@ pub struct AppState {
     pub node_list_cache: Arc<Mutex<(Vec<NodeInfo>, std::time::Instant)>>,
     /// Community watchlist manager.
     pub watchlists: Arc<Mutex<watchlist::WatchlistManager>>,
+    /// Poseidon Merkle tree built from registered node secp256k1 pubkeys.
+    pub merkle_tree: Arc<Mutex<Option<zk_merkle::PoseidonMerkleTree>>>,
+    /// Registry root read from ZKSettlement at connect time.
+    pub zk_registry_root: Arc<Mutex<Option<String>>>,
+    /// Node secp256k1 pubkeys (node_id hex → 65-byte uncompressed key).
+    pub node_pubkeys: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
 
 impl Default for AppState {
@@ -114,6 +120,9 @@ impl Default for AppState {
             cover_cancel: Mutex::new(None),
             real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watchlists: Arc::new(Mutex::new(watchlist::WatchlistManager::new())),
+            merkle_tree: Arc::new(Mutex::new(None)),
+            zk_registry_root: Arc::new(Mutex::new(None)),
+            node_pubkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -157,6 +166,49 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     };
 
     let nodes = fetch_nodes(&state).await;
+
+    // Build Poseidon Merkle tree from secp256k1 pubkeys (for ZK settlement).
+    // Uses get_active_nodes_with_pubkeys() which shares the same RPC fetch.
+    {
+        let settlement_mode = state.config.lock()
+            .map(|cfg| cfg.settlement_mode)
+            .unwrap_or(settlement::SettlementMode::Auto);
+
+        if settlement_mode != settlement::SettlementMode::Plaintext {
+            match state.chain_reader.get_active_nodes_with_pubkeys().await {
+                Ok((_nodes, pubkey_map)) => {
+                    // Collect pubkeys in deterministic order (sorted by node_id).
+                    let mut sorted_ids: Vec<&String> = pubkey_map.keys().collect();
+                    sorted_ids.sort();
+                    let ordered_keys: Vec<Vec<u8>> = sorted_ids.iter()
+                        .map(|id| pubkey_map[*id].clone())
+                        .collect();
+
+                    match zk_merkle::PoseidonMerkleTree::from_pubkeys(&ordered_keys) {
+                        Ok(tree) => {
+                            info!(count = tree.count(), root = %tree.root(), "built Poseidon Merkle tree");
+                            if let Ok(mut t) = state.merkle_tree.lock() { *t = Some(tree); }
+                        }
+                        Err(e) => warn!(error = %e, "failed to build Merkle tree"),
+                    }
+
+                    if let Ok(mut pk) = state.node_pubkeys.lock() { *pk = pubkey_map; }
+
+                    // Read registry root from ZKSettlement.
+                    match wallet::read_registry_root(
+                        &state.chain_reader.rpc_url_str(),
+                        SETTLEMENT_ADDRESS, // TODO: use ZK_SETTLEMENT_ADDRESS when configured
+                    ).await {
+                        Ok(root) => {
+                            if let Ok(mut r) = state.zk_registry_root.lock() { *r = Some(root); }
+                        }
+                        Err(e) => warn!(error = %e, "failed to read registry root"),
+                    }
+                }
+                Err(e) => warn!(error = %e, "failed to fetch secp256k1 pubkeys"),
+            }
+        }
+    }
 
     // Minimum network size guard.
     if nodes.len() < MINIMUM_NETWORK_SIZE {
@@ -551,8 +603,9 @@ fn build_zk_session_data(
     client_addr: &alloy::primitives::Address,
     deposit_id: Option<[u8; 32]>,
 ) -> Option<zk_witness::ZkSessionData> {
-    // Extract circuit data under a scoped lock (release before any other locks).
-    let (exit_price, entry_addr_hex, relay_addr_hex, exit_addr_hex) = {
+    // Extract circuit data under a scoped lock.
+    let (exit_price, entry_addr_hex, relay_addr_hex, exit_addr_hex,
+         entry_node_id, relay_node_id, exit_node_id) = {
         let circ = state.circuit.lock().ok()?;
         let c = circ.as_ref()?;
         (
@@ -560,6 +613,9 @@ fn build_zk_session_data(
             c.entry.operator_address.clone(),
             c.relay.operator_address.clone(),
             c.exit.operator_address.clone(),
+            c.entry.node_id.clone(),
+            c.relay.node_id.clone(),
+            c.exit.node_id.clone(),
         )
     };
 
@@ -575,7 +631,34 @@ fn build_zk_session_data(
     let mut client_address = [0u8; 20];
     client_address.copy_from_slice(client_addr.as_slice());
 
+    // Get Merkle tree, pubkeys, and registry root from AppState.
+    let tree = state.merkle_tree.lock().ok()?;
+    let pubkeys = state.node_pubkeys.lock().ok()?;
+    let registry_root = state.zk_registry_root.lock().ok()?.clone()
+        .unwrap_or_else(|| "0".to_string());
+
+    // Look up secp256k1 pubkeys for entry and relay nodes.
+    let entry_pk = pubkeys.get(&entry_node_id).cloned().unwrap_or_default();
+    let relay_pk = pubkeys.get(&relay_node_id).cloned().unwrap_or_default();
+    let exit_pk = pubkeys.get(&exit_node_id).cloned().unwrap_or_default();
+
+    // Extract Merkle proofs if tree is available.
+    let (exit_proof, entry_proof, relay_proof) = if let Some(ref t) = *tree {
+        let exit_idx = t.find_index(&exit_pk).ok();
+        let entry_idx = t.find_index(&entry_pk).ok();
+        let relay_idx = t.find_index(&relay_pk).ok();
+
+        (
+            exit_idx.and_then(|i| t.proof(i).ok()),
+            entry_idx.and_then(|i| t.proof(i).ok()),
+            relay_idx.and_then(|i| t.proof(i).ok()),
+        )
+    } else {
+        (None, None, None)
+    };
+
     let depth = zk_merkle::MERKLE_DEPTH;
+    let empty_proof = || vec!["0".to_string(); depth];
 
     Some(zk_witness::ZkSessionData {
         session_id,
@@ -596,18 +679,17 @@ fn build_zk_session_data(
         relay_address: parse_addr(&relay_addr_hex)?,
         exit_address: parse_addr(&exit_addr_hex)?,
 
-        // Merkle proofs stubbed until tree is built at connect time.
-        exit_merkle_proof: vec!["0".to_string(); depth],
-        exit_merkle_index: 0,
-        entry_merkle_proof: vec!["0".to_string(); depth],
-        entry_merkle_index: 0,
-        relay_merkle_proof: vec!["0".to_string(); depth],
-        relay_merkle_index: 0,
+        exit_merkle_proof: exit_proof.as_ref().map(|p| p.siblings.clone()).unwrap_or_else(empty_proof),
+        exit_merkle_index: exit_proof.as_ref().map(|p| p.index).unwrap_or(0),
+        entry_merkle_proof: entry_proof.as_ref().map(|p| p.siblings.clone()).unwrap_or_else(empty_proof),
+        entry_merkle_index: entry_proof.as_ref().map(|p| p.index).unwrap_or(0),
+        relay_merkle_proof: relay_proof.as_ref().map(|p| p.siblings.clone()).unwrap_or_else(empty_proof),
+        relay_merkle_index: relay_proof.as_ref().map(|p| p.index).unwrap_or(0),
 
-        entry_secp256k1_pubkey: vec![],  // TODO: recover from on-chain data
-        relay_secp256k1_pubkey: vec![],  // TODO: recover from on-chain data
+        entry_secp256k1_pubkey: entry_pk,
+        relay_secp256k1_pubkey: relay_pk,
 
-        registry_root: "0".to_string(), // TODO: from ZKSettlement.registryRoot()
+        registry_root,
     })
 }
 
