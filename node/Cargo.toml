@@ -40,8 +40,9 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa"] }
-ml-dsa = "0.1.0-rc.8"
-ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
+# Post-quantum: RC versions — upgrade when stable releases ship (track RustCrypto/signatures)
+ml-dsa = "0.1.0-rc.8"       # FIPS 204 (Dilithium) — TODO: upgrade to stable when published
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }  # FIPS 203 — TODO: upgrade to stable
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 futures = "0.3"

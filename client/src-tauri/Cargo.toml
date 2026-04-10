@@ -27,7 +27,7 @@ hkdf = "0.12"
 sha2 = "0.10"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
-ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }  # FIPS 203 RC — TODO: upgrade when stable
 hex = "0.4"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
