@@ -45,9 +45,13 @@ export function useCircuit(): UseCircuitReturn {
           try {
             const info = await invoke<CircuitInfo | null>("get_circuit");
             setCircuit(info);
-          } catch { /* ignore */ }
+          } catch (err) {
+            console.error("Failed to fetch circuit info:", err);
+          }
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        console.error("Failed to poll connection status:", err);
+      }
     };
 
     pollRef.current = setInterval(poll, 5000);
