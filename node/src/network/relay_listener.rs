@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::crypto::sphinx::SphinxPacket;
 use crate::metrics::bandwidth::BandwidthTracker;
+use crate::tunnel::packet_norm::{self, Denormalizer, NormalizedFrame, SequenceCounter, NORMALIZED_SIZE};
 use crate::tunnel::tun_device::TunDevice;
 
 use super::hop_codec;
@@ -61,6 +62,10 @@ pub struct RelayListener {
     domain_separator: Option<B256>,
     /// Optional link padding manager, shared with the padding loop.
     link_padding: Option<Arc<Mutex<LinkPaddingManager>>>,
+    /// Packet normalization: outgoing sequence counter.
+    norm_seq: Mutex<SequenceCounter>,
+    /// Packet normalization: incoming reassembly.
+    denorm: Mutex<Denormalizer>,
 }
 
 impl RelayListener {
@@ -113,6 +118,8 @@ impl RelayListener {
                 operator_signer,
                 domain_separator,
                 link_padding,
+                norm_seq: Mutex::new(SequenceCounter::new()),
+                denorm: Mutex::new(Denormalizer::new()),
             },
             socket_clone,
         ))
@@ -136,7 +143,24 @@ impl RelayListener {
                 continue;
             }
 
-            let packet = &buf[..n];
+            // Try denormalization first: if the packet is exactly NORMALIZED_SIZE,
+            // it's a normalized frame. Otherwise treat as raw (control messages).
+            let packet_data: Vec<u8> = if n == NORMALIZED_SIZE {
+                let frame: [u8; NORMALIZED_SIZE] = buf[..n].try_into().unwrap();
+                let mut denorm = self.denorm.lock().await;
+                match denorm.denormalize(&frame) {
+                    Some(reassembled) => reassembled,
+                    None => continue, // more fragments needed
+                }
+            } else {
+                buf[..n].to_vec()
+            };
+            let packet = &packet_data[..];
+
+            if packet.len() < MIN_PACKET_SIZE {
+                debug!(peer = %peer_addr, bytes = packet.len(), "relay packet too short, dropping");
+                continue;
+            }
 
             // Parse framing: [8-byte session_id][remaining bytes]
             let session_id =
@@ -157,12 +181,8 @@ impl RelayListener {
 
             // ── data channel ──────────────────────────────────────────
 
-            if n < MIN_DATA_PACKET_SIZE {
-                debug!(
-                    peer = %peer_addr,
-                    bytes = n,
-                    "relay data packet too short, dropping"
-                );
+            if packet.len() < MIN_DATA_PACKET_SIZE {
+                debug!(peer = %peer_addr, bytes = packet.len(), "relay data packet too short, dropping");
                 continue;
             }
 
@@ -458,22 +478,31 @@ impl RelayListener {
 
         let dest = SocketAddr::from((ip, port));
 
-        // Frame: [8-byte session_id][sphinx bytes]
+        // Build the raw frame: [8-byte session_id][sphinx bytes]
         let sphinx_bytes = inner_packet.to_bytes();
         let mut frame = Vec::with_capacity(8 + sphinx_bytes.len());
         frame.extend_from_slice(&session_id.to_be_bytes());
         frame.extend_from_slice(&sphinx_bytes);
 
-        self.socket
-            .send_to(&frame, dest)
-            .await
-            .with_context(|| format!("sending relay packet to {dest}"))?;
+        // Normalize to fixed-size frames (all wire packets become NORMALIZED_SIZE).
+        let normalized = {
+            let mut seq = self.norm_seq.lock().await;
+            packet_norm::normalize(&frame, &mut seq)
+        };
+
+        for nf in &normalized {
+            self.socket
+                .send_to(&nf.data, dest)
+                .await
+                .with_context(|| format!("sending normalized frame to {dest}"))?;
+        }
 
         debug!(
             session_id,
             dest = %dest,
-            frame_len = frame.len(),
-            "forwarded relay packet to next hop"
+            raw_len = frame.len(),
+            frames = normalized.len(),
+            "forwarded normalized relay packet to next hop"
         );
 
         Ok(())
