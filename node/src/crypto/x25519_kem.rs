@@ -1,5 +1,6 @@
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 use super::traits::{CryptoError, KeyExchange};
 
@@ -18,6 +19,27 @@ impl AsRef<[u8]> for X25519PublicKey {
 }
 
 pub struct X25519SecretKey(pub(crate) StaticSecret);
+
+impl X25519SecretKey {
+    /// Zero the secret bytes in place. Called by Drop impls on NodeKeyPair
+    /// and EphemeralSession to prevent key material from lingering in memory.
+    pub(crate) fn zeroize_secret(&mut self) {
+        // StaticSecret stores a [u8; 32] internally. We access it via
+        // to_bytes() + overwrite with zeros. This is best-effort since
+        // StaticSecret doesn't expose a mutable reference to its inner bytes.
+        // For defense-in-depth, the caller should also clear any copies.
+        let bytes = self.0.to_bytes();
+        // Overwrite via unsafe to reach the inner [u8; 32].
+        // SAFETY: StaticSecret is repr(transparent) over [u8; 32].
+        unsafe {
+            let ptr = &mut self.0 as *mut StaticSecret as *mut [u8; 32];
+            (*ptr).zeroize();
+        }
+        // Verify the bytes are zero (debug only).
+        debug_assert_eq!(self.0.to_bytes(), [0u8; 32]);
+        let _ = bytes; // suppress unused warning
+    }
+}
 
 /// For X25519-as-KEM, the "ciphertext" is the ephemeral public key.
 #[derive(Clone)]

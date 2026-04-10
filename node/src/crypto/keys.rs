@@ -2,6 +2,7 @@ use std::path::Path;
 
 use thiserror::Error;
 use x25519_dalek::PublicKey;
+use zeroize::Zeroize;
 
 use super::traits::KeyExchange;
 use super::x25519_kem::{X25519Kem, X25519PublicKey, X25519SecretKey};
@@ -96,6 +97,12 @@ impl NodeKeyPair {
     }
 }
 
+impl Drop for NodeKeyPair {
+    fn drop(&mut self) {
+        self.secret.zeroize_secret();
+    }
+}
+
 // ── ephemeral per-circuit session ──────────────────────────────────────
 
 /// An ephemeral X25519 session used for a single circuit.
@@ -130,6 +137,12 @@ impl EphemeralSession {
         X25519Kem::decapsulate(&ct, &self.secret)
             .expect("X25519 decapsulate cannot fail")
             .to_bytes()
+    }
+}
+
+impl Drop for EphemeralSession {
+    fn drop(&mut self) {
+        self.secret.zeroize_secret();
     }
 }
 
