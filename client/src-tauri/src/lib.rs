@@ -164,6 +164,9 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     // Read config values needed for connect (single lock acquisition).
     let (pinned, kill_switch_enabled, strict_network) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        if cfg.rpc_url.is_empty() {
+            return Err("RPC URL not configured — set an Ethereum RPC endpoint in Settings before connecting".to_string());
+        }
         (cfg.preferred_nodes.clone(), cfg.kill_switch, cfg.strict_network_size)
     };
 

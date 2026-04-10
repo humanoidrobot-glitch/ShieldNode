@@ -52,7 +52,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://eth-sepolia.g.alchemy.com/v2/demo".to_string(),
+            rpc_url: String::new(), // Must be configured — no default RPC provider
             chain_id: 11155111, // Sepolia
             auto_rotate: false,
             circuit_rotation_interval_secs: 600,
