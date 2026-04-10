@@ -11,6 +11,7 @@ mod receipts;
 pub mod reputation;
 mod settlement;
 mod sphinx;
+#[allow(dead_code)] // TODO: wired into forwarding loop when tunnel data path is active
 mod tun;
 mod tunnel;
 mod wallet;
@@ -703,15 +704,19 @@ fn build_zk_session_data(
 /// Return the current connection status.
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<ConnectionState, String> {
+    // Read tunnel bytes first (no nested locks).
+    let live_bytes = {
+        let tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+        tun.total_bytes_sent() + tun.total_bytes_received()
+    };
+
     let mut conn = state
         .connection
         .lock()
         .map_err(|e| format!("lock error: {e}"))?;
 
-    // Update bytes_used from tunnel counters for live bandwidth display.
     if let ConnectionState::Connected { ref mut bytes_used, .. } = *conn {
-        let tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
-        *bytes_used = tun.total_bytes_sent() + tun.total_bytes_received();
+        *bytes_used = live_bytes;
     }
 
     Ok(conn.clone())
@@ -725,22 +730,19 @@ async fn get_nodes(state: State<'_, AppState>) -> Result<Vec<NodeInfo>, String> 
 /// Return information about the active session, if any.
 #[tauri::command]
 async fn get_session(state: State<'_, AppState>) -> Result<Option<SessionInfo>, String> {
+    // Read tunnel bytes first (no nested locks).
+    let live_bytes = {
+        let tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+        tun.total_bytes_sent() + tun.total_bytes_received()
+    };
+
     let conn = state
         .connection
         .lock()
         .map_err(|e| format!("lock error: {e}"))?;
 
     match &*conn {
-        ConnectionState::Connected {
-            node_id,
-            session_id,
-            ..
-        } => {
-            // Read live bytes from tunnel counters.
-            let live_bytes = {
-                let tun = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
-                tun.total_bytes_sent() + tun.total_bytes_received()
-            };
+        ConnectionState::Connected { node_id, session_id, .. } => {
             Ok(Some(SessionInfo {
                 session_id: session_id.clone(),
                 node_id: node_id.clone(),

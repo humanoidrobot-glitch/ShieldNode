@@ -90,6 +90,16 @@ enum DecapResult<'a> {
     WriteBack(&'a [u8]),
 }
 
+/// Result of decapsulating an incoming WireGuard message.
+pub enum DecapOutput<'a> {
+    /// Decrypted IP packet — inject into TUN device.
+    Data(&'a [u8]),
+    /// Handshake response — MUST be sent back to the peer over UDP.
+    WriteBack(&'a [u8]),
+    /// Internal state update — no action required.
+    Nothing,
+}
+
 impl TunnelManager {
     pub fn new() -> Self {
         Self {
@@ -141,17 +151,21 @@ impl TunnelManager {
         Ok(encrypted.len())
     }
 
-    /// Decapsulate an incoming WireGuard message. Returns the plaintext
-    /// IP packet, or None if this was a handshake message.
-    pub fn decapsulate<'a>(&mut self, ciphertext: &[u8], buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, String> {
+    /// Decapsulate an incoming WireGuard message.
+    ///
+    /// Returns:
+    /// - `DecapOutput::Data(slice)` — decrypted IP packet for TUN injection
+    /// - `DecapOutput::WriteBack(slice)` — handshake response that MUST be sent back over UDP
+    /// - `DecapOutput::Nothing` — handshake state update, no action needed
+    pub fn decapsulate<'a>(&mut self, ciphertext: &[u8], buf: &'a mut [u8]) -> Result<DecapOutput<'a>, String> {
         let wg = self.tunnel.as_mut().ok_or("tunnel not active")?;
         match wg.decapsulate(ciphertext, buf)? {
             DecapResult::Data(data) => {
                 self.bytes_received.fetch_add(data.len() as u64, Ordering::Relaxed);
-                Ok(Some(data))
+                Ok(DecapOutput::Data(data))
             }
-            DecapResult::Handshake => Ok(None),
-            DecapResult::WriteBack(_) => Ok(None), // handshake response handled internally
+            DecapResult::Handshake => Ok(DecapOutput::Nothing),
+            DecapResult::WriteBack(data) => Ok(DecapOutput::WriteBack(data)),
         }
     }
 
