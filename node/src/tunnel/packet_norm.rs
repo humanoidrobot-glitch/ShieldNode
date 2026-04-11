@@ -199,7 +199,8 @@ impl Denormalizer {
         // Simple strategy: if we have more than 256 pending, drop the oldest.
         // A proper implementation would use timestamps.
         if self.pending.len() > 256 {
-            let oldest = *self.pending.keys().next().unwrap();
+            let oldest = *self.pending.keys().next()
+                .expect("pending must be non-empty when len > 256");
             self.pending.remove(&oldest);
         }
     }

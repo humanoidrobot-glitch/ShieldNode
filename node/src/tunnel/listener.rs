@@ -96,7 +96,8 @@ impl TunnelListener {
                     let session_id = self.get_or_create_peer(peer_addr);
                     self.last_active_peer = Some(peer_addr);
 
-                    let peer = self.peers.get_mut(&peer_addr).unwrap();
+                    let peer = self.peers.get_mut(&peer_addr)
+                        .expect("peer must exist after get_or_create_peer");
                     peer.last_active = Instant::now();
 
                     match peer.tunnel.handle_incoming(packet, &mut send_buf) {
