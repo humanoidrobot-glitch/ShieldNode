@@ -6,6 +6,7 @@ use alloy::{
 };
 use thiserror::Error;
 use tracing::info;
+use zeroize::Zeroize;
 
 // ── ABI definition via sol! ────────────────────────────────────────────
 
@@ -60,6 +61,12 @@ pub struct ChainService {
     registry_address: Address,
     node_id: [u8; 32],
     private_key: [u8; 32],
+}
+
+impl Drop for ChainService {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
 }
 
 impl ChainService {

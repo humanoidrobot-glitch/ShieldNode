@@ -131,7 +131,7 @@ jobs:
 
       - name: Audit
         working-directory: client
-        run: pnpm audit --audit-level=high || true
+        run: pnpm audit --audit-level=high
 
   security:
     name: Dependency audit
@@ -142,8 +142,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo-audit binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.21
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: which cargo-audit || cargo install cargo-audit
 
       - name: Audit node crate
         working-directory: node

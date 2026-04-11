@@ -8,7 +8,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use igd_next::PortMappingProtocol;
 use tracing::{info, warn};
 
-/// Lease duration for UPnP port mappings (1 hour, renewable).
+/// Lease duration for UPnP port mappings.
+/// NOTE: No automatic renewal — mappings expire after 1 hour. For long-running
+/// nodes, manual port forwarding is more reliable. Future: spawn a renewal task.
 const LEASE_SECS: u32 = 3600;
 
 /// Attempt to map the given ports via UPnP/IGD.
@@ -33,11 +35,9 @@ pub async fn attempt_upnp_mappings(
 
         info!(external_ip = %external_ip, "UPnP gateway found");
 
-        // Determine local IPv4 for port mappings.
-        let local_ip = match gateway.addr.ip() {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
-        };
+        // Use 0.0.0.0 — the router resolves the requester's actual LAN IP.
+        // gateway.addr is the router's control URL, not the local machine.
+        let local_ip = Ipv4Addr::UNSPECIFIED;
 
         for (port, protocol, description) in &ports {
             let local = std::net::SocketAddr::V4(SocketAddrV4::new(local_ip, *port));
