@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::sol;
-use alloy::sol_types::SolEvent;
+use alloy::sol_types::{SolCall, SolEvent};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::chain::ISessionSettlement;
 use crate::config::WalletMode;
-use crate::wallet_bridge::{self, SigningRequest, SigningResponse, WalletBridge};
+use crate::wallet_bridge::{SigningRequest, SigningResponse, WalletBridge};
 
 sol! {
     #[sol(rpc)]
@@ -161,6 +161,14 @@ impl WalletContext {
     pub fn is_walletconnect(&self) -> bool {
         self.mode == WalletMode::WalletConnect
     }
+
+    /// Build a signed Alloy provider for local-mode transactions.
+    fn local_provider(&self) -> Result<impl Provider + Clone, String> {
+        let signer = self.config.parse_signer()?;
+        Ok(ProviderBuilder::new()
+            .wallet(EthereumWallet::from(signer))
+            .connect_http(self.config.parse_url()?))
+    }
 }
 
 /// Open a 3-hop session on the SessionSettlement contract.
@@ -177,7 +185,6 @@ pub async fn open_session(
 
     if ctx.is_walletconnect() {
         // WC mode: encode calldata, delegate to frontend.
-        use alloy::sol_types::SolCall;
         let calldata = ISessionSettlement::openSessionCall { nodeIds: node_ids }.abi_encode();
         let tx_hash = ctx.send_transaction_wc(settlement, &calldata, U256::from(deposit_wei)).await?;
         // WC mode cannot easily poll for receipt from backend.
@@ -187,10 +194,7 @@ pub async fn open_session(
     }
 
     // Local mode: use Alloy contract API directly.
-    let signer = ctx.config.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(ctx.config.parse_url()?);
+    let provider = ctx.local_provider()?;
 
     let contract = ISessionSettlement::new(settlement, &provider);
     let pending = contract.openSession(node_ids)
@@ -223,7 +227,6 @@ pub async fn settle_session(
     info!(session_id, receipt_len = receipt_data.len(), "settling on-chain session");
 
     if ctx.is_walletconnect() {
-        use alloy::sol_types::SolCall;
         let calldata = ISessionSettlement::settleSessionCall {
             sessionId: U256::from(session_id),
             signedReceipt: receipt_data.into(),
@@ -233,10 +236,7 @@ pub async fn settle_session(
         return Ok(tx_hash);
     }
 
-    let signer = ctx.config.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(ctx.config.parse_url()?);
+    let provider = ctx.local_provider()?;
 
     let contract = ISessionSettlement::new(settlement, &provider);
     let pending = contract
@@ -257,7 +257,6 @@ pub async fn zk_deposit(ctx: &WalletContext, amount: u128) -> Result<[u8; 32], S
         .map_err(|e| format!("invalid ZK settlement address: {e}"))?;
 
     if ctx.is_walletconnect() {
-        use alloy::sol_types::SolCall;
         let calldata = IZKSettlement::depositCall {}.abi_encode();
         let tx_hash = ctx.send_transaction_wc(zk_addr, &calldata, U256::from(amount)).await?;
         // WC mode: return a dummy deposit_id. Frontend must parse the event.
@@ -265,10 +264,7 @@ pub async fn zk_deposit(ctx: &WalletContext, amount: u128) -> Result<[u8; 32], S
         return Ok([0u8; 32]);
     }
 
-    let signer = ctx.config.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(ctx.config.parse_url()?);
+    let provider = ctx.local_provider()?;
 
     let contract = IZKSettlement::new(zk_addr, &provider);
     let pending = contract.deposit()
@@ -352,7 +348,6 @@ pub async fn settle_zk_session(
     info!("submitting ZK proof to ZKSettlement.settleWithProof");
 
     if ctx.is_walletconnect() {
-        use alloy::sol_types::SolCall;
         let calldata = IZKSettlement::settleWithProofCall {
             proof_a, proof_b, proof_c, pubSignals: pub_signals,
             nullifier, depositId: deposit_id,
@@ -364,10 +359,7 @@ pub async fn settle_zk_session(
         return Ok(tx_hash);
     }
 
-    let signer = ctx.config.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(ctx.config.parse_url()?);
+    let provider = ctx.local_provider()?;
 
     let contract = IZKSettlement::new(zk_settlement, &provider);
     let pending = contract

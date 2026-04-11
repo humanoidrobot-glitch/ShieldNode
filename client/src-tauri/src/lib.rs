@@ -101,6 +101,8 @@ pub struct AppState {
     pub zk_registry_root: Arc<Mutex<Option<String>>>,
     /// Bridge for delegating signing requests to the frontend (WalletConnect).
     pub wallet_bridge: Arc<wallet_bridge::WalletBridge>,
+    /// Tauri app handle for emitting events to the frontend.
+    pub app_handle: Mutex<Option<tauri::AppHandle>>,
     /// Node secp256k1 pubkeys (node_id hex → 65-byte uncompressed key).
     pub node_pubkeys: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
@@ -135,6 +137,7 @@ impl Default for AppState {
             merkle_tree: Arc::new(Mutex::new(None)),
             zk_registry_root: Arc::new(Mutex::new(None)),
             wallet_bridge: Arc::new(wallet_bridge::WalletBridge::new()),
+            app_handle: Mutex::new(None),
             node_pubkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -146,20 +149,10 @@ impl AppState {
         self.chain_reader.lock().map(|r| r.clone()).map_err(|e| format!("lock error: {e}"))
     }
 
-    fn wallet_config(&self) -> Result<WalletConfig, String> {
-        let cfg = self.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        Ok(WalletConfig {
-            rpc_url: cfg.rpc_url.clone(),
-            chain_id: cfg.chain_id,
-            private_key: cfg.operator_private_key.clone(),
-            settlement_address: SETTLEMENT_ADDRESS.to_string(),
-            zk_settlement_address: None,
-        })
-    }
-
-    /// Build a WalletContext from the current state (wallet mode + bridge).
+    /// Build a WalletContext from the current state (wallet mode + bridge + app handle).
     fn wallet_context(&self) -> Result<wallet::WalletContext, String> {
         let cfg = self.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        let handle = self.app_handle.lock().map_err(|e| format!("lock error: {e}"))?;
         Ok(wallet::WalletContext {
             config: WalletConfig {
                 rpc_url: cfg.rpc_url.clone(),
@@ -170,7 +163,7 @@ impl AppState {
             },
             mode: cfg.wallet_mode,
             bridge: Arc::clone(&self.wallet_bridge),
-            app_handle: None, // Set by caller when Tauri AppHandle is available
+            app_handle: handle.clone(),
         })
     }
 }
@@ -544,27 +537,11 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
         "preparing EIP-712 bandwidth receipt for settlement"
     );
 
-    // 3. Read all config values in a single lock acquisition (avoids deadlock
-    //    from wallet_config() re-locking, and reads settlement_mode atomically).
-    let (wallet_cfg, chain_id, settlement_mode, wallet_mode) = {
+    // 3. Build wallet context + read settlement mode.
+    let wallet_ctx = state.wallet_context()?;
+    let (chain_id, settlement_mode) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
-        let wc = WalletConfig {
-            rpc_url: cfg.rpc_url.clone(),
-            chain_id: cfg.chain_id,
-            private_key: cfg.operator_private_key.clone(),
-            settlement_address: SETTLEMENT_ADDRESS.to_string(),
-            zk_settlement_address: None,
-        };
-        let mode = cfg.settlement_mode;
-        let wm = cfg.wallet_mode;
-        (wc, cfg.chain_id, mode, wm)
-    };
-
-    let wallet_ctx = wallet::WalletContext {
-        config: wallet_cfg.clone(),
-        mode: wallet_mode,
-        bridge: Arc::clone(&state.wallet_bridge),
-        app_handle: None, // TODO: wire app handle for WalletConnect tx signing
+        (cfg.chain_id, cfg.settlement_mode)
     };
 
     let settlement_address: Address = SETTLEMENT_ADDRESS
@@ -620,7 +597,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // 7. Build ZK session data if settlement mode may use ZK.
-    let client_addr: Address = match wallet_mode {
+    let client_addr: Address = match wallet_ctx.mode {
         config::WalletMode::WalletConnect => {
             let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
             cfg.wc_address.as_deref()
@@ -629,7 +606,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
                 .map_err(|e| format!("invalid WC address: {e}"))?
         }
         config::WalletMode::Local => {
-            let signer = wallet_cfg.parse_signer()?;
+            let signer = wallet_ctx.config.parse_signer()?;
             alloy::signers::Signer::address(&signer)
         }
     };
@@ -1574,6 +1551,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::default())
+        .setup(|app| {
+            // Store the app handle so WalletContext can emit events.
+            let state: tauri::State<'_, AppState> = app.state();
+            let mut handle = state.app_handle.lock().expect("app_handle lock");
+            *handle = Some(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             connect,
             disconnect,
