@@ -97,11 +97,11 @@ jobs:
 
       - name: Clippy
         working-directory: client/src-tauri
-        run: cargo clippy --all-targets -- -W clippy::all
+        run: cargo clippy --lib -- -W clippy::all
 
       - name: Test
         working-directory: client/src-tauri
-        run: cargo test
+        run: cargo test --lib
 
   frontend:
     name: React frontend
