@@ -39,8 +39,8 @@ RUN cd node && cargo build --release 2>/dev/null || true
 COPY node/src/ node/src/
 COPY packages/shieldnode-types/src/ packages/shieldnode-types/src/
 
-# Touch main.rs to force rebuild of our code (not deps).
-RUN touch node/src/main.rs
+# Touch sources to force rebuild of our code (not deps).
+RUN touch node/src/main.rs packages/shieldnode-types/src/lib.rs
 
 # Build the release binary.
 RUN cd node && cargo build --release
