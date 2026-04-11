@@ -1,6 +1,8 @@
 services:
   shieldnode:
-    build: .
+    build:
+      context: ..
+      dockerfile: node/Dockerfile
     container_name: shieldnode
     restart: unless-stopped
     ports:

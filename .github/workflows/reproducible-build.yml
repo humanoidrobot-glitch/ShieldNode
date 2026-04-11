@@ -11,11 +11,14 @@ on:
       - 'node/Cargo.toml'
       - 'node/Cargo.lock'
       - 'node/Dockerfile.reproducible'
+      - 'packages/shieldnode-types/**'
+      - 'Cargo.toml'
   pull_request:
     paths:
       - 'node/src/**'
       - 'node/Cargo.toml'
       - 'node/Cargo.lock'
+      - 'packages/shieldnode-types/**'
   workflow_dispatch:
 
 jobs:
@@ -25,11 +28,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build reproducible binary
-        working-directory: node
         run: |
-          docker build -f Dockerfile.reproducible -t shieldnode-build .
+          docker build -f node/Dockerfile.reproducible -t shieldnode-build .
           docker create --name extract shieldnode-build
-          docker cp extract:/shieldnode ./shieldnode-relay
+          docker cp extract:/shieldnode ./node/shieldnode-relay
           docker rm extract
 
       - name: Compute and publish binary hash
@@ -62,15 +64,14 @@ jobs:
           path: ./artifact
 
       - name: Rebuild and compare hash
-        working-directory: node
         run: |
-          docker build -f Dockerfile.reproducible -t shieldnode-verify .
+          docker build -f node/Dockerfile.reproducible -t shieldnode-verify .
           docker create --name verify-extract shieldnode-verify
-          docker cp verify-extract:/shieldnode ./shieldnode-relay-verify
+          docker cp verify-extract:/shieldnode ./node/shieldnode-relay-verify
           docker rm verify-extract
 
-          HASH_BUILD=$(sha256sum ../artifact/shieldnode-relay | awk '{print $1}')
-          HASH_VERIFY=$(sha256sum shieldnode-relay-verify | awk '{print $1}')
+          HASH_BUILD=$(sha256sum artifact/shieldnode-relay | awk '{print $1}')
+          HASH_VERIFY=$(sha256sum node/shieldnode-relay-verify | awk '{print $1}')
 
           echo "Build hash:  ${HASH_BUILD}"
           echo "Verify hash: ${HASH_VERIFY}"
