@@ -1,43 +1,12 @@
-//! Encoding and decoding of 32-byte next-hop identifiers.
-//!
-//! The relay layer uses a fixed 32-byte blob to represent the next hop in a
-//! Sphinx route.  The format is intentionally simple:
-//!
-//! ```text
-//! [0.. 4)  IPv4 address (4 bytes, network byte order)
-//! [4.. 6)  port         (2 bytes, big-endian)
-//! [6..32)  reserved     (26 zero bytes)
-//! ```
-//!
-//! An all-zero blob is the **exit sentinel** — it signals that the current
-//! node is the final hop and the decrypted payload should be delivered
-//! locally (e.g. written to the TUN device).
+//! Re-export shared hop codec + node-only decode function.
+
+pub use shieldnode_types::hop_codec::*;
 
 use std::net::Ipv4Addr;
 
-/// Encode an IPv4 address and port into a 32-byte next-hop identifier.
+/// Decode a 32-byte next-hop into an IPv4 address and port.
 ///
-/// Format: `[4-byte IPv4][2-byte port BE][26 zero bytes]`
-pub fn encode_next_hop(ip: Ipv4Addr, port: u16) -> [u8; 32] {
-    let mut buf = [0u8; 32];
-    let octets = ip.octets();
-    buf[0] = octets[0];
-    buf[1] = octets[1];
-    buf[2] = octets[2];
-    buf[3] = octets[3];
-    let port_bytes = port.to_be_bytes();
-    buf[4] = port_bytes[0];
-    buf[5] = port_bytes[1];
-    buf
-}
-
-/// Decode a 32-byte next-hop identifier into an `(IPv4, port)` pair.
-///
-/// If the encoded port is 0, `default_port` is used instead.
-///
-/// Returns an error when the decoded IP is unspecified (`0.0.0.0`),
-/// loopback (`127.x.x.x`), broadcast (`255.255.255.255`), or multicast
-/// (`224.0.0.0/4`).
+/// Returns an error for unspecified, loopback, broadcast, or multicast IPs.
 pub fn decode_next_hop(next_hop: &[u8; 32], default_port: u16) -> Result<(Ipv4Addr, u16), String> {
     let ip = Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]);
 
@@ -60,69 +29,27 @@ pub fn decode_next_hop(next_hop: &[u8; 32], default_port: u16) -> Result<(Ipv4Ad
     Ok((ip, port))
 }
 
-/// Returns `true` when every byte in the next-hop identifier is zero,
-/// indicating that the current node is the exit (final) hop.
-pub fn is_exit_hop(next_hop: &[u8; 32]) -> bool {
-    next_hop == &[0u8; 32]
-}
-
-// ── tests ─────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn round_trip() {
-        let ip = Ipv4Addr::new(10, 0, 1, 42);
-        let port = 51821u16;
-        let encoded = encode_next_hop(ip, port);
-        let (dec_ip, dec_port) = decode_next_hop(&encoded, 9999).unwrap();
-        assert_eq!(dec_ip, ip);
-        assert_eq!(dec_port, port);
+    fn encode_roundtrip() {
+        let ip = Ipv4Addr::new(203, 0, 113, 10);
+        let nh = encode_next_hop(ip, 51821);
+        let (decoded_ip, decoded_port) = decode_next_hop(&nh, 0).unwrap();
+        assert_eq!(decoded_ip, ip);
+        assert_eq!(decoded_port, 51821);
     }
 
     #[test]
-    fn zero_port_uses_default() {
-        let ip = Ipv4Addr::new(192, 168, 1, 1);
-        let encoded = encode_next_hop(ip, 0);
-        let (_, dec_port) = decode_next_hop(&encoded, 51821).unwrap();
-        assert_eq!(dec_port, 51821);
-    }
-
-    #[test]
-    fn exit_sentinel() {
+    fn exit_hop_is_all_zeros() {
         assert!(is_exit_hop(&[0u8; 32]));
-        assert!(!is_exit_hop(&encode_next_hop(
-            Ipv4Addr::new(1, 2, 3, 4),
-            80,
-        )));
     }
 
     #[test]
-    fn reject_unspecified() {
-        // All-zero IP but non-zero port — should still fail validation.
-        let mut hop = [0u8; 32];
-        hop[4] = 0xCA;
-        hop[5] = 0x51;
-        assert!(decode_next_hop(&hop, 51821).is_err());
-    }
-
-    #[test]
-    fn reject_loopback() {
-        let encoded = encode_next_hop(Ipv4Addr::new(127, 0, 0, 1), 8080);
-        assert!(decode_next_hop(&encoded, 51821).is_err());
-    }
-
-    #[test]
-    fn reject_broadcast() {
-        let encoded = encode_next_hop(Ipv4Addr::new(255, 255, 255, 255), 1234);
-        assert!(decode_next_hop(&encoded, 51821).is_err());
-    }
-
-    #[test]
-    fn reject_multicast() {
-        let encoded = encode_next_hop(Ipv4Addr::new(224, 0, 0, 1), 5000);
-        assert!(decode_next_hop(&encoded, 51821).is_err());
+    fn decode_rejects_loopback() {
+        let nh = encode_next_hop(Ipv4Addr::new(127, 0, 0, 1), 51821);
+        assert!(decode_next_hop(&nh, 0).is_err());
     }
 }

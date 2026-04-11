@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "node",
+    "client/src-tauri",
+    "packages/shieldnode-types",
+]
+resolver = "2"
