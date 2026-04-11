@@ -128,13 +128,7 @@ fn activate_windows(entry_ip: &str) -> Result<(), String> {
         "profile=any", "remoteip=127.0.0.0/8",
     ])?;
 
-    // Allow DNS (needed for RPC endpoint resolution until DNS-over-tunnel).
-    run_cmd("netsh", &[
-        "advfirewall", "firewall", "add", "rule",
-        &format!("name={RULE_NAME}-AllowDNS"),
-        "dir=out", "action=allow", "enable=yes",
-        "profile=any", "protocol=udp", "remoteport=53",
-    ])?;
+    // DNS routes through the TUN device — no port 53 exception needed.
 
     // Block all other outbound traffic.
     run_cmd("netsh", &[
@@ -149,7 +143,7 @@ fn activate_windows(entry_ip: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn deactivate_windows() -> Result<(), String> {
-    for suffix in ["BlockAll", "AllowVPN", "AllowLocal", "AllowDNS"] {
+    for suffix in ["BlockAll", "AllowVPN", "AllowLocal"] {
         let name = format!("{RULE_NAME}-{suffix}");
         // Ignore errors — rule may not exist.
         let _ = run_cmd("netsh", &[
@@ -192,11 +186,7 @@ fn activate_linux(entry_ip: &str) -> Result<(), String> {
         "-A", "OUTPUT", "-d", entry_ip, "-j", "ACCEPT",
         "-m", "comment", "--comment", RULE_NAME,
     ])?;
-    // Allow DNS.
-    run_cmd("iptables", &[
-        "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT",
-        "-m", "comment", "--comment", RULE_NAME,
-    ])?;
+    // DNS routes through the TUN device — no port 53 exception needed.
     // Block everything else.
     run_cmd("iptables", &[
         "-A", "OUTPUT", "-j", "DROP",
@@ -254,7 +244,6 @@ fn activate_macos(entry_ip: &str) -> Result<(), String> {
         "# {RULE_NAME}\n\
          pass out quick to {entry_ip}\n\
          pass out quick to 127.0.0.0/8\n\
-         pass out quick proto udp to any port 53\n\
          block out all\n"
     );
 
