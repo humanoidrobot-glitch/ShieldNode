@@ -1,11 +1,10 @@
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-
 use crate::aead;
 use crate::kex::{HybridKem, HybridPublicKey, KeyExchange};
 
-type HmacSha256 = Hmac<Sha256>;
+// Shared helpers from the types crate.
+use shieldnode_types::sphinx::{
+    compute_mac, pq_compute_mac, pq_derive_layer_key, pq_nonce, PQ_SPHINX_VERSION,
+};
 
 /// A Sphinx-like onion packet (client-side, creation only).
 ///
@@ -58,22 +57,7 @@ impl SphinxPacket {
     }
 }
 
-fn compute_mac(session_key: &[u8; 32], hop_index: u8, next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
-    let mut hmac = HmacSha256::new_from_slice(session_key)
-        .expect("HMAC accepts any key length");
-    hmac.update(&[hop_index]); // bind MAC to hop position (prevents replay across hops)
-    hmac.update(next_hop);
-    hmac.update(payload);
-    let result = hmac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
-}
-
 // ── PQ Sphinx (client-side, creation only) ────────────────────────────
-
-/// Version byte for PQ Sphinx packets.
-pub const PQ_SPHINX_VERSION: u8 = 0xFF;
 
 /// Pre-computed KEM state for one hop.
 pub struct PqHopKeys {
@@ -161,37 +145,6 @@ impl PqSphinxPacket {
         buf.extend_from_slice(&self.encrypted_blob);
         buf
     }
-}
-
-fn pq_derive_layer_key(shared_secret: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(b"shieldnode-pq-sphinx-v1"), shared_secret);
-    let mut key = [0u8; 32];
-    hk.expand(b"layer-key", &mut key)
-        .expect("32 bytes is valid HKDF output");
-    key
-}
-
-fn pq_nonce(hop_index: usize) -> [u8; 12] {
-    aead::nonce_from_index(hop_index as u64)
-}
-
-fn pq_compute_mac(
-    layer_key: &[u8; 32],
-    hop_index: u8,
-    next_hop: &[u8; 32],
-    kem_ciphertext: &[u8],
-    encrypted_blob: &[u8],
-) -> [u8; 32] {
-    let mut hmac = HmacSha256::new_from_slice(layer_key)
-        .expect("HMAC accepts any key length");
-    hmac.update(&[hop_index]);
-    hmac.update(next_hop);
-    hmac.update(kem_ciphertext);
-    hmac.update(encrypted_blob);
-    let result = hmac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
 }
 
 fn pq_serialize(

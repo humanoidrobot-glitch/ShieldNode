@@ -12,7 +12,7 @@ use alloy::signers::Signer;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-pub use super::eip712::compute_domain_separator;
+pub use super::receipts::compute_domain_separator;
 
 /// EIP-712 typehash for challenge responses (computed once, matches ChallengeManager.sol).
 static RESPONSE_TYPEHASH: LazyLock<B256> = LazyLock::new(|| {

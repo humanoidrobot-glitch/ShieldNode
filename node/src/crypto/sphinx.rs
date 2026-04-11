@@ -1,4 +1,3 @@
-use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
@@ -6,6 +5,11 @@ use thiserror::Error;
 use super::aead;
 use super::hybrid::{HybridKem, HybridPublicKey, HybridSecretKey};
 use super::traits::KeyExchange;
+
+// Shared helpers from the types crate.
+use shieldnode_types::sphinx::{
+    compute_mac, pq_compute_mac, pq_derive_layer_key, pq_nonce, PQ_SPHINX_VERSION,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -171,19 +175,6 @@ impl SphinxPacket {
     }
 }
 
-/// Compute HMAC-SHA256 over (hop_index || next_hop || payload) using session_key.
-fn compute_mac(session_key: &[u8; 32], hop_index: u8, next_hop: &[u8; 32], payload: &[u8]) -> [u8; 32] {
-    let mut hmac = HmacSha256::new_from_slice(session_key)
-        .expect("HMAC accepts any key length");
-    hmac.update(&[hop_index]);
-    hmac.update(next_hop);
-    hmac.update(payload);
-    let result = hmac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
-}
-
 /// Verify HMAC-SHA256 over (hop_index || next_hop || payload).
 fn verify_mac(
     session_key: &[u8; 32],
@@ -222,7 +213,6 @@ fn verify_mac(
 /// Version byte for PQ Sphinx packets. 0xFF cannot appear as the first
 /// byte of a classic packet (exit sentinel is 0x00; valid IPv4 first
 /// octets are 1-223; broadcast 255 is rejected by decode_next_hop).
-pub const PQ_SPHINX_VERSION: u8 = 0xFF;
 
 const KEM_CT_LEN: usize = 1120; // HybridKem ciphertext: X25519 (32) + ML-KEM-768 (1088)
 
@@ -424,42 +414,7 @@ pub enum SphinxVariant {
     Pq(PqSphinxPacket),
 }
 
-// ── PQ helpers ──────────────────────────────────────────────────────
-
-/// Derive a 32-byte layer key from a KEM shared secret via HKDF-SHA256.
-fn pq_derive_layer_key(shared_secret: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(b"shieldnode-pq-sphinx-v1"), shared_secret);
-    let mut key = [0u8; 32];
-    hk.expand(b"layer-key", &mut key)
-        .expect("32 bytes is valid HKDF output");
-    key
-}
-
-/// Deterministic 12-byte nonce from hop index. Delegates to the shared
-/// nonce builder in aead to avoid duplicating the LE-padded layout.
-fn pq_nonce(hop_index: usize) -> [u8; 12] {
-    aead::nonce_from_index(hop_index as u64)
-}
-
-/// Compute HMAC-SHA256 over (hop_index || next_hop || kem_ciphertext || encrypted_blob).
-fn pq_compute_mac(
-    layer_key: &[u8; 32],
-    hop_index: u8,
-    next_hop: &[u8; 32],
-    kem_ciphertext: &[u8],
-    encrypted_blob: &[u8],
-) -> [u8; 32] {
-    let mut hmac = HmacSha256::new_from_slice(layer_key)
-        .expect("HMAC accepts any key length");
-    hmac.update(&[hop_index]);
-    hmac.update(next_hop);
-    hmac.update(kem_ciphertext);
-    hmac.update(encrypted_blob);
-    let result = hmac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
-}
+// ── PQ helpers (node-only: verify + serialize) ────────────────────────
 
 /// Verify HMAC-SHA256 over (hop_index || next_hop || kem_ciphertext || encrypted_blob).
 fn pq_verify_mac(
