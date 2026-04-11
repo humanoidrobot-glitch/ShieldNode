@@ -27,6 +27,21 @@ jobs:
         working-directory: contracts
         run: forge test -v
 
+  contracts-gas:
+    name: Solidity gas snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Gas snapshot
+        working-directory: contracts
+        run: forge snapshot
+
   node:
     name: Rust relay node
     runs-on: ubuntu-latest
@@ -35,6 +50,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -45,9 +62,9 @@ jobs:
             node/target
           key: ${{ runner.os }}-node-${{ hashFiles('node/Cargo.lock') }}
 
-      - name: Check
+      - name: Clippy
         working-directory: node
-        run: cargo check
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         working-directory: node
@@ -61,6 +78,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install system deps (Tauri + TUN)
         run: |
@@ -76,9 +95,9 @@ jobs:
             client/src-tauri/target
           key: ${{ runner.os }}-client-${{ hashFiles('client/src-tauri/Cargo.lock') }}
 
-      - name: Check
+      - name: Clippy
         working-directory: client/src-tauri
-        run: cargo check
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         working-directory: client/src-tauri
@@ -109,3 +128,27 @@ jobs:
       - name: Build
         working-directory: client
         run: pnpm run build
+
+      - name: Audit
+        working-directory: client
+        run: pnpm audit --audit-level=high || true
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit node crate
+        working-directory: node
+        run: cargo audit
+
+      - name: Audit client crate
+        working-directory: client/src-tauri
+        run: cargo audit
