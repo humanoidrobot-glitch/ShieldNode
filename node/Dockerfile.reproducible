@@ -27,10 +27,12 @@ WORKDIR /build
 COPY Cargo.toml ./
 COPY node/Cargo.toml node/Cargo.lock node/
 COPY packages/shieldnode-types/Cargo.toml packages/shieldnode-types/
+COPY client/src-tauri/Cargo.toml client/src-tauri/
 
 # Create dummy sources to build dependencies.
 RUN mkdir -p node/src && echo "fn main() {}" > node/src/main.rs
 RUN mkdir -p packages/shieldnode-types/src && echo "" > packages/shieldnode-types/src/lib.rs
+RUN mkdir -p client/src-tauri/src && echo "" > client/src-tauri/src/lib.rs
 RUN cd node && cargo build --release 2>/dev/null || true
 
 # Copy actual source.
