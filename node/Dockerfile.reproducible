@@ -6,7 +6,7 @@
 #
 # Usage (from repo root):
 #   docker build -f node/Dockerfile.reproducible -t shieldnode-build .
-#   docker run --rm shieldnode-build cat /build/node/target/release/shieldnode > shieldnode
+#   docker run --rm shieldnode-build cat /build/target/release/shieldnode > shieldnode
 #   sha256sum shieldnode
 
 FROM rust:1.91.0-bookworm AS builder
@@ -47,5 +47,5 @@ RUN cd node && cargo build --release
 
 # Output stage — minimal image with just the binary.
 FROM debian:bookworm-slim
-COPY --from=builder /build/node/target/release/shieldnode /shieldnode
+COPY --from=builder /build/target/release/shieldnode /shieldnode
 ENTRYPOINT ["/shieldnode"]
