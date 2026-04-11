@@ -13,6 +13,7 @@ mod settlement;
 mod sphinx;
 #[allow(dead_code)] // TODO: wired into forwarding loop when tunnel data path is active
 mod tun;
+mod tun_loop;
 mod tunnel;
 mod wallet;
 mod watchlist;
@@ -81,6 +82,10 @@ pub struct AppState {
     pub reputation: Arc<Mutex<reputation::ReputationCache>>,
     /// Cancel token for the cover traffic generator.
     pub cover_cancel: Mutex<Option<CancellationToken>>,
+    /// Cancel token for the TUN forwarding loops.
+    pub tun_cancel: Mutex<Option<CancellationToken>>,
+    /// Client TUN device (created on connect, dropped on disconnect).
+    pub client_tun: Arc<Mutex<Option<Arc<tun::ClientTun>>>>,
     /// Real packet counter (shared with cover traffic generator).
     pub real_packet_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Cached completion rates with TTL (avoids N+1 RPC on every fetch_nodes).
@@ -120,6 +125,8 @@ impl Default for AppState {
                 std::time::Instant::now() - std::time::Duration::from_secs(60),
             ))),
             cover_cancel: Mutex::new(None),
+            tun_cancel: Mutex::new(None),
+            client_tun: Arc::new(Mutex::new(None)),
             real_packet_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watchlists: Arc::new(Mutex::new(watchlist::WatchlistManager::new())),
             merkle_tree: Arc::new(Mutex::new(None)),
@@ -355,6 +362,41 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         }
     }
 
+    // Spawn TUN forwarding loops (outbound: TUN→Sphinx→entry, inbound: entry→peel→TUN).
+    if hop_count == 3 {
+        let circuit_for_tun = {
+            let circ = state.circuit.lock().map_err(|e| format!("lock error: {e}"))?;
+            circ.as_ref().cloned().ok_or("circuit state missing for TUN loop")?
+        };
+        match tun::ClientTun::create().await {
+            Ok(client_tun) => {
+                let tun_arc = Arc::new(client_tun);
+                {
+                    let mut ct = state.client_tun.lock().map_err(|e| format!("lock error: {e}"))?;
+                    *ct = Some(Arc::clone(&tun_arc));
+                }
+                let (bs, br) = {
+                    let tun_mgr = state.tunnel.lock().map_err(|e| format!("lock error: {e}"))?;
+                    (Arc::clone(&tun_mgr.bytes_sent), Arc::clone(&tun_mgr.bytes_received))
+                };
+                let cancel = tun_loop::spawn_tun_loops(
+                    tun_arc,
+                    circuit_for_tun,
+                    bs,
+                    br,
+                ).await?;
+                {
+                    let mut tc = state.tun_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+                    *tc = Some(cancel);
+                }
+                info!("TUN forwarding loops started");
+            }
+            Err(e) => {
+                warn!(error = %e, "TUN device creation failed — tunnel traffic will not be captured");
+            }
+        }
+    }
+
     // Spawn circuit health monitor.
     {
         let cancel = CancellationToken::new();
@@ -435,6 +477,18 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     stop_rotation(&state)?;
     stop_health_monitor(&state)?;
     stop_cover_traffic(&state)?;
+
+    // Stop TUN forwarding loops and drop the TUN device.
+    {
+        let mut tc = state.tun_cancel.lock().map_err(|e| format!("lock error: {e}"))?;
+        if let Some(cancel) = tc.take() {
+            cancel.cancel();
+        }
+    }
+    {
+        let mut ct = state.client_tun.lock().map_err(|e| format!("lock error: {e}"))?;
+        *ct = None;
+    }
 
     // 1. Get session state (session_id, bytes_used, deposit, deposit_id) and exit endpoint.
     let (session_id_str, bytes_used, exit_endpoint, deposit_wei, zk_deposit_id) = {

@@ -22,6 +22,18 @@ pub fn encrypt(
     cipher.encrypt(&nonce, plaintext)
 }
 
+/// Decrypt `ciphertext` with ChaCha20-Poly1305 using a 32-byte key and
+/// u64 nonce counter.
+pub fn decrypt(
+    key: &[u8; 32],
+    nonce_val: u64,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let nonce = Nonce::from(nonce_from_index(nonce_val));
+    cipher.decrypt(&nonce, ciphertext)
+}
+
 /// Encrypt using a raw 12-byte nonce.
 pub fn encrypt_with_nonce(
     key: &[u8; 32],
