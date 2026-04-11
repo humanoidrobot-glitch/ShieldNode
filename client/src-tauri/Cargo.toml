@@ -43,6 +43,7 @@ num-bigint = { version = "0.4", features = ["serde"] }
 # ZK witness construction (secp256k1 pubkey recovery + Poseidon hashing)
 k256 = { version = "0.13", features = ["ecdsa"] }
 light-poseidon = "0.4"
+zeroize = "1"
 
 # WireGuard tunnel + TUN device
 boringtun = "0.7"

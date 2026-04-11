@@ -3,6 +3,7 @@ use rand::rngs::OsRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 use crate::hop_codec;
 use crate::kex::{self, KeyExchange, X25519Kem};
@@ -132,6 +133,14 @@ pub struct CircuitState {
     pub entry: CircuitHop,
     pub relay: CircuitHop,
     pub exit: CircuitHop,
+}
+
+impl Drop for CircuitState {
+    fn drop(&mut self) {
+        self.entry.session_key.zeroize();
+        self.relay.session_key.zeroize();
+        self.exit.session_key.zeroize();
+    }
 }
 
 /// A sanitised view of a circuit hop for the frontend (no session key).
