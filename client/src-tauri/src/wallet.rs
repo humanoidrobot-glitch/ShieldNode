@@ -1,13 +1,18 @@
-use alloy::primitives::{Address, FixedBytes, U256};
+use std::sync::Arc;
+
+use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::sol;
 use alloy::sol_types::SolEvent;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 use alloy::network::EthereumWallet;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::chain::ISessionSettlement;
+use crate::config::WalletMode;
+use crate::wallet_bridge::{self, SigningRequest, SigningResponse, WalletBridge};
 
 sol! {
     #[sol(rpc)]
@@ -61,6 +66,62 @@ impl WalletConfig {
     }
 }
 
+/// Context for wallet operations — bundles mode, config, and bridge.
+pub struct WalletContext {
+    pub config: WalletConfig,
+    pub mode: WalletMode,
+    pub bridge: Arc<WalletBridge>,
+    /// Tauri app handle for emitting signing events to the frontend.
+    pub app_handle: Option<tauri::AppHandle>,
+}
+
+impl WalletContext {
+    /// Sign an EIP-712 digest. In Local mode, uses the private key directly.
+    /// In WalletConnect mode, delegates to the frontend via the bridge.
+    pub async fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, String> {
+        match self.mode {
+            WalletMode::Local => {
+                let signer = self.config.parse_signer()?;
+                let digest_b256 = alloy::primitives::B256::from(*digest);
+                let sig = signer.sign_hash(&digest_b256).await
+                    .map_err(|e| format!("local signing failed: {e}"))?;
+                Ok(sig.as_bytes().to_vec())
+            }
+            WalletMode::WalletConnect => {
+                let request_id = format!("sign-{}", rand::random::<u32>());
+                let request = SigningRequest::SignTypedData {
+                    digest: format!("0x{}", hex::encode(digest)),
+                    description: "Sign bandwidth receipt".to_string(),
+                    request_id: request_id.clone(),
+                };
+
+                // Emit the request to the frontend.
+                if let Some(ref handle) = self.app_handle {
+                    use tauri::Emitter;
+                    handle.emit("signing-request", &request)
+                        .map_err(|e| format!("failed to emit signing request: {e}"))?;
+                } else {
+                    return Err("WalletConnect mode requires an app handle".to_string());
+                }
+
+                // Wait for the frontend to resolve it.
+                let response = self.bridge.request_signing(120).await?;
+                match response {
+                    SigningResponse::Signature { signature, .. } => {
+                        let stripped = signature.strip_prefix("0x").unwrap_or(&signature);
+                        hex::decode(stripped)
+                            .map_err(|e| format!("invalid signature hex: {e}"))
+                    }
+                    SigningResponse::Error { message, .. } => {
+                        Err(format!("wallet rejected: {message}"))
+                    }
+                    _ => Err("unexpected response type from wallet".to_string()),
+                }
+            }
+        }
+    }
+}
+
 /// Open a 3-hop session on the SessionSettlement contract.
 /// For Phase 1 single-hop, the same node_id is used for all 3 slots.
 pub async fn open_session(
@@ -68,6 +129,9 @@ pub async fn open_session(
     node_id_hex: &str,
     deposit_wei: u128,
 ) -> Result<(String, u64), String> {
+    // Transaction signing always uses local key (WalletConnect tx signing
+    // requires the frontend to submit the tx, which is a separate flow).
+    // For now, open_session uses the local signer.
     let signer = wallet.parse_signer()?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(signer))
@@ -90,8 +154,6 @@ pub async fn open_session(
     let receipt = pending.get_receipt().await
         .map_err(|e| format!("failed to get tx receipt: {e}"))?;
 
-    // Parse session ID from SessionOpened event.
-    // Scan all logs for the matching event signature rather than assuming it's the first.
     let session_opened_sig = ISessionSettlement::SessionOpened::SIGNATURE_HASH;
     let session_id: u64 = receipt.inner.logs().iter()
         .find(|log| log.topics().first() == Some(&session_opened_sig))

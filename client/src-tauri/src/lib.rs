@@ -529,7 +529,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
 
     // 3. Read all config values in a single lock acquisition (avoids deadlock
     //    from wallet_config() re-locking, and reads settlement_mode atomically).
-    let (wallet_cfg, chain_id, settlement_mode) = {
+    let (wallet_cfg, chain_id, settlement_mode, wallet_mode) = {
         let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
         let wc = WalletConfig {
             rpc_url: cfg.rpc_url.clone(),
@@ -539,10 +539,16 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
             zk_settlement_address: None,
         };
         let mode = cfg.settlement_mode;
-        (wc, cfg.chain_id, mode)
+        let wm = cfg.wallet_mode;
+        (wc, cfg.chain_id, mode, wm)
     };
 
-    let signer = wallet_cfg.parse_signer()?;
+    let wallet_ctx = wallet::WalletContext {
+        config: wallet_cfg.clone(),
+        mode: wallet_mode,
+        bridge: Arc::clone(&state.wallet_bridge),
+        app_handle: None, // TODO: wire app handle for WalletConnect tx signing
+    };
 
     let settlement_address: Address = SETTLEMENT_ADDRESS
         .parse()
@@ -551,7 +557,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     let domain_sep = receipts::compute_domain_separator(chain_id, settlement_address);
     let digest =
         receipts::compute_receipt_digest(&domain_sep, session_id, bytes_used, timestamp);
-    let client_sig = receipts::sign_receipt(&digest, &signer).await?;
+    let client_sig = wallet_ctx.sign_digest(&digest.0).await?;
 
     info!(
         session_id,
@@ -597,7 +603,19 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     }
 
     // 7. Build ZK session data if settlement mode may use ZK.
-    let client_addr = alloy::signers::Signer::address(&signer);
+    let client_addr: Address = match wallet_mode {
+        config::WalletMode::WalletConnect => {
+            let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+            cfg.wc_address.as_deref()
+                .ok_or("WalletConnect address not set")?
+                .parse()
+                .map_err(|e| format!("invalid WC address: {e}"))?
+        }
+        config::WalletMode::Local => {
+            let signer = wallet_cfg.parse_signer()?;
+            alloy::signers::Signer::address(&signer)
+        }
+    };
     let zk_data = if settlement_mode != settlement::SettlementMode::Plaintext {
         build_zk_session_data(
             &state, session_id, bytes_used, timestamp, deposit_wei,
