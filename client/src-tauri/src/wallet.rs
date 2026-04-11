@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use alloy::primitives::{Address, Bytes, FixedBytes, U256};
+use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::sol;
 use alloy::sol_types::SolEvent;
 use alloy::providers::{Provider, ProviderBuilder};
@@ -122,26 +122,75 @@ impl WalletContext {
     }
 }
 
+impl WalletContext {
+    /// Send a transaction via the WalletConnect bridge (WC mode only).
+    /// Encodes the calldata, emits a signing request, and awaits the tx hash.
+    pub async fn send_transaction_wc(
+        &self,
+        to: Address,
+        calldata: &[u8],
+        value: U256,
+    ) -> Result<String, String> {
+        let request_id = format!("tx-{}", rand::random::<u32>());
+        let request = SigningRequest::SendTransaction {
+            to: format!("{to:?}"),
+            data: format!("0x{}", hex::encode(calldata)),
+            value: format!("{value:#x}"),
+            request_id: request_id.clone(),
+        };
+
+        if let Some(ref handle) = self.app_handle {
+            use tauri::Emitter;
+            handle.emit("signing-request", &request)
+                .map_err(|e| format!("failed to emit tx request: {e}"))?;
+        } else {
+            return Err("WalletConnect mode requires an app handle".to_string());
+        }
+
+        let response = self.bridge.request_signing(120).await?;
+        match response {
+            SigningResponse::TransactionSent { tx_hash, .. } => Ok(tx_hash),
+            SigningResponse::Error { message, .. } => {
+                Err(format!("wallet rejected transaction: {message}"))
+            }
+            _ => Err("unexpected response type from wallet".to_string()),
+        }
+    }
+
+    /// Check if this context is using WalletConnect mode.
+    pub fn is_walletconnect(&self) -> bool {
+        self.mode == WalletMode::WalletConnect
+    }
+}
+
 /// Open a 3-hop session on the SessionSettlement contract.
-/// For Phase 1 single-hop, the same node_id is used for all 3 slots.
 pub async fn open_session(
-    wallet: &WalletConfig,
+    ctx: &WalletContext,
     node_id_hex: &str,
     deposit_wei: u128,
 ) -> Result<(String, u64), String> {
-    // Transaction signing always uses local key (WalletConnect tx signing
-    // requires the frontend to submit the tx, which is a separate flow).
-    // For now, open_session uses the local signer.
-    let signer = wallet.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(wallet.parse_url()?);
-    let settlement = wallet.parse_settlement()?;
-
+    let settlement = ctx.config.parse_settlement()?;
     let node_id = parse_bytes32(node_id_hex)?;
     let node_ids: [FixedBytes<32>; 3] = [node_id, node_id, node_id];
 
     info!(node_id = node_id_hex, deposit_wei, "opening on-chain session");
+
+    if ctx.is_walletconnect() {
+        // WC mode: encode calldata, delegate to frontend.
+        use alloy::sol_types::SolCall;
+        let calldata = ISessionSettlement::openSessionCall { nodeIds: node_ids }.abi_encode();
+        let tx_hash = ctx.send_transaction_wc(settlement, &calldata, U256::from(deposit_wei)).await?;
+        // WC mode cannot easily poll for receipt from backend.
+        // Return tx_hash with session_id = 0 — frontend will parse the event.
+        warn!(tx = %tx_hash, "WC mode: session_id must be parsed by frontend");
+        return Ok((tx_hash, 0));
+    }
+
+    // Local mode: use Alloy contract API directly.
+    let signer = ctx.config.parse_signer()?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(ctx.config.parse_url()?);
 
     let contract = ISessionSettlement::new(settlement, &provider);
     let pending = contract.openSession(node_ids)
@@ -150,7 +199,6 @@ pub async fn open_session(
         .map_err(|e| format!("openSession tx failed: {e}"))?;
 
     let tx_hash = format!("{:?}", pending.tx_hash());
-
     let receipt = pending.get_receipt().await
         .map_err(|e| format!("failed to get tx receipt: {e}"))?;
 
@@ -158,39 +206,42 @@ pub async fn open_session(
     let session_id: u64 = receipt.inner.logs().iter()
         .find(|log| log.topics().first() == Some(&session_opened_sig))
         .and_then(|log| log.topics().get(1))
-        .map(|topic| {
-            u64::from_be_bytes(
-                topic.0[24..32].try_into().unwrap_or([0u8; 8])
-            )
-        })
+        .map(|topic| u64::from_be_bytes(topic.0[24..32].try_into().unwrap_or([0u8; 8])))
         .ok_or("no SessionOpened event found in openSession receipt")?;
 
     info!(tx = %tx_hash, session_id, "session opened on-chain");
     Ok((tx_hash, session_id))
 }
 
-/// Settle a session on-chain with a fully ABI-encoded, dual-signed receipt.
-///
-/// `receipt_data` should come from `receipts::encode_settlement_receipt()` and
-/// contains the sessionId, cumulativeBytes, timestamp, clientSig, and nodeSig.
+/// Settle a session on-chain with a dual-signed receipt.
 pub async fn settle_session(
-    wallet: &WalletConfig,
+    ctx: &WalletContext,
     session_id: u64,
     receipt_data: Vec<u8>,
 ) -> Result<String, String> {
-    let signer = wallet.parse_signer()?;
+    let settlement = ctx.config.parse_settlement()?;
+    info!(session_id, receipt_len = receipt_data.len(), "settling on-chain session");
+
+    if ctx.is_walletconnect() {
+        use alloy::sol_types::SolCall;
+        let calldata = ISessionSettlement::settleSessionCall {
+            sessionId: U256::from(session_id),
+            signedReceipt: receipt_data.into(),
+        }.abi_encode();
+        let tx_hash = ctx.send_transaction_wc(settlement, &calldata, U256::ZERO).await?;
+        info!(tx = %tx_hash, "session settled via WalletConnect");
+        return Ok(tx_hash);
+    }
+
+    let signer = ctx.config.parse_signer()?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(signer))
-        .connect_http(wallet.parse_url()?);
-    let settlement = wallet.parse_settlement()?;
-
-    info!(session_id, receipt_len = receipt_data.len(), "settling on-chain session with signed receipt");
+        .connect_http(ctx.config.parse_url()?);
 
     let contract = ISessionSettlement::new(settlement, &provider);
     let pending = contract
         .settleSession(U256::from(session_id), receipt_data.into())
-        .send()
-        .await
+        .send().await
         .map_err(|e| format!("settleSession tx failed: {e}"))?;
 
     let tx_hash = format!("{:?}", pending.tx_hash());
@@ -199,16 +250,25 @@ pub async fn settle_session(
 }
 
 /// Call ZKSettlement.deposit{value: amount}() and return the depositId.
-pub async fn zk_deposit(wallet: &WalletConfig, amount: u128) -> Result<[u8; 32], String> {
-    let signer = wallet.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(wallet.parse_url()?);
-
-    let zk_addr: Address = wallet.zk_settlement_address.as_deref()
-        .unwrap_or(&wallet.settlement_address)
+pub async fn zk_deposit(ctx: &WalletContext, amount: u128) -> Result<[u8; 32], String> {
+    let zk_addr: Address = ctx.config.zk_settlement_address.as_deref()
+        .unwrap_or(&ctx.config.settlement_address)
         .parse()
         .map_err(|e| format!("invalid ZK settlement address: {e}"))?;
+
+    if ctx.is_walletconnect() {
+        use alloy::sol_types::SolCall;
+        let calldata = IZKSettlement::depositCall {}.abi_encode();
+        let tx_hash = ctx.send_transaction_wc(zk_addr, &calldata, U256::from(amount)).await?;
+        // WC mode: return a dummy deposit_id. Frontend must parse the event.
+        warn!(tx = %tx_hash, "WC mode: deposit_id must be parsed by frontend");
+        return Ok([0u8; 32]);
+    }
+
+    let signer = ctx.config.parse_signer()?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(ctx.config.parse_url()?);
 
     let contract = IZKSettlement::new(zk_addr, &provider);
     let pending = contract.deposit()
@@ -219,15 +279,13 @@ pub async fn zk_deposit(wallet: &WalletConfig, amount: u128) -> Result<[u8; 32],
     let receipt = pending.get_receipt().await
         .map_err(|e| format!("failed to get deposit receipt: {e}"))?;
 
-    // Parse depositId from the DepositMade event (first indexed topic).
-    use alloy::sol_types::SolEvent;
     let deposit_id: [u8; 32] = receipt.inner.logs().iter()
         .find(|log| log.topics().first() == Some(&IZKSettlement::DepositMade::SIGNATURE_HASH))
         .and_then(|log| log.topics().get(1))
         .map(|topic| topic.0)
         .ok_or("no DepositMade event found in deposit receipt")?;
 
-    info!(deposit_id = %hex::encode(&deposit_id), "ZK deposit made");
+    info!(deposit_id = %hex::encode(deposit_id), "ZK deposit made");
     Ok(deposit_id)
 }
 
@@ -247,19 +305,14 @@ pub async fn read_registry_root(rpc_url: &str, zk_settlement_addr: &str) -> Resu
 
 /// Submit a ZK proof to ZKSettlement.settleWithProof.
 pub async fn settle_zk_session(
-    wallet: &WalletConfig,
+    ctx: &WalletContext,
     proof: &crate::zk_prove::ZkProof,
     data: &crate::zk_witness::ZkSessionData,
 ) -> Result<String, String> {
-    let signer = wallet.parse_signer()?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(wallet.parse_url()?);
-
-    // ZKSettlement is at a separate address from SessionSettlement.
-    // For now, use the same settlement_address config field.
-    // TODO: Add zk_settlement_address to WalletConfig when deployed separately.
-    let zk_settlement: Address = wallet.parse_settlement()?;
+    let zk_settlement: Address = ctx.config.zk_settlement_address.as_deref()
+        .unwrap_or(&ctx.config.settlement_address)
+        .parse()
+        .map_err(|e| format!("invalid ZK settlement address: {e}"))?;
 
     // Parse proof components into contract types.
     let proof_a: [U256; 2] = [
@@ -298,6 +351,24 @@ pub async fn settle_zk_session(
 
     info!("submitting ZK proof to ZKSettlement.settleWithProof");
 
+    if ctx.is_walletconnect() {
+        use alloy::sol_types::SolCall;
+        let calldata = IZKSettlement::settleWithProofCall {
+            proof_a, proof_b, proof_c, pubSignals: pub_signals,
+            nullifier, depositId: deposit_id,
+            entryAddr: entry_addr, relayAddr: relay_addr,
+            exitAddr: exit_addr, refundAddr: refund_addr,
+        }.abi_encode();
+        let tx_hash = ctx.send_transaction_wc(zk_settlement, &calldata, U256::ZERO).await?;
+        info!(tx = %tx_hash, "ZK session settled via WalletConnect");
+        return Ok(tx_hash);
+    }
+
+    let signer = ctx.config.parse_signer()?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(ctx.config.parse_url()?);
+
     let contract = IZKSettlement::new(zk_settlement, &provider);
     let pending = contract
         .settleWithProof(
@@ -305,8 +376,7 @@ pub async fn settle_zk_session(
             nullifier, deposit_id,
             entry_addr, relay_addr, exit_addr, refund_addr,
         )
-        .send()
-        .await
+        .send().await
         .map_err(|e| format!("settleWithProof tx failed: {e}"))?;
 
     let tx_hash = format!("{:?}", pending.tx_hash());

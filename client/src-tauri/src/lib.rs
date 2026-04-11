@@ -153,7 +153,24 @@ impl AppState {
             chain_id: cfg.chain_id,
             private_key: cfg.operator_private_key.clone(),
             settlement_address: SETTLEMENT_ADDRESS.to_string(),
-            zk_settlement_address: None, // TODO: add ZK_SETTLEMENT_ADDRESS constant
+            zk_settlement_address: None,
+        })
+    }
+
+    /// Build a WalletContext from the current state (wallet mode + bridge).
+    fn wallet_context(&self) -> Result<wallet::WalletContext, String> {
+        let cfg = self.config.lock().map_err(|e| format!("lock error: {e}"))?;
+        Ok(wallet::WalletContext {
+            config: WalletConfig {
+                rpc_url: cfg.rpc_url.clone(),
+                chain_id: cfg.chain_id,
+                private_key: cfg.operator_private_key.clone(),
+                settlement_address: SETTLEMENT_ADDRESS.to_string(),
+                zk_settlement_address: None,
+            },
+            mode: cfg.wallet_mode,
+            bridge: Arc::clone(&self.wallet_bridge),
+            app_handle: None, // Set by caller when Tauri AppHandle is available
         })
     }
 }
@@ -309,12 +326,12 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
         (node.node_id.clone(), 1u32)
     };
 
-    let wallet_cfg = state.wallet_config()?;
+    let wallet_ctx = state.wallet_context()?;
 
     // Open on-chain session (0.001 ETH deposit = minimum).
     let deposit_wei: u128 = 1_000_000_000_000_000; // 0.001 ETH
     let (tx_hash, session_id) = wallet::open_session(
-        &wallet_cfg,
+        &wallet_ctx,
         &entry_node_id,
         deposit_wei,
     ).await?;
@@ -325,7 +342,7 @@ async fn connect(state: State<'_, AppState>) -> Result<String, String> {
     let zk_deposit_id = {
         let mode = state.config.lock().map_err(|e| format!("lock error: {e}"))?.settlement_mode;
         if mode != settlement::SettlementMode::Plaintext {
-            match wallet::zk_deposit(&wallet_cfg, deposit_wei).await {
+            match wallet::zk_deposit(&wallet_ctx, deposit_wei).await {
                 Ok(id) => {
                     info!(deposit_id = %hex::encode(&id), "ZK deposit successful");
                     Some(id)
@@ -629,7 +646,7 @@ async fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
     // 8. Settle via configured mode (ZK or plaintext).
     let result = settlement::settle_session(
         settlement_mode,
-        &wallet_cfg,
+        &wallet_ctx,
         session_id,
         receipt_data,
         zk_data,
