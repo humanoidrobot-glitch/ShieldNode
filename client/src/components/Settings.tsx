@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useWallet } from "../hooks/useWallet";
 
 interface WatchlistSubscription {
   url: string;
@@ -123,6 +124,9 @@ function Toggle({
 }
 
 export function Settings() {
+  const { wallet, connectWallet, disconnectWallet } = useWallet();
+  const [walletError, setWalletError] = useState<string | null>(null);
+
   const [settings, setSettings] = useState<SettingsState>({
     rpcEndpoint: "",
     autoRotate: false,
@@ -180,6 +184,47 @@ export function Settings() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* ── Wallet ───────────────────────────────────── */}
+      <div>
+        <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+          Wallet
+        </label>
+        {wallet.connected ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-mono truncate" style={{ color: "var(--accent-green)" }}>
+              {wallet.address?.slice(0, 6)}...{wallet.address?.slice(-4)}
+            </span>
+            <button
+              onClick={() => { disconnectWallet(); setWalletError(null); }}
+              className="text-xs px-2 py-1 rounded cursor-pointer"
+              style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-secondary)" }}
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={async () => {
+              setWalletError(null);
+              try { await connectWallet(); }
+              catch (e: any) { setWalletError(e?.message || "connection failed"); }
+            }}
+            className="w-full px-3 py-2 rounded text-sm cursor-pointer"
+            style={{ background: "var(--bg-dark)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
+          >
+            Connect Wallet
+          </button>
+        )}
+        {walletError && (
+          <p className="text-xs mt-1" style={{ color: "var(--accent-red, #ef4444)" }}>{walletError}</p>
+        )}
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+          {wallet.mode === "walletconnect"
+            ? "Signing via connected wallet (MetaMask, etc.)"
+            : "Signing with local key from OS keychain"}
+        </p>
+      </div>
+
       <div>
         <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
           RPC Endpoint

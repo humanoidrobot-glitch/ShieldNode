@@ -16,6 +16,7 @@ mod tun;
 mod tun_loop;
 mod tunnel;
 mod wallet;
+mod wallet_bridge;
 mod watchlist;
 mod zk_merkle;
 mod zk_prove;
@@ -98,6 +99,8 @@ pub struct AppState {
     pub merkle_tree: Arc<Mutex<Option<zk_merkle::PoseidonMerkleTree>>>,
     /// Registry root read from ZKSettlement at connect time.
     pub zk_registry_root: Arc<Mutex<Option<String>>>,
+    /// Bridge for delegating signing requests to the frontend (WalletConnect).
+    pub wallet_bridge: Arc<wallet_bridge::WalletBridge>,
     /// Node secp256k1 pubkeys (node_id hex → 65-byte uncompressed key).
     pub node_pubkeys: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
@@ -131,6 +134,7 @@ impl Default for AppState {
             watchlists: Arc::new(Mutex::new(watchlist::WatchlistManager::new())),
             merkle_tree: Arc::new(Mutex::new(None)),
             zk_registry_root: Arc::new(Mutex::new(None)),
+            wallet_bridge: Arc::new(wallet_bridge::WalletBridge::new()),
             node_pubkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -1493,6 +1497,40 @@ fn mock_nodes() -> Vec<NodeInfo> {
     ]
 }
 
+// ── WalletConnect bridge commands ─────────────────────────────────────────
+
+/// Called by the frontend when a signing request is completed by the wallet.
+#[tauri::command]
+async fn resolve_signing(
+    state: tauri::State<'_, AppState>,
+    response: wallet_bridge::SigningResponse,
+) -> Result<(), String> {
+    state.wallet_bridge.resolve(response).await
+}
+
+/// Get the current wallet mode and connected address (if WalletConnect).
+#[tauri::command]
+fn get_wallet_mode(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+    Ok(serde_json::json!({
+        "mode": cfg.wallet_mode,
+        "address": cfg.wc_address,
+    }))
+}
+
+/// Set wallet mode and optionally the WalletConnect paired address.
+#[tauri::command]
+fn set_wallet_mode(
+    state: tauri::State<'_, AppState>,
+    mode: config::WalletMode,
+    address: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().map_err(|e| format!("lock error: {e}"))?;
+    cfg.wallet_mode = mode;
+    cfg.wc_address = address;
+    Ok(())
+}
+
 //Tauri entry point
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -1516,6 +1554,9 @@ pub fn run() {
             add_watchlist,
             remove_watchlist,
             send_packet,
+            resolve_signing,
+            get_wallet_mode,
+            set_wallet_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ShieldNode client");

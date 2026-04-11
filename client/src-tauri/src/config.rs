@@ -47,6 +47,31 @@ pub struct ClientConfig {
     /// Community watchlist subscriptions.
     #[serde(default)]
     pub watchlist_subscriptions: Vec<WatchlistSubscription>,
+
+    /// Wallet mode: "local" (OS keychain) or "walletconnect" (delegated signing).
+    #[serde(default)]
+    pub wallet_mode: WalletMode,
+
+    /// WalletConnect-paired address (hex, set by frontend on pairing).
+    #[serde(default)]
+    pub wc_address: Option<String>,
+}
+
+/// How the client signs transactions and EIP-712 messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WalletMode {
+    /// Sign locally using the operator private key from OS keychain.
+    Local,
+    /// Delegate signing to a connected wallet via WalletConnect v2.
+    #[serde(rename = "walletconnect")]
+    WalletConnect,
+}
+
+impl Default for WalletMode {
+    fn default() -> Self {
+        Self::Local
+    }
 }
 
 impl Default for ClientConfig {
@@ -64,6 +89,8 @@ impl Default for ClientConfig {
             preferred_nodes: Vec::new(),
             operator_private_key: None,
             watchlist_subscriptions: Vec::new(),
+            wallet_mode: WalletMode::default(),
+            wc_address: None,
         }
     }
 }
