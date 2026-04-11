@@ -5,9 +5,7 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 
 // Re-export shared EIP-712 functions.
-pub use shieldnode_types::eip712::{
-    compute_domain_separator, compute_receipt_digest, receipt_typehash,
-};
+pub use shieldnode_types::eip712::{compute_domain_separator, compute_receipt_digest};
 
 /// Sign an EIP-712 digest with the node operator's private key and return the
 /// 65-byte signature in `r || s || v` format expected by the settlement
