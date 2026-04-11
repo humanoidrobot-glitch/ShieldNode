@@ -18,17 +18,24 @@ circuits/circomlib/
 circuits/circom-ecdsa/
 circuits/keccak256-circom/
 circuits/build/
-circuits/trusted_setup/*.ptau
-circuits/trusted_setup/*.zkey
+# Trusted setup ceremony artifacts (dev and production) — NEVER commit
+# These include toxic waste (ptau contributions) and proving keys.
+# The Groth16Verifier.sol in contracts/src/ is auto-generated and safe to track.
+circuits/trusted_setup/
 
 # ZK-VM (RISC Zero build artifacts)
 zkvm/target/
 
-# Environment
+# Environment & secrets
 .env
 .env.*
 *.key
 *.pem
+
+# Node operator config (may contain private keys)
+node/config.toml
+node/my-config.toml
+node/data/
 
 # OS
 .DS_Store
