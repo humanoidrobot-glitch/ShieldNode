@@ -111,6 +111,7 @@ mod tests {
                 session_id: 1,
                 session_key: [0x42; 32],
                 hop_index: 0,
+                prev_hop: None,
             },
         );
         sessions.insert(
@@ -119,6 +120,7 @@ mod tests {
                 session_id: 2,
                 session_key: [0x43; 32],
                 hop_index: 1,
+                prev_hop: None,
             },
         );
 

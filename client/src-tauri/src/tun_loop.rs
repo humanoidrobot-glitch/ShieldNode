@@ -1,11 +1,11 @@
 //! Bidirectional TUN ↔ Sphinx packet forwarding loop.
 //!
 //! Outbound: TUN → Sphinx wrap (3 layers) → UDP to entry node.
-//! Inbound:  UDP from entry node → decrypt → TUN.
+//! Inbound:  UDP from entry node → peel 3 return-path layers → TUN.
 //!
-//! NOTE: The inbound path currently receives WireGuard-encapsulated traffic
-//! from the entry node (single-hop return). Full reverse-Sphinx onion routing
-//! for the return path is tracked as future work.
+//! The return path uses per-hop layered encryption. Each relay node wraps one
+//! layer using `encrypt(session_key, hop_index + RETURN_NONCE_OFFSET, payload)`.
+//! The client peels layers in order: entry, relay, exit.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,6 +17,11 @@ use tracing::{debug, error, info, warn};
 use crate::aead;
 use crate::circuit::CircuitState;
 use crate::tun::ClientTun;
+
+use shieldnode_types::aead::RETURN_NONCE_OFFSET;
+
+/// Direction bit matching the relay node's RETURN_DIRECTION_BIT.
+const RETURN_DIRECTION_BIT: u64 = 0x8000_0000_0000_0000;
 
 /// Build a Sphinx-wrapped relay frame for an outbound IP packet.
 ///
@@ -35,42 +40,25 @@ fn wrap_outbound(ip_packet: &[u8], circuit: &CircuitState) -> Result<Vec<u8>, St
     Ok(frame)
 }
 
-/// Decrypt an inbound return packet from the entry node.
+/// Peel return-path encryption layers from an inbound packet.
 ///
-/// The current return path is NOT reverse-Sphinx onion routed. The exit node
-/// WireGuard-encapsulates the response and relays it back through the circuit.
-/// Each hop strips one layer of encryption using its session key before forwarding.
-///
-/// The client receives a packet encrypted with the entry node's session key.
-/// We decrypt it to get the plaintext IP packet.
+/// Each relay node wraps one layer: exit encrypts first (outermost from
+/// client's perspective is entry's layer). Client decrypts in order:
+/// entry (nonce 0+OFFSET), relay (nonce 1+OFFSET), exit (nonce 2+OFFSET).
 fn decrypt_inbound(
     payload: &[u8],
     circuit: &CircuitState,
 ) -> Result<Vec<u8>, String> {
-    // Try decrypting with the entry key (the hop closest to the client).
-    // The return path encrypts: exit wraps, relay wraps, entry wraps.
-    // Client peels: entry layer, relay layer, exit layer.
-    let keys = [
-        (&circuit.entry.session_key, circuit.entry.hop_index),
-        (&circuit.relay.session_key, circuit.relay.hop_index),
-        (&circuit.exit.session_key, circuit.exit.hop_index),
+    let layers = [
+        (&circuit.entry.session_key, circuit.entry.hop_index + RETURN_NONCE_OFFSET),
+        (&circuit.relay.session_key, circuit.relay.hop_index + RETURN_NONCE_OFFSET),
+        (&circuit.exit.session_key, circuit.exit.hop_index + RETURN_NONCE_OFFSET),
     ];
 
     let mut current = payload.to_vec();
-    for (key, hop_index) in &keys {
-        match aead::decrypt(key, *hop_index, &current) {
-            Ok(decrypted) => {
-                current = decrypted;
-            }
-            Err(_) => {
-                // If structured peel fails, the packet may be raw/partially
-                // encrypted. Return what we have if it looks like an IP packet.
-                if current.len() >= 20 && (current[0] >> 4 == 4 || current[0] >> 4 == 6) {
-                    return Ok(current);
-                }
-                return Err(format!("decrypt failed at hop {hop_index}"));
-            }
-        }
+    for (key, nonce) in &layers {
+        current = aead::decrypt(key, *nonce, &current)
+            .map_err(|_| format!("return-path decrypt failed at nonce {nonce}"))?;
     }
 
     Ok(current)

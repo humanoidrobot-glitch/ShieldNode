@@ -1,5 +1,10 @@
 //! ChaCha20-Poly1305 AEAD encryption/decryption helpers.
 
+/// Nonce offset for return-path encryption. Added to hop_index to create
+/// a distinct nonce domain, preventing AEAD nonce reuse with the same
+/// session key used for forward-path traffic.
+pub const RETURN_NONCE_OFFSET: u64 = 0x8000_0000_0000_0000;
+
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,

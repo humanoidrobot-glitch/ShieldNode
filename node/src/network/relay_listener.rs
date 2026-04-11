@@ -15,8 +15,15 @@ use crate::tunnel::tun_device::TunDevice;
 
 use super::hop_codec;
 use super::link_padding::LinkPaddingManager;
+use super::nat_table::{self, NatTable};
 use super::receipts;
 use super::relay::{RelayService, SessionState};
+
+use shieldnode_types::aead::{self as shared_aead, RETURN_NONCE_OFFSET};
+
+/// Direction bit: MSB of session_id in wire framing.
+/// 0 = forward (client → exit), 1 = return (exit → client).
+const RETURN_DIRECTION_BIT: u64 = 0x8000_0000_0000_0000;
 
 /// Minimum packet size: 8-byte session_id + at least 1 byte of payload.
 const MIN_PACKET_SIZE: usize = 8 + 1;
@@ -69,6 +76,8 @@ pub struct RelayListener {
     /// Optional batch reorder buffer. When present, forwarded packets are
     /// enqueued here instead of sent directly. The batch_flush_loop sends them.
     batch_buffer: Option<Arc<Mutex<super::batch_reorder::BatchBuffer>>>,
+    /// NAT flow table for routing TUN responses to the correct session (exit mode only).
+    nat_table: std::sync::Mutex<NatTable>,
 }
 
 impl RelayListener {
@@ -125,146 +134,228 @@ impl RelayListener {
                 norm_seq: std::sync::Mutex::new(SequenceCounter::new()),
                 denorm: std::sync::Mutex::new(Denormalizer::new()),
                 batch_buffer,
+                nat_table: std::sync::Mutex::new(NatTable::new()),
             },
             socket_clone,
         ))
     }
 
     /// Main receive loop — runs until the task is cancelled.
+    ///
+    /// Uses `tokio::select!` to handle both incoming relay packets AND
+    /// TUN device responses (for the return path in exit mode).
     pub async fn run(&self) -> Result<()> {
-        let mut buf = vec![0u8; 65536];
+        let mut udp_buf = vec![0u8; 65536];
+        let mut tun_buf = vec![0u8; 65536];
 
         info!(has_tun = self.tun.is_some(), "relay listener running");
 
         loop {
-            let (n, peer_addr) = self.socket.recv_from(&mut buf).await?;
-
-            if n < MIN_PACKET_SIZE {
-                debug!(
-                    peer = %peer_addr,
-                    bytes = n,
-                    "relay packet too short, dropping"
-                );
-                continue;
-            }
-
-            // Try denormalization first: if the packet is exactly NORMALIZED_SIZE,
-            // it's a normalized frame. Otherwise treat as raw (control messages).
-            let packet_data: Vec<u8> = if n == NORMALIZED_SIZE {
-                let frame: [u8; NORMALIZED_SIZE] = buf[..n].try_into().unwrap();
-                let mut denorm = self.denorm.lock().expect("denorm lock");
-                match denorm.denormalize(&frame) {
-                    Some(reassembled) => reassembled,
-                    None => continue, // more fragments needed
+            tokio::select! {
+                // ── UDP relay packets (forward + return) ─────────────
+                result = self.socket.recv_from(&mut udp_buf) => {
+                    let (n, peer_addr) = result?;
+                    self.handle_udp_packet(&udp_buf[..n], peer_addr).await;
                 }
-            } else {
-                buf[..n].to_vec()
-            };
-            let packet = &packet_data[..];
 
-            if packet.len() < MIN_PACKET_SIZE {
-                debug!(peer = %peer_addr, bytes = packet.len(), "relay packet too short, dropping");
-                continue;
-            }
-
-            // Parse framing: [8-byte session_id][remaining bytes]
-            let session_id =
-                u64::from_be_bytes(packet[..8].try_into().expect("slice is exactly 8 bytes"));
-
-            // ── control channel (session_id == 0) ─────────────────────
-            if session_id == 0 {
-                let response = self.handle_control_message(&packet[8..], peer_addr).await;
-                if let Err(e) = self.socket.send_to(&response, peer_addr).await {
-                    warn!(
-                        peer = %peer_addr,
-                        error = %e,
-                        "failed to send control ACK"
-                    );
-                }
-                continue;
-            }
-
-            // ── data channel ──────────────────────────────────────────
-
-            if packet.len() < MIN_DATA_PACKET_SIZE {
-                debug!(peer = %peer_addr, bytes = packet.len(), "relay data packet too short, dropping");
-                continue;
-            }
-
-            let sphinx_bytes = &packet[8..];
-
-            let sphinx_packet = match SphinxPacket::from_bytes(sphinx_bytes) {
-                Ok(pkt) => pkt,
-                Err(e) => {
-                    warn!(
-                        peer = %peer_addr,
-                        session_id,
-                        error = %e,
-                        "failed to deserialize SphinxPacket"
-                    );
-                    continue;
-                }
-            };
-
-            debug!(
-                peer = %peer_addr,
-                session_id,
-                payload_len = sphinx_packet.payload.len(),
-                "received relay packet"
-            );
-
-            // Peel one layer (read lock — concurrent with other forwarders)
-            let (next_hop, inner_packet) = {
-                let svc = self.relay_service.read().await;
-                match svc.forward_packet(session_id, &sphinx_packet).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        warn!(
-                            session_id,
-                            error = %e,
-                            "forward_packet failed"
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            // Check if this is the exit (next_hop == all zeros)
-            if hop_codec::is_exit_hop(&next_hop) {
-                // Exit node: write decrypted payload to TUN
-                if let Some(ref tun) = self.tun {
-                    if let Err(e) = tun.write_packet(&inner_packet.payload).await {
-                        warn!(
-                            session_id,
-                            error = %e,
-                            "failed to write relay payload to TUN"
-                        );
+                // ── TUN responses (exit mode return path) ────────────
+                result = async {
+                    if let Some(ref tun) = self.tun {
+                        tun.read_packet(&mut tun_buf).await
                     } else {
-                        debug!(
-                            session_id,
-                            payload_len = inner_packet.payload.len(),
-                            "exit: wrote relay payload to TUN"
-                        );
+                        std::future::pending::<Result<usize, crate::tunnel::tun_device::TunError>>().await
                     }
-                } else {
-                    warn!(
-                        session_id,
-                        "exit relay packet arrived but no TUN device available"
-                    );
-                }
-            } else {
-                // Forward to next hop
-                if let Err(e) = self
-                    .forward_to_next_hop(&next_hop, session_id, &inner_packet)
-                    .await
-                {
-                    warn!(
-                        session_id,
-                        error = %e,
-                        "failed to forward to next hop"
-                    );
+                } => {
+                    match result {
+                        Ok(n) if n > 0 => {
+                            self.handle_tun_response(&tun_buf[..n]).await;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "TUN read error in relay listener");
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /// Handle an incoming UDP packet (forward-path, return-path, or control).
+    async fn handle_udp_packet(&self, raw: &[u8], peer_addr: SocketAddr) {
+        if raw.len() < MIN_PACKET_SIZE {
+            return;
+        }
+
+        // Denormalize if needed.
+        let packet_data: Vec<u8> = if raw.len() == NORMALIZED_SIZE {
+            let frame: [u8; NORMALIZED_SIZE] = raw.try_into().unwrap();
+            let mut denorm = self.denorm.lock().expect("denorm lock");
+            match denorm.denormalize(&frame) {
+                Some(reassembled) => reassembled,
+                None => return, // more fragments needed
+            }
+        } else {
+            raw.to_vec()
+        };
+
+        if packet_data.len() < MIN_PACKET_SIZE {
+            return;
+        }
+
+        let raw_session_id =
+            u64::from_be_bytes(packet_data[..8].try_into().expect("8 bytes"));
+
+        // ── control channel (session_id == 0) ─────────────────────
+        if raw_session_id == 0 {
+            let response = self.handle_control_message(&packet_data[8..], peer_addr).await;
+            if let Err(e) = self.socket.send_to(&response, peer_addr).await {
+                warn!(peer = %peer_addr, error = %e, "failed to send control ACK");
+            }
+            return;
+        }
+
+        // Check direction bit.
+        let is_return = (raw_session_id & RETURN_DIRECTION_BIT) != 0;
+        let session_id = raw_session_id & !RETURN_DIRECTION_BIT;
+
+        if is_return {
+            self.handle_return_packet(session_id, &packet_data[8..], peer_addr).await;
+        } else {
+            self.handle_forward_packet(session_id, &packet_data[8..], peer_addr).await;
+        }
+    }
+
+    /// Handle a forward-path data packet: peel Sphinx layer, forward or write to TUN.
+    async fn handle_forward_packet(&self, session_id: u64, sphinx_bytes: &[u8], peer_addr: SocketAddr) {
+        if sphinx_bytes.len() < 68 {
+            return;
+        }
+
+        let sphinx_packet = match SphinxPacket::from_bytes(sphinx_bytes) {
+            Ok(pkt) => pkt,
+            Err(e) => {
+                warn!(session_id, error = %e, "failed to deserialize SphinxPacket");
+                return;
+            }
+        };
+
+        // Record prev_hop for return path routing.
+        {
+            let mut svc = self.relay_service.write().await;
+            svc.set_prev_hop(session_id, peer_addr);
+        }
+
+        // Peel one layer.
+        let (next_hop, inner_packet) = {
+            let svc = self.relay_service.read().await;
+            match svc.forward_packet(session_id, &sphinx_packet).await {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(session_id, error = %e, "forward_packet failed");
+                    return;
+                }
+            }
+        };
+
+        if hop_codec::is_exit_hop(&next_hop) {
+            // Exit node: record NAT entry and write to TUN.
+            if let Some(flow) = nat_table::extract_outbound_flow(&inner_packet.payload) {
+                let mut nat = self.nat_table.lock().expect("nat_table lock");
+                nat.insert(flow, session_id);
+            }
+            if let Some(ref tun) = self.tun {
+                if let Err(e) = tun.write_packet(&inner_packet.payload).await {
+                    warn!(session_id, error = %e, "failed to write to TUN");
+                }
+            }
+        } else {
+            if let Err(e) = self.forward_to_next_hop(&next_hop, session_id, &inner_packet).await {
+                warn!(session_id, error = %e, "failed to forward to next hop");
+            }
+        }
+    }
+
+    /// Handle a return-path packet: wrap one encryption layer and forward to prev_hop.
+    async fn handle_return_packet(&self, session_id: u64, payload: &[u8], _from: SocketAddr) {
+        let (prev_hop, session_key, hop_index) = {
+            let svc = self.relay_service.read().await;
+            match svc.get_session(session_id) {
+                Some(s) => match s.prev_hop {
+                    Some(addr) => (addr, s.session_key, s.hop_index),
+                    None => {
+                        warn!(session_id, "return packet but no prev_hop recorded");
+                        return;
+                    }
+                },
+                None => {
+                    debug!(session_id, "return packet for unknown session");
+                    return;
+                }
+            }
+        };
+
+        let return_nonce = hop_index + RETURN_NONCE_OFFSET;
+        let wrapped = match shared_aead::encrypt(&session_key, return_nonce, payload) {
+            Ok(ct) => ct,
+            Err(e) => {
+                warn!(session_id, error = ?e, "return-path encrypt failed");
+                return;
+            }
+        };
+
+        let mut frame = Vec::with_capacity(8 + wrapped.len());
+        frame.extend_from_slice(&(session_id | RETURN_DIRECTION_BIT).to_be_bytes());
+        frame.extend_from_slice(&wrapped);
+
+        if let Err(e) = self.socket.send_to(&frame, prev_hop).await {
+            warn!(session_id, prev_hop = %prev_hop, error = %e, "failed to send return packet");
+        }
+    }
+
+    /// Handle a TUN response: look up session via NAT table, wrap, and send back.
+    async fn handle_tun_response(&self, ip_packet: &[u8]) {
+        let flow = match nat_table::extract_inbound_flow(ip_packet) {
+            Some(f) => f,
+            None => return,
+        };
+
+        let session_id = {
+            let nat = self.nat_table.lock().expect("nat_table lock");
+            match nat.lookup(&flow) {
+                Some(id) => id,
+                None => {
+                    debug!("TUN response has no NAT mapping, dropping");
+                    return;
+                }
+            }
+        };
+
+        let (prev_hop, session_key, hop_index) = {
+            let svc = self.relay_service.read().await;
+            match svc.get_session(session_id) {
+                Some(s) => match s.prev_hop {
+                    Some(addr) => (addr, s.session_key, s.hop_index),
+                    None => return,
+                },
+                None => return,
+            }
+        };
+
+        // Encrypt with this hop's return-path nonce.
+        let return_nonce = hop_index + RETURN_NONCE_OFFSET;
+        let wrapped = match shared_aead::encrypt(&session_key, return_nonce, ip_packet) {
+            Ok(ct) => ct,
+            Err(_) => return,
+        };
+
+        let mut frame = Vec::with_capacity(8 + wrapped.len());
+        frame.extend_from_slice(&(session_id | RETURN_DIRECTION_BIT).to_be_bytes());
+        frame.extend_from_slice(&wrapped);
+
+        if let Err(e) = self.socket.send_to(&frame, prev_hop).await {
+            warn!(session_id, error = %e, "failed to send TUN return packet");
+        } else {
+            debug!(session_id, bytes = ip_packet.len(), "return: TUN → prev_hop");
         }
     }
 
@@ -308,6 +399,7 @@ impl RelayListener {
                     session_id: real_session_id,
                     session_key,
                     hop_index,
+                    prev_hop: None,
                 };
 
                 let accepted = {

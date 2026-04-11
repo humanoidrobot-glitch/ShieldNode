@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -31,6 +32,9 @@ pub struct SessionState {
     pub session_id: u64,
     pub session_key: [u8; 32],
     pub hop_index: u64,
+    /// Address of the previous hop (toward the client). Learned from the
+    /// source address of the first forward-path data packet for this session.
+    pub prev_hop: Option<SocketAddr>,
 }
 
 impl Drop for SessionState {
@@ -115,6 +119,21 @@ impl RelayService {
         info!(session_id, incoming_size, outgoing_size, "packet forwarded");
 
         Ok((next_hop, inner))
+    }
+
+    /// Record the source address of a forward-path packet as the previous hop.
+    /// Only sets it on the first call (subsequent calls are no-ops).
+    pub fn set_prev_hop(&mut self, session_id: u64, addr: SocketAddr) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            if session.prev_hop.is_none() {
+                session.prev_hop = Some(addr);
+            }
+        }
+    }
+
+    /// Look up a session by ID.
+    pub fn get_session(&self, session_id: u64) -> Option<&SessionState> {
+        self.sessions.get(&session_id)
     }
 
     /// Check whether a session with the given ID exists.

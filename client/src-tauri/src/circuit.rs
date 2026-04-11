@@ -230,7 +230,8 @@ pub fn build_circuit(nodes: &[NodeInfo; 3]) -> Result<CircuitState, String> {
         hk.expand(b"session-key", &mut session_key)
             .map_err(|e| format!("HKDF expand failed for hop {i}: {e}"))?;
 
-        let session_id: u64 = OsRng.gen();
+        // Mask MSB to 0 — the MSB is reserved as the return-path direction bit.
+        let session_id: u64 = OsRng.gen::<u64>() & 0x7FFF_FFFF_FFFF_FFFF;
 
         hops.push(CircuitHop {
             node_id: node.node_id.clone(),
