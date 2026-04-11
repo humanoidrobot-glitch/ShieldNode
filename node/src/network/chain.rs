@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{Address, FixedBytes, U256},
+    primitives::{Address, Bytes, FixedBytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
@@ -12,18 +12,23 @@ use tracing::info;
 sol! {
     #[sol(rpc)]
     contract NodeRegistry {
-        function register(bytes32 nodeId, bytes32 publicKey, string endpoint) external payable;
+        function register(bytes32 nodeId, bytes32 publicKey, string endpoint, bytes secp256k1Key) external payable;
         function heartbeat(bytes32 nodeId) external;
         function updateEndpoint(bytes32 nodeId, string newEndpoint) external;
 
         struct NodeInfo {
-            bytes32 nodeId;
-            bytes32 publicKey;
             address owner;
-            string endpoint;
+            bytes32 publicKey;
+            string  endpoint;
             uint256 stake;
+            uint256 registeredAt;
             uint256 lastHeartbeat;
-            bool active;
+            uint256 slashCount;
+            bool    isActive;
+            uint256 pricePerByte;
+            bytes32 commitment;
+            bytes32 secp256k1X;
+            bytes32 secp256k1Y;
         }
 
         function getNode(bytes32 nodeId) external view returns (NodeInfo memory);
@@ -101,12 +106,16 @@ impl ChainService {
     /// Register this node on-chain.
     ///
     /// Sends `stake_wei` as `msg.value` alongside the call.
+    /// `secp256k1_pubkey` is the 64-byte uncompressed public key (x || y)
+    /// derived from the operator's private key — the contract verifies
+    /// `keccak256(key) == msg.sender`.
     /// Returns the transaction hash as a hex string.
     pub async fn register(
         &self,
         public_key: [u8; 32],
         endpoint: &str,
         stake_wei: u128,
+        secp256k1_pubkey: &[u8; 64],
     ) -> Result<String, ChainError> {
         let provider = self.build_provider()?;
 
@@ -114,6 +123,7 @@ impl ChainService {
 
         let node_id = FixedBytes::from(self.node_id);
         let pub_key = FixedBytes::from(public_key);
+        let secp_key = Bytes::from(secp256k1_pubkey.to_vec());
 
         info!(
             node_id = %node_id,
@@ -123,7 +133,7 @@ impl ChainService {
         );
 
         let call = contract
-            .register(node_id, pub_key, endpoint.to_string())
+            .register(node_id, pub_key, endpoint.to_string(), secp_key)
             .value(U256::from(stake_wei));
 
         let pending = call

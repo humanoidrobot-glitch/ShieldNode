@@ -66,6 +66,23 @@ fn parse_hex_private_key(hex_str: &str) -> Result<[u8; 32]> {
     Ok(arr)
 }
 
+/// Derive the uncompressed secp256k1 public key (64 bytes: x || y) from a
+/// 32-byte private key.  The contract stores these coordinates and verifies
+/// that `keccak256(x || y)` matches `msg.sender`.
+fn derive_secp256k1_pubkey(private_key: &[u8; 32]) -> Result<[u8; 64]> {
+    use k256::ecdsa::SigningKey;
+
+    let signing_key =
+        SigningKey::from_bytes(private_key.into()).context("invalid secp256k1 private key")?;
+    let verifying_key = signing_key.verifying_key();
+    let encoded = verifying_key.to_encoded_point(false); // uncompressed (0x04 || x || y)
+    let uncompressed = encoded.as_bytes();
+    // Strip the 0x04 prefix — contract expects raw 64-byte x || y.
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&uncompressed[1..65]);
+    Ok(out)
+}
+
 /// Build a `ChainService` from configuration values and the node's public key.
 fn build_chain_service(cfg: &config::NodeConfig, node_id: [u8; 32]) -> Result<ChainService> {
     let operator_key_hex = cfg
@@ -151,10 +168,33 @@ async fn main() -> Result<()> {
     // ── --register: on-chain registration then exit ───────────────────
 
     if cli.register {
-        let chain =
-            build_chain_service(&cfg, node_id).context("building ChainService for registration")?;
+        // Parse the operator private key once and reuse for both
+        // ChainService construction and secp256k1 pubkey derivation.
+        let operator_key_hex = cfg
+            .operator_private_key
+            .as_deref()
+            .context("operator_private_key required for registration")?;
+        let operator_key = parse_hex_private_key(operator_key_hex)?;
+
+        let registry_addr: Address = cfg
+            .stake_address
+            .as_deref()
+            .unwrap_or(DEFAULT_REGISTRY_ADDRESS)
+            .parse()
+            .context("invalid registry/stake_address")?;
+
+        let chain = ChainService::new(
+            cfg.ethereum_rpc.clone(),
+            registry_addr,
+            node_id,
+            operator_key,
+        );
 
         let endpoint = format!("0.0.0.0:{}", cfg.listen_port);
+
+        // Derive the secp256k1 public key from the already-parsed operator key.
+        // The contract verifies keccak256(secp256k1Key) == msg.sender.
+        let secp_pubkey = derive_secp256k1_pubkey(&operator_key)?;
 
         info!(
             endpoint = %endpoint,
@@ -163,7 +203,7 @@ async fn main() -> Result<()> {
         );
 
         let tx_hash = chain
-            .register(public_key_bytes, &endpoint, DEFAULT_STAKE_WEI)
+            .register(public_key_bytes, &endpoint, DEFAULT_STAKE_WEI, &secp_pubkey)
             .await
             .context("on-chain registration failed")?;
 
