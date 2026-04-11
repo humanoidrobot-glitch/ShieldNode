@@ -64,7 +64,7 @@ Uptime failures are ambiguous — power outages, ISP issues, and hardware failur
 
 ---
 
-## Phase 4: Economic Hardening + ZK Settlement Privacy `← next`
+## Phase 4: Economic Hardening + ZK Settlement Privacy -- COMPLETE
 
 Make the economics self-sustaining and add privacy to on-chain settlements.
 
@@ -116,7 +116,7 @@ The ZK receipt circuit should be designed to verify ML-DSA (Dilithium) signature
 
 ---
 
-## Phase 5: Mainnet Launch
+## Phase 5: Mainnet Launch `← current`
 
 Security audits, hardening, and public deployment.
 
@@ -131,8 +131,25 @@ Security audits, hardening, and public deployment.
 - [x] ZK settlement as default for privacy-conscious users, plaintext settlement as fallback
 - [ ] Documentation site: how to run a node, use the client, verify the contracts
 - [x] **Operator security guide** — Recommend smart contract wallets (Safe) with PQ-upgradeable signature verification for node staking keys, rather than raw EOAs. Document Ethereum's PQ migration path (account abstraction) so operators are prepared
-- [x] **Anti-griefing testing** — Adversarial test suite: simulate nodes that accept circuits then drop after N seconds, nodes that throttle bandwidth to near-zero, and nodes that selectively drop traffic to specific destinations. Verify the circuit health monitor rebuilds within 20s, completion scoring deprioritizes bad nodes within 3 sessions, and the low-bandwidth flag triggers within 24 hours. Run as part of CI on every PR touching client circuit or scoring code.
+- [x] **Anti-griefing testing** — Adversarial test suite
 - [ ] At least 10 independently operated nodes live before public client release
+
+### Hardening (April 2026)
+
+- [x] **Kill switch crash recovery** — Sentinel file detects unclean shutdown and deactivates stale firewall rules on restart
+- [x] **DNS leak fix** — Removed port 53 exception from kill switch; DNS routes through TUN device
+- [x] **Circuit key zeroization** — `CircuitState` implements `Drop` with `zeroize` for all session keys
+- [x] **ChainService key zeroization** — Operator private key zeroized on drop
+- [x] **Production unwrap() removal** — Replaced hot-path unwrap() with documented expect()
+- [x] **UPnP/IGD NAT traversal** — Automatic port mapping on startup via `igd-next`
+- [x] **TUN device integration** — Bidirectional TUN ↔ Sphinx forwarding loops in client
+- [x] **Node ABI alignment** — Registration ABI updated for secp256k1 key storage
+- [x] **WalletConnect bridge** — Backend→frontend signing delegation for external wallet support
+- [x] **Shared types crate** — `packages/shieldnode-types` eliminates code duplication between node and client (AEAD, KDF, EIP-712, hop codec, Sphinx MAC)
+- [x] **CI hardening** — Clippy linting, cargo-audit, pnpm audit, gas snapshots
+- [x] **Sphinx MAC replay protection** — hop_index bound into MAC computation
+- [x] **OS keychain key storage** — Private keys stored in platform keychain, not plaintext JSON
+- [x] **Ed25519 watchlist verification** — Community watchlists cryptographically verified
 
 ### Anti-Logging: Hardware & Environmental Hardening
 

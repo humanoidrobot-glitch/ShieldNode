@@ -51,7 +51,7 @@ The node binary that independent operators run. Located in `node/`.
 | `tunnel/wireguard.rs` | WireGuard tunnel via boringtun (userspace, cross-platform) |
 | `tunnel/circuit.rs` | Circuit lifecycle, pure `process_relay_packet` function (ZK-provable) |
 | `crypto/traits.rs` | `KeyExchange` and `Signer` trait abstractions for cryptographic agility |
-| `crypto/aead.rs` | Shared ChaCha20-Poly1305 encrypt/decrypt helpers |
+| `crypto/aead.rs` | Re-exports shared ChaCha20-Poly1305 helpers from `shieldnode-types` |
 | `crypto/sphinx.rs` | Sphinx onion packet creation and layer peeling |
 | `crypto/keys.rs` | X25519 + ML-KEM-768 hybrid key exchange (post-quantum) |
 | `crypto/noise.rs` | Noise NK-pattern handshake, HKDF-SHA256 key derivation |
@@ -95,7 +95,7 @@ ZK-private alternative to SessionSettlement. Clients submit a Groth16 proof that
 | Heartbeat | ~50,000 | ~$0.02 |
 | Open session | ~100,000 | ~$0.04 |
 | Settle session | ~120,000 | ~$0.05 |
-| ZK settle session | ~250,000 | ~$0.10 |
+| ZK settle session | ~300,000 | ~$0.12 |
 | Slash proposal | ~200,000 | ~$0.08 |
 
 ### Client Application (Tauri)
@@ -108,72 +108,83 @@ The client reads the node registry directly from L1, scores nodes by uptime/stak
 
 ```
 shieldnode/
+├── Cargo.toml                     # Workspace: node, client, packages/shieldnode-types
+├── packages/
+│   └── shieldnode-types/          # Shared crate (AEAD, KDF, EIP-712, hop codec, Sphinx MAC)
 ├── node/                          # Rust relay node
-│   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs                # CLI, config loading, metrics server
-│       ├── config.rs              # TOML config with defaults
+│       ├── main.rs                # CLI, config, metrics server, UPnP
 │       ├── tunnel/
 │       │   ├── wireguard.rs       # boringtun WireGuard integration
-│       │   └── circuit.rs         # Circuit management, relay packet processing
+│       │   ├── listener.rs        # Bidirectional TUN + WireGuard listener
+│       │   ├── tun_device.rs      # TUN virtual network interface
+│       │   ├── packet_norm.rs     # Fixed-size packet normalization (1280 bytes)
+│       │   └── circuit.rs         # Circuit lifecycle, pure relay function
 │       ├── crypto/
 │       │   ├── traits.rs          # KeyExchange, Signer trait abstractions
-│       │   ├── aead.rs            # Shared ChaCha20-Poly1305 helpers
-│       │   ├── sphinx.rs          # Sphinx onion packet format
+│       │   ├── sphinx.rs          # Sphinx onion packets (classic + PQ)
 │       │   ├── keys.rs            # X25519 + ML-KEM-768 hybrid key exchange
-│       │   └── noise.rs           # Noise NK handshake, HKDF-SHA256
+│       │   ├── ratchet.rs         # Micro-ratcheting session keys (30s/10MB)
+│       │   └── noise.rs           # Noise NK handshake
 │       ├── network/
-│       │   ├── discovery.rs       # libp2p Kademlia + Gossipsub
+│       │   ├── relay_listener.rs  # UDP relay with session setup/teardown/receipt co-signing
+│       │   ├── relay.rs           # Session management, packet forwarding
+│       │   ├── discovery.rs       # libp2p Kademlia + Gossipsub + mDNS
 │       │   ├── heartbeat.rs       # On-chain heartbeat service
-│       │   └── relay.rs           # Packet forwarding, bandwidth tracking
+│       │   ├── nat.rs             # UPnP/IGD port mapping for NAT traversal
+│       │   ├── link_padding.rs    # Constant-rate inter-node padding
+│       │   └── batch_reorder.rs   # Packet batching and shuffling
 │       └── metrics/
 │           ├── bandwidth.rs       # Per-session byte counters
-│           └── api.rs             # axum HTTP metrics API
-├── contracts/                     # Solidity (Foundry)
-│   ├── foundry.toml
+│           └── api.rs             # axum HTTP API: /health, /metrics, /sessions
+├── contracts/                     # Solidity (Foundry), 157+ tests
 │   ├── src/
-│   │   ├── NodeRegistry.sol
-│   │   ├── SessionSettlement.sol
-│   │   ├── ZKSettlement.sol
-│   │   ├── SlashingOracle.sol
-│   │   ├── Treasury.sol
-│   │   └── interfaces/
-│   │       ├── INodeRegistry.sol
-│   │       ├── ISessionSettlement.sol
-│   │       └── ISlashingOracle.sol
-│   ├── test/
-│   │   ├── NodeRegistry.t.sol
-│   │   ├── SessionSettlement.t.sol
-│   │   ├── ZKSettlement.t.sol
-│   │   └── SlashingOracle.t.sol
-│   └── script/
-│       └── Deploy.s.sol
+│   │   ├── NodeRegistry.sol       # Staking, heartbeats, secp256k1 key storage
+│   │   ├── SessionSettlement.sol  # EIP-712 receipts, 25/25/50 split, cleanup
+│   │   ├── ZKSettlement.sol       # Groth16 proof verification, Poseidon commitments
+│   │   ├── SlashingOracle.sol     # Progressive slashing, evidence verification
+│   │   ├── ChallengeManager.sol   # Bonded challenge-response protocol
+│   │   ├── CommitmentTree.sol     # Poseidon Merkle tree for ZK eligibility
+│   │   ├── EligibilityVerifier.sol
+│   │   └── Treasury.sol
+│   ├── test/                      # 18 test files + helpers + invariant fuzz
+│   └── script/Deploy.s.sol       # Nonce-aware deployment with ownership transfer
 ├── circuits/                      # ZK circuits (circom + Groth16)
-│   ├── bandwidth_receipt/
-│   │   └── circuit.circom         # Bandwidth receipt verification circuit
-│   ├── scripts/                   # compile, prove, verify
-│   └── trusted_setup/             # Groth16 ceremony artifacts
+│   ├── bandwidth_receipt/         # ~3.5M constraints, dual ECDSA + Poseidon
+│   ├── node_eligibility/          # ~12K constraints, anonymous eligibility
+│   ├── lib/merkle.circom          # Shared Merkle proof template
+│   ├── scripts/                   # compile, setup, prove, verify
+│   └── trusted_setup/
 ├── client/                        # Tauri (Rust + React) desktop client
 │   ├── src-tauri/src/
-│   │   ├── main.rs
-│   │   ├── tunnel.rs              # Core tunnel management
-│   │   ├── circuit.rs             # Circuit construction, node selection, health monitor
-│   │   ├── wallet.rs              # Transaction signing
-│   │   ├── receipts.rs            # EIP-712 bandwidth receipt co-signing
-│   │   ├── zk_prove.rs            # Client-side Groth16 proof generation
-│   │   └── config.rs
+│   │   ├── tunnel.rs              # WireGuard tunnel (boringtun)
+│   │   ├── tun_loop.rs            # Bidirectional TUN ↔ Sphinx forwarding
+│   │   ├── tun.rs                 # TUN device creation
+│   │   ├── circuit.rs             # 3-hop selection, scoring, key zeroization
+│   │   ├── wallet.rs              # Transaction signing (local + WalletConnect)
+│   │   ├── wallet_bridge.rs       # WalletConnect signing delegation bridge
+│   │   ├── settlement.rs          # ZK or plaintext settlement dispatch
+│   │   ├── zk_prove.rs            # Groth16 proof generation (ark-circom)
+│   │   ├── kill_switch.rs         # OS-level firewall (Windows/Linux/macOS)
+│   │   ├── health_monitor.rs      # Circuit degradation detection
+│   │   ├── cover_traffic.rs       # Timing-attack mitigation
+│   │   └── config.rs              # Settings, keychain, WalletConnect mode
 │   └── src/
-│       ├── components/            # ConnectToggle, CircuitMap, NodeBrowser, etc.
-│       ├── hooks/                 # useCircuit, useNodes, useSession, useGas
+│       ├── components/            # ConnectToggle, CircuitMap, NodeBrowser, Settings
+│       ├── hooks/                 # useCircuit, useNodes, useSession, useGas, useWallet
 │       └── lib/                   # contracts.ts, scoring.ts, eip712.ts
-├── docs/                          # Architecture and design docs
-│   ├── ARCHITECTURE.md
-│   ├── PROTOCOL.md
-│   ├── ECONOMICS.md
-│   ├── ZK-DESIGN.md
-│   ├── THREAT-MODEL.md
-│   └── anti-logging-research.md   # Comprehensive anti-logging analysis with citations
-└── CLAUDE.md                      # Full spec and design decisions
+├── docs/
+│   ├── OPERATOR-GUIDE.md          # Node setup, config, economics
+│   ├── OPERATOR-SECURITY.md       # Key management, Safe wallets, PQ migration
+│   ├── THREAT-MODEL.md            # Adversary model, traffic morphing research
+│   ├── OWNERSHIP-RENOUNCEMENT.md  # Trust minimization roadmap (6 phases)
+│   ├── TECH-DEBT.md               # Known deferred improvements
+│   ├── anti-logging-research.md   # TEE, cover traffic, ZK-VM analysis
+│   └── PROJECT-REVIEW-2026-04-09.md
+├── .github/workflows/
+│   ├── ci.yml                     # Contracts + node + client + frontend + audit
+│   └── reproducible-build.yml     # Deterministic binary for TEE attestation
+└── CLAUDE.md
 ```
 
 ## Getting Started
@@ -222,11 +233,11 @@ forge build
 forge test -vv
 ```
 
-All tests should pass:
-- 12 NodeRegistry tests (registration, heartbeats, staking, slashing, pagination)
-- 7 SessionSettlement tests (open/settle/force-settle, payment splits, edge cases)
-- 11 ZKSettlement tests (deposit, proof verification, payment distribution)
-- 19 SlashingOracle tests (progressive slashing, evidence verification, bandwidth fraud)
+157+ tests should pass across 18 test files:
+- NodeRegistry, SessionSettlement, ZKSettlement, SlashingOracle, ChallengeManager
+- CommitmentTree, EligibilityVerifier, ExecutionTraceVerifier, RelayProofVerifier
+- Invariant fuzz tests for cross-contract interactions
+- Test helpers in `test/helpers/TestKeys.sol`
 
 ### Deploy Contracts (Sepolia Testnet)
 
@@ -279,9 +290,9 @@ Development is organized into 6 phases. See **[ROADMAP.md](ROADMAP.md)** for the
 | **1. Single-Hop Tunnel (MVP)** | Working relay, contracts, client app | Complete |
 | **2. Multi-Hop + Onion Routing** | 3-node circuits, Sphinx encryption, auto-rotation | Complete |
 | **3. Staking + Slashing** | Cryptoeconomic security, progressive slashing, scoring | Complete |
-| **4. Economic Hardening + ZK** | ZK settlement, PQ handshake, anti-griefing, anti-collusion | In progress — ZK + PQ + economics done, diversity constraints next |
-| **5. Mainnet Launch** | Audits, TEE attestation, reproducible builds, deploy | Planned |
-| **6. Decentralization** | ZK-VM proofs, challenge bonds, mobile, dummy Merkle tree | Research |
+| **4. Economic Hardening + ZK** | ZK settlement, PQ handshake, anti-griefing, anti-collusion | Complete |
+| **5. Mainnet Launch** | Audits, hardening, TUN integration, WalletConnect, deploy | In progress |
+| **6. Decentralization** | ZK-VM proofs, challenge bonds, mobile, dummy Merkle tree | Partial (ZK-VM + challenge bonds done) |
 
 ## What ShieldNode Does Not Do
 
