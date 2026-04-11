@@ -212,6 +212,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ── UPnP port mapping ──────────────────────────────────────────────
+
+    if cfg.upnp_enabled {
+        let mappings = network::nat::relay_port_mappings(
+            cfg.listen_port,
+            cfg.relay_port,
+            cfg.libp2p_port,
+        );
+        match network::nat::attempt_upnp_mappings(&mappings).await {
+            Ok(external_ip) => {
+                info!(external_ip = %external_ip, "UPnP port mappings established");
+            }
+            Err(e) => {
+                warn!(error = %e, "UPnP unavailable — ensure ports are manually forwarded");
+            }
+        }
+    }
+
     // ── normal startup ────────────────────────────────────────────────
 
     info!(

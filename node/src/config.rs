@@ -87,6 +87,14 @@ pub struct NodeConfig {
     /// Batch window in milliseconds (packets collected then shuffled and sent).
     #[serde(default = "default_batch_window_ms")]
     pub batch_window_ms: u64,
+
+    /// Attempt UPnP/IGD port mapping on startup for NAT traversal.
+    #[serde(default = "default_upnp_enabled")]
+    pub upnp_enabled: bool,
+}
+
+fn default_upnp_enabled() -> bool {
+    true
 }
 
 // ── serde default helpers ──────────────────────────────────────────────
@@ -159,6 +167,7 @@ impl Default for NodeConfig {
             link_padding_pps: default_link_padding_pps(),
             batch_reorder_enabled: false,
             batch_window_ms: default_batch_window_ms(),
+            upnp_enabled: default_upnp_enabled(),
         }
     }
 }

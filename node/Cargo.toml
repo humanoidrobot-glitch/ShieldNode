@@ -46,4 +46,5 @@ ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }  # FIPS 203 — TO
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 futures = "0.3"
+igd-next = "0.17"
 tun-rs = { version = "2", features = ["async"] }

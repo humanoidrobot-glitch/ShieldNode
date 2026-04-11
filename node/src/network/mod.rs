@@ -8,6 +8,7 @@ pub mod eip712;
 pub mod heartbeat;
 pub mod hop_codec;
 pub mod link_padding;
+pub mod nat;
 pub mod receipts;
 pub mod relay;
 pub mod relay_listener;
