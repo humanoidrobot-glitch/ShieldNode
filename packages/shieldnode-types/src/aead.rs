@@ -5,6 +5,13 @@
 /// session key used for forward-path traffic.
 pub const RETURN_NONCE_OFFSET: u64 = 0x8000_0000_0000_0000;
 
+/// Direction bit: MSB of session_id in wire framing.
+/// Forward = 0 (client → exit), Return = 1 (exit → client).
+pub const RETURN_DIRECTION_BIT: u64 = 0x8000_0000_0000_0000;
+
+/// Mask to clear the direction bit from a session_id.
+pub const SESSION_ID_MASK: u64 = !RETURN_DIRECTION_BIT;
+
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,

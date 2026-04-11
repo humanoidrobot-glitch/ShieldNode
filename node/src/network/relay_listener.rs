@@ -19,11 +19,9 @@ use super::nat_table::{self, NatTable};
 use super::receipts;
 use super::relay::{RelayService, SessionState};
 
-use shieldnode_types::aead::{self as shared_aead, RETURN_NONCE_OFFSET};
-
-/// Direction bit: MSB of session_id in wire framing.
-/// 0 = forward (client → exit), 1 = return (exit → client).
-const RETURN_DIRECTION_BIT: u64 = 0x8000_0000_0000_0000;
+use shieldnode_types::aead::{
+    self as shared_aead, RETURN_DIRECTION_BIT, RETURN_NONCE_OFFSET, SESSION_ID_MASK,
+};
 
 /// Minimum packet size: 8-byte session_id + at least 1 byte of payload.
 const MIN_PACKET_SIZE: usize = 8 + 1;
@@ -216,7 +214,7 @@ impl RelayListener {
 
         // Check direction bit.
         let is_return = (raw_session_id & RETURN_DIRECTION_BIT) != 0;
-        let session_id = raw_session_id & !RETURN_DIRECTION_BIT;
+        let session_id = raw_session_id & SESSION_ID_MASK;
 
         if is_return {
             self.handle_return_packet(session_id, &packet_data[8..], peer_addr).await;
@@ -239,10 +237,16 @@ impl RelayListener {
             }
         };
 
-        // Record prev_hop for return path routing.
+        // Record prev_hop on first packet only (read-check avoids write lock after that).
         {
-            let mut svc = self.relay_service.write().await;
-            svc.set_prev_hop(session_id, peer_addr);
+            let needs_write = {
+                let svc = self.relay_service.read().await;
+                svc.get_session(session_id).map_or(false, |s| s.prev_hop.is_none())
+            };
+            if needs_write {
+                let mut svc = self.relay_service.write().await;
+                svc.set_prev_hop(session_id, peer_addr);
+            }
         }
 
         // Peel one layer.
@@ -277,20 +281,40 @@ impl RelayListener {
 
     /// Handle a return-path packet: wrap one encryption layer and forward to prev_hop.
     async fn handle_return_packet(&self, session_id: u64, payload: &[u8], _from: SocketAddr) {
+        self.wrap_and_send_return(session_id, payload).await;
+    }
+
+    /// Handle a TUN response: look up session via NAT table, wrap, and send back.
+    async fn handle_tun_response(&self, ip_packet: &[u8]) {
+        let flow = match nat_table::extract_inbound_flow(ip_packet) {
+            Some(f) => f,
+            None => return,
+        };
+
+        let session_id = {
+            let nat = self.nat_table.lock().expect("nat_table lock");
+            match nat.lookup(&flow) {
+                Some(id) => id,
+                None => return,
+            }
+        };
+
+        self.wrap_and_send_return(session_id, ip_packet).await;
+    }
+
+    /// Encrypt a return-path payload with this hop's session key and send to prev_hop.
+    async fn wrap_and_send_return(&self, session_id: u64, payload: &[u8]) {
         let (prev_hop, session_key, hop_index) = {
             let svc = self.relay_service.read().await;
             match svc.get_session(session_id) {
                 Some(s) => match s.prev_hop {
                     Some(addr) => (addr, s.session_key, s.hop_index),
                     None => {
-                        warn!(session_id, "return packet but no prev_hop recorded");
+                        debug!(session_id, "return packet but no prev_hop recorded");
                         return;
                     }
                 },
-                None => {
-                    debug!(session_id, "return packet for unknown session");
-                    return;
-                }
+                None => return,
             }
         };
 
@@ -309,53 +333,6 @@ impl RelayListener {
 
         if let Err(e) = self.socket.send_to(&frame, prev_hop).await {
             warn!(session_id, prev_hop = %prev_hop, error = %e, "failed to send return packet");
-        }
-    }
-
-    /// Handle a TUN response: look up session via NAT table, wrap, and send back.
-    async fn handle_tun_response(&self, ip_packet: &[u8]) {
-        let flow = match nat_table::extract_inbound_flow(ip_packet) {
-            Some(f) => f,
-            None => return,
-        };
-
-        let session_id = {
-            let nat = self.nat_table.lock().expect("nat_table lock");
-            match nat.lookup(&flow) {
-                Some(id) => id,
-                None => {
-                    debug!("TUN response has no NAT mapping, dropping");
-                    return;
-                }
-            }
-        };
-
-        let (prev_hop, session_key, hop_index) = {
-            let svc = self.relay_service.read().await;
-            match svc.get_session(session_id) {
-                Some(s) => match s.prev_hop {
-                    Some(addr) => (addr, s.session_key, s.hop_index),
-                    None => return,
-                },
-                None => return,
-            }
-        };
-
-        // Encrypt with this hop's return-path nonce.
-        let return_nonce = hop_index + RETURN_NONCE_OFFSET;
-        let wrapped = match shared_aead::encrypt(&session_key, return_nonce, ip_packet) {
-            Ok(ct) => ct,
-            Err(_) => return,
-        };
-
-        let mut frame = Vec::with_capacity(8 + wrapped.len());
-        frame.extend_from_slice(&(session_id | RETURN_DIRECTION_BIT).to_be_bytes());
-        frame.extend_from_slice(&wrapped);
-
-        if let Err(e) = self.socket.send_to(&frame, prev_hop).await {
-            warn!(session_id, error = %e, "failed to send TUN return packet");
-        } else {
-            debug!(session_id, bytes = ip_packet.len(), "return: TUN → prev_hop");
         }
     }
 

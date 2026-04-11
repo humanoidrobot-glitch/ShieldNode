@@ -20,9 +20,6 @@ use crate::tun::ClientTun;
 
 use shieldnode_types::aead::RETURN_NONCE_OFFSET;
 
-/// Direction bit matching the relay node's RETURN_DIRECTION_BIT.
-const RETURN_DIRECTION_BIT: u64 = 0x8000_0000_0000_0000;
-
 /// Build a Sphinx-wrapped relay frame for an outbound IP packet.
 ///
 /// Uses the circuit's pre-built Sphinx route. Wire format:

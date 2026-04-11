@@ -408,3 +408,17 @@ Switching from `keccak256(abi.encode(addr, amount))` to `PoseidonT3.hash(...)` f
 **Why deferred:** Only two contracts, values are stable. Extracting to `contracts/src/lib/Constants.sol` is trivial but low priority.
 
 **When to fix:** With the shared base contract extraction pass.
+
+---
+
+## Sphinx AEAD Nonce Reuse (identified April 10, 2026 review)
+
+### Static hop_index nonce used for all packets in a session
+Both forward-path (`SphinxPacket::create`) and return-path (`wrap_and_send_return`) use `hop_index` (or `hop_index + RETURN_NONCE_OFFSET`) as the AEAD nonce. This nonce is the same for every packet in the session at the same hop — meaning every packet at hop 0 is encrypted with `(session_key_0, nonce=0)`.
+
+ChaCha20-Poly1305 requires unique nonces per encryption under the same key. Reusing `(key, nonce)` with different plaintexts leaks the XOR of plaintexts.
+
+**Why not critical now:** The micro-ratcheting system (Phase 5) rekeys session keys every 30 seconds or 10MB, limiting the nonce-reuse window. Circuit rotation (default 10 minutes) also refreshes keys. An attacker would need to capture traffic AND break the session key within the ratchet window to exploit the XOR leak. The ratcheting system was specifically designed to mitigate this class of issue.
+
+**When to fix:** Before Phase 5 mainnet launch. Replace the static `hop_index` nonce with a per-packet atomic counter per session per hop. Each `SessionState` should maintain a `nonce_counter: AtomicU64` that increments on every encrypt/decrypt. The counter value replaces `hop_index` in the AEAD nonce.
+
